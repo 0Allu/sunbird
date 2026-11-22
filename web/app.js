@@ -1,6 +1,5 @@
 import { PROXY as DEFAULT_PROXY, VERIFIED } from './config.js';
 import { buildPatchedApk } from './lib/apk.js';
-import { newIdentity } from './lib/sign.js';
 import { readZip } from './lib/zip.js';
 
 const TRACKER = 'https://tracker.vendetta.rocks';
@@ -23,15 +22,11 @@ function setVersions(latest) {
 setVersions();
 fetch(`${TRACKER}/tracker/index`).then((r) => r.json()).then((j) => setVersions(j.latest?.alpha)).catch(() => {});
 
-// --- signing identity, kept so re-patched builds install as updates -----------------------
-const b64 = (u8) => btoa(String.fromCharCode(...u8));
+// --- one fixed signing key for every build, so each patched APK installs as an update -----
 const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 async function identity() {
-  const saved = localStorage.getItem('phoenix-unlock-key');
-  if (saved) { const j = JSON.parse(saved); return { pkcs8: unb64(j.pkcs8), spki: unb64(j.spki), cert: unb64(j.cert) }; }
-  const id = await newIdentity();
-  localStorage.setItem('phoenix-unlock-key', JSON.stringify({ pkcs8: b64(id.pkcs8), spki: b64(id.spki), cert: b64(id.cert) }));
-  return id;
+  const j = await (await fetch('signing-key.json')).json();
+  return { pkcs8: unb64(j.pkcs8), spki: unb64(j.spki), cert: unb64(j.cert) };
 }
 
 // --- progress UI -------------------------------------------------------------------------
@@ -97,6 +92,18 @@ function fail(e) {
   $('go').disabled = false;
 }
 
+// The tracker only mirrors some density splits per build (356207: hdpi and xxhdpi), so fall back
+// to the nearest one it has. Any density works; Android scales the drawables.
+async function downloadDensity(vc) {
+  const want = DENSITIES.find(([n]) => n === $('dpi').value)[1];
+  const order = [...DENSITIES].sort((a, b) => Math.abs(a[1] - want) - Math.abs(b[1] - want) || b[1] - a[1]);
+  for (const [n] of order) {
+    const buf = await download(vc, `config.${n}`, true);
+    if (buf) return buf;
+  }
+  throw new Error('this build has no density split on the tracker');
+}
+
 $('go').onclick = async () => {
   const vc = +$('ver').value;
   $('go').disabled = true; $('err').hidden = true; $('result').hidden = true;
@@ -106,7 +113,7 @@ $('go').onclick = async () => {
     const n = splitNames();
     const base = await download(vc, 'base');
     const abi = await download(vc, n.abi);
-    const configs = [await download(vc, n.density), n.lang && (await download(vc, n.lang, true))].filter(Boolean);
+    const configs = [await downloadDensity(vc), n.lang && (await download(vc, n.lang, true))].filter(Boolean);
     await patchAndOffer(vc, base, abi, configs);
     $('go').disabled = false;
   } catch (e) {

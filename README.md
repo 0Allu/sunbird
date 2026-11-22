@@ -29,13 +29,22 @@ one APK and signs it, all in the browser, so Android can install it with a singl
 - `arsc.js`: merges the density and language splits' `resources.arsc` into base's.
 - `zip.js`: copies unchanged entries without recompressing them and aligns stored entries
   (`.so` to 16 KiB).
-- `sign.js`: APK Signature Scheme v2 with WebCrypto RSA-2048 and a self-signed certificate.
-  The key is kept in `localStorage`, so patched updates install over the previous build.
+- `sign.js`: APK Signature Scheme v2 with WebCrypto, RSA-2048.
+
+**Signing:** every build is signed with the one key in `web/signing-key.json`, whether it
+comes from the site, `node-build` or `patch.py`. So any patched build installs over the
+previous one as an update and you stay logged in. The key is public (the page signs in the
+browser), which means anyone can produce an APK that installs over this one.
 
 The APKs come from `tracker.vendetta.rocks`, which redirects to Google's CDN. The CDN sends
-no CORS headers, so automatic download needs the small proxy in `web/worker/proxy.js`
-(Cloudflare Worker), with its URL set in `web/config.js` or passed as `?proxy=`. Without
-the proxy, the page falls back to a manual mode: it links each split and the user picks
+no CORS headers, so the page downloads through `web/worker/proxy.js`, a Cloudflare Worker
+deployed at `https://phoenix-apk-proxy.mantikafasi.workers.dev`. It only forwards
+`/tracker/index` and `/tracker/download/<vc>/<split>`. Redeploy it with
+`npx wrangler deploy web/worker/proxy.js --name phoenix-apk-proxy --compatibility-date 2026-11-01`.
+The URL is set in `web/config.js`, or can be overridden with `?proxy=`. The tracker only
+mirrors some density splits (for 356207, only hdpi and xxhdpi), so the page falls back to
+the nearest one it has. If downloads are blocked, the page switches to a manual mode: it
+links each split and the user picks
 the downloaded files.
 
 Local test, using the same code as the page:
@@ -56,7 +65,7 @@ apksigner), and the NDK (clang and lld, used to assemble the staff hook).
 
 ```sh
 # splits from https://tracker.vendetta.rocks/tracker/download/<versionCode>/<split>
-python patcher/patch.py --ks key.jks --pass PASS --out out     base.apk config.arm64_v8a.apk config.xxhdpi.apk config.en.apk
+python patcher/patch.py --out out base.apk config.arm64_v8a.apk config.xxhdpi.apk config.en.apk
 adb uninstall com.discord            # the signature differs from the Play build
 adb install-multiple out/*.apk
 ```

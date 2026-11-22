@@ -1,10 +1,15 @@
 """Patch a set of Discord split APKs (base + config.* splits) and re-sign them.
 
-usage: python patch.py --ks key.jks --pass PASS --out OUTDIR base.apk config.arm64_v8a.apk [config.*.apk ...]
+usage: python patch.py --out OUTDIR base.apk config.arm64_v8a.apk [config.*.apk ...]
+
+Signed with web/signing-key.json, the same key the web patcher uses, so every build updates in place.
 
 Then: adb install-multiple OUTDIR/*.apk   (uninstall the Play-signed com.discord first)
 """
 import argparse
+import base64
+import json
+import tempfile
 import os
 import re
 import subprocess
@@ -40,20 +45,26 @@ def rewrite(src, dst, edit):
     return changed
 
 
-def align_sign(unsigned, out, ks, pw):
+KEY_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'web', 'signing-key.json')
+
+
+def align_sign(unsigned, out, key_dir):
     aligned = unsigned + '.aligned'
     subprocess.run([os.path.join(BT, 'zipalign' + ('.exe' if os.name == 'nt' else '')), '-p', '-f', '4', unsigned, aligned], check=True)
-    subprocess.run([os.path.join(BT, 'apksigner' + EXE), 'sign', '--ks', ks, '--ks-pass', f'pass:{pw}',
-                    '--key-pass', f'pass:{pw}', '--out', out, aligned], check=True)
+    subprocess.run([os.path.join(BT, 'apksigner' + EXE), 'sign', '--key', os.path.join(key_dir, 'key.pk8'),
+                    '--cert', os.path.join(key_dir, 'cert.der'), '--out', out, aligned], check=True)
     os.remove(unsigned); os.remove(aligned)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--ks', required=True); ap.add_argument('--pass', dest='pw', required=True)
     ap.add_argument('--out', required=True); ap.add_argument('apks', nargs='+')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
+    key = json.load(open(KEY_JSON))
+    key_dir = tempfile.mkdtemp()
+    open(os.path.join(key_dir, 'key.pk8'), 'wb').write(base64.b64decode(key['pkcs8']))
+    open(os.path.join(key_dir, 'cert.der'), 'wb').write(base64.b64decode(key['cert']))
     did = {'dex': False, 'so': []}
 
     def edit(name, data):
@@ -73,7 +84,7 @@ def main():
         name = os.path.basename(apk)
         tmp = os.path.join(a.out, name + '.tmp')
         rewrite(apk, tmp, edit)
-        align_sign(tmp, os.path.join(a.out, name), a.ks, a.pw)
+        align_sign(tmp, os.path.join(a.out, name), key_dir)
         print(f'signed {name}')
     if not did['dex'] or not did['so']:
         sys.exit(f'incomplete: dex patched={did["dex"]}, so patched for {did["so"]} (pass base.apk and the ABI split)')
