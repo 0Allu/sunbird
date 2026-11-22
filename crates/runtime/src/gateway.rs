@@ -8,7 +8,9 @@ use std::{
    slice,
    str,
    sync::{
+      Mutex,
       OnceLock,
+      PoisonError,
       atomic::{
          AtomicBool,
          Ordering,
@@ -46,6 +48,11 @@ struct Gateway {
 }
 
 static GATEWAY: OnceLock<Gateway> = OnceLock::new();
+/// Events plugins fed Phoenix from outside a hook. They run on the store
+/// thread ahead of the next event Phoenix handles, since only a handler call
+/// carries the store.
+static QUEUE: Mutex<Vec<(EventId, String)>> = Mutex::new(Vec::new());
+static QUEUED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
    #[allow(
@@ -190,6 +197,41 @@ pub fn dispatch(event: EventId, data: &str) -> Option<bool> {
    Some(result.is_ok())
 }
 
+/// Runs `data` through Phoenix's own handler for `event` ahead of the next
+/// event Phoenix handles.
+pub fn enqueue(event: EventId, data: String) {
+   QUEUE
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .push((event, data));
+   QUEUED.store(true, Ordering::Release);
+}
+
+fn flush(gateway: &Gateway, store: *mut c_void, ctx: *mut c_void, rest: [u64; 4]) {
+   let queued = std::mem::take(&mut *QUEUE.lock().unwrap_or_else(PoisonError::into_inner));
+   for (event, data) in queued {
+      let name = &gateway.registry.entry(event).name;
+      let synthetic = GatewayEvent {
+         name: RawStr {
+            ptr: name.as_ptr(),
+            len: name.len(),
+         },
+         data: RawStr {
+            ptr: data.as_ptr(),
+            len: data.len(),
+         },
+         rest,
+      };
+      // SAFETY: `store` and `ctx` are the arguments of the handler call this
+      // runs inside, and the event borrows strings that outlive the call.
+      let original = gateway.originals[event.index()];
+      if unsafe { original(store, &raw const synthetic, ctx) }.is_ok() {
+         continue;
+      }
+      log::warn!("Phoenix rejected a queued {name}");
+   }
+}
+
 /// Routes `event` through the plugins.
 pub fn install(event: EventId) {
    let gateway = GATEWAY
@@ -222,6 +264,9 @@ unsafe extern "C" fn detour(
       .expect("slots point here only after GATEWAY is set");
    // SAFETY: the host passes a live event for the duration of the call.
    let event = unsafe { &*event };
+   if QUEUED.swap(false, Ordering::AcqRel) {
+      flush(gateway, store, ctx, event.rest);
+   }
    // SAFETY: name and data are borrowed strings that outlive the call.
    let (name, data) = unsafe { (text(event.name), text(event.data)) };
    let Some((id, name)) = name.and_then(|name| Some((gateway.registry.id(name)?, name))) else {

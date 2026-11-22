@@ -695,6 +695,22 @@ fn api<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
       )?,
    )?;
 
+   api.set(
+      "enqueue",
+      Function::new(
+         ctx.clone(),
+         |ctx: Ctx<'js>, sig: Value<'js>, payload: Value<'js>| {
+            let event = event_of(&ctx, &sig)?;
+            let json = ctx
+               .json_stringify(payload)?
+               .ok_or_else(|| Exception::throw_type(&ctx, "enqueue needs a JSON payload"))?
+               .to_string()?;
+            gateway::enqueue(event, json);
+            Ok::<_, rquickjs::Error>(())
+         },
+      )?,
+   )?;
+
    api.set("log", log_object(ctx, plugin)?)?;
    api.set("storage", storage(ctx, plugin)?)?;
    let settings = Object::new(ctx.clone())?;

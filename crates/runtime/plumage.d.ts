@@ -929,6 +929,9 @@ declare namespace Plumage {
     /// Feeds `payload` to the client's own handler for `sig`, skipping every plugin. Works only
     /// while a gateway hook runs, and throws elsewhere. Returns whether the handler accepted it.
     dispatch<P>(sig: Sig<P>, payload: Partial<P>): boolean;
+    /// Like `dispatch`, for use outside a gateway hook. The payload reaches the client's handler
+    /// just before the next gateway event it handles, usually well under a second later.
+    enqueue<P>(sig: Sig<P>, payload: Partial<P>): void;
     readonly log: Log;
     readonly storage: Storage;
     readonly settings: Settings;
