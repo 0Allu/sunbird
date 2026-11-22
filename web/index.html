@@ -79,7 +79,7 @@
   <section class="card" id="jsp">
     <p class="note"><b>Include</b></p>
     <div id="jsp-bundled"></div>
-    <p class="note"><b>Your plugins</b> run next to the ones above (the global <code>phoenix</code> API, plain scripts; types in <a href="https://github.com/mantikafasi/phoenix-unlock/blob/rust/crates/runtime/phoenix.d.ts">phoenix.d.ts</a>). Leading <code>// @description</code>, <code>// @version</code> and <code>// @author</code> lines describe it in Discord Settings → Phoenix; a file is named after itself. Optional: pick .js files and/or write one below.</p>
+    <p class="note"><b>Your plugins</b> run next to the ones above (the global <code>phoenix</code> API, plain scripts; types in <a href="https://github.com/mantikafasi/phoenix-unlock/blob/main/crates/runtime/phoenix.d.ts">phoenix.d.ts</a>). Leading <code>// @description</code>, <code>// @version</code> and <code>// @author</code> lines describe it in Discord Settings → Phoenix; a file is named after itself. Optional: pick .js files and/or write one below.</p>
     <input type="file" id="jsp-files" multiple accept=".js,text/javascript">
     <textarea id="jsp-code" rows="8" spellcheck="false" aria-label="Your plugin" placeholder="// @description Logs incoming messages (adb logcat -s phoenix)
 phoenix.on(phoenix.gateway.messageCreate, (m) => phoenix.log.info(m.author?.username, ':', m.content));"></textarea>

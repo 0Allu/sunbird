@@ -120,8 +120,9 @@ fetchOk('plugins/index.json').then((r) => r.json()).then((list) => {
   for (const p of list) {
     const l = document.createElement('label');
     l.className = 'plugin';
-    l.innerHTML = '<input type="checkbox" checked><b></b><span></span>';
+    l.innerHTML = '<input type="checkbox"><b></b><span></span>';
     l.querySelector('input').value = p.name;
+    l.querySelector('input').checked = p.name !== 'example'; // a demo of the API: opt-in
     l.querySelector('b').textContent = p.name;
     l.querySelector('span').textContent = p.description;
     $('jsp-bundled').append(l);

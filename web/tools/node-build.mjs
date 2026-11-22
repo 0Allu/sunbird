@@ -1,7 +1,7 @@
 // Build a patched APK from local split files with the same code, libraries, plugins and keys the web page uses.
 // usage: node web/tools/node-build.mjs [--package com.x --label Name] [--plugins a,b] [--js my.js,b.js] [--no-runtime] [--frida [--script f.js,g.js]] out.apk base.apk config.arm64_v8a.apk [config.*.apk ...]
 //        node web/tools/node-build.mjs --splits [same options but --package/--label] outdir base.apk config.arm64_v8a.apk [config.*.apk ...]
-// --plugins picks bundled plugins by name (web/plugins/index.json, default all, '' for none); --js adds your own
+// --plugins picks bundled plugins by name (web/plugins/index.json, default all but example, '' for none); --js adds your own
 // (named after the file). --no-runtime leaves the plugin runtime out (only the access patches). --frida embeds
 // frida-gadget running --script files (default web/plugins/frida-example.js). --splits patches and signs every
 // split on its own, as crates/patcher does.
@@ -30,7 +30,7 @@ const abiName = abiOf(readZip(files[abiIndex][1]));
 console.log(`ABI: ${abiName}`);
 const libraries = Object.entries(ABIS[abiName].libs).map(([name, file]) => ({ name, bytes: read(web(file)) }));
 const bundled = JSON.parse(readFileSync(web('plugins/index.json'), 'utf8')).map((p) => p.name);
-const picked = opt.plugins === undefined ? bundled : opt.plugins.split(',').filter(Boolean);
+const picked = opt.plugins === undefined ? bundled.filter((p) => p !== 'example') : opt.plugins.split(',').filter(Boolean);
 for (const p of picked) if (!bundled.includes(p)) { console.error(`unknown plugin ${p} (bundled: ${bundled.join(', ')})`); process.exit(1); }
 const plugins = !runtime ? null : picked.map((name) => ({ name, source: readFileSync(web(`plugins/${name}.js`), 'utf8') }))
   .concat((opt.js ?? '').split(',').filter(Boolean).map((f) => ({ name: basename(f).replace(/\.[^.]*$/, ''), source: readFileSync(f, 'utf8') })));
