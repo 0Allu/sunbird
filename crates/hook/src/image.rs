@@ -302,37 +302,43 @@ impl Image<'_> {
    /// pointers to strings. Images without a search table fall back to it.
    #[must_use]
    pub fn is_function(&self, addr: usize) -> bool {
+      if self.eh_frame_hdr.is_none() {
+         return self.is_code(addr);
+      }
+      self.function_containing(addr) == Some(addr)
+   }
+
+   /// Start of the last FDE in `.eh_frame_hdr`'s search table at or below
+   /// `addr`. The table holds starts only, so an address past a function's end
+   /// still maps to it.
+   #[must_use]
+   pub fn function_containing(&self, addr: usize) -> Option<usize> {
       const UDATA4: u8 = 0x03;
       const SDATA4: u8 = 0x0B;
       const DATAREL_SDATA4: u8 = 0x3B;
 
-      let Some(hdr) = self.eh_frame_hdr else {
-         return self.is_code(addr);
-      };
-      let Some(&[1, frame_encoding, UDATA4, DATAREL_SDATA4]) = self.read(hdr, 4) else {
-         return false;
+      let hdr = self.eh_frame_hdr?;
+      let &[1, frame_encoding, UDATA4, DATAREL_SDATA4] = self.read(hdr, 4)? else {
+         return None;
       };
       if !matches!(frame_encoding & 0x0F, UDATA4 | SDATA4) {
-         return false;
+         return None;
       }
 
       let word = |at: usize| Some(i32::from_ne_bytes(self.read(at, 4)?.try_into().ok()?));
       let start = |index: usize| {
          word(hdr + 12 + index * 8).and_then(|rel| hdr.checked_add_signed(rel as isize))
       };
-      let Some(count) = word(hdr + 8).and_then(|count| usize::try_from(count).ok()) else {
-         return false;
-      };
+      let count = usize::try_from(word(hdr + 8)?).ok()?;
       let (mut low, mut high) = (0, count);
       while low < high {
          let mid = low + (high - low) / 2;
-         match start(mid) {
-            Some(found) if found == addr => return true,
-            Some(found) if found < addr => low = mid + 1,
-            Some(_) => high = mid,
-            None => return false,
+         if start(mid)? <= addr {
+            low = mid + 1;
+         } else {
+            high = mid;
          }
       }
-      false
+      start(low.checked_sub(1)?)
    }
 }
