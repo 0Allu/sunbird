@@ -1,5 +1,7 @@
 import { PROXY as DEFAULT_PROXY, VERIFIED } from './config.js';
 import { buildPatchedApk } from './lib/apk.js';
+import { BOOTSTRAP_URL, bundleScripts, GADGET_URL, gunzip } from './lib/frida.js';
+import { PLUGINS } from './lib/plugins.js';
 import { readZip } from './lib/zip.js';
 
 const TRACKER = 'https://tracker.vendetta.rocks';
@@ -73,10 +75,13 @@ function splitNames() {
 }
 
 async function patchAndOffer(vc, base, abi, configs) {
+  const plugins = [...document.querySelectorAll('#plugins input:checked')].map((i) => i.value);
+  const frida = plugins.includes('frida') ? await fridaInput() : null;
   const s = step('Patch and sign');
   s.progress(0.5, 'working…');
   const packageName = chosenPackage(), side = packageName !== 'com.discord';
-  const parts = await buildPatchedApk({ base, abi, configs, identity: await identity(), packageName, label: side ? 'Discord Phoenix' : null, log });
+  const pluginLib = plugins.length ? new Uint8Array(await (await fetch('plugins/libplg-arm64.so')).arrayBuffer()) : null;
+  const parts = await buildPatchedApk({ base, abi, configs, identity: await identity(), packageName, label: side ? 'Discord Phoenix' : null, plugins, pluginLib, frida, log });
   const blob = new Blob(parts, { type: 'application/vnd.android.package-archive' });
   s.done(mb(blob.size));
   $('note-side').hidden = !side; $('note-replace').hidden = side;
@@ -104,6 +109,35 @@ async function downloadDensity(vc) {
     if (buf) return buf;
   }
   throw new Error('this build has no density split on the tracker');
+}
+
+// --- plugins ------------------------------------------------------------------------------
+for (const p of PLUGINS) {
+  const l = document.createElement('label');
+  l.className = 'plugin';
+  l.innerHTML = '<input type="checkbox"><b></b><span></span>';
+  l.querySelector('input').value = p.id;
+  l.querySelector('b').textContent = p.name;
+  l.querySelector('span').textContent = p.description;
+  $('plugins').append(l);
+}
+
+// Frida: JS plugins from picked files and the editor (prefilled with the example), bundled into one script
+const fridaBox = document.querySelector('#plugins input[value=frida]');
+fridaBox.onchange = () => { $('frida').hidden = !fridaBox.checked; };
+fetch('plugins/frida-example.js').then((r) => r.text()).then((t) => { if (!$('frida-code').value) $('frida-code').value = t; }).catch(() => {});
+async function fridaInput() {
+  const scripts = await Promise.all([...$('frida-files').files].map(async (f) => ({ name: f.name, code: await f.text() })));
+  const code = $('frida-code').value.trim();
+  if (code) scripts.push({ name: 'editor.js', code });
+  const script = bundleScripts(scripts, await (await fetch(BOOTSTRAP_URL)).text());
+  const s = step('Download frida-gadget');
+  const res = await fetch(GADGET_URL);
+  if (!res.ok) { s.fail(`HTTP ${res.status}`); throw new Error(`frida-gadget: HTTP ${res.status}`); }
+  const gadget = await gunzip(new Uint8Array(await res.arrayBuffer()));
+  s.done(mb(gadget.length));
+  log(`Frida: ${scripts.map((x) => x.name).join(', ')}`);
+  return { gadget, script };
 }
 
 // --- package name: "Replace" keeps com.discord, "Next to" uses the editable name ---------

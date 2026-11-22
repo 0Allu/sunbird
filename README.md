@@ -64,6 +64,23 @@ Verified on 356207 arm64 (Android 16). The APK built in the browser is byte-iden
 the Node build. It installs and runs: Phoenix reaches READY in 3.1 s, chat loads, and
 drawables render. The whole page flow also runs in the phone's own Chrome in about 30 s.
 
+### Plugins
+
+Optional, ticked on the page. The patcher renames the host lib's `DT_NEEDED` `liblog.so` to
+`libplg.so` (`plugin/plugin.c`, prebuilt in `web/plugins/`, rebuild with `plugin/build.sh`) and
+writes the offsets it found in this build into libplg's config block.
+
+- **MessageLogger** (`plugin/msglog.c`): swaps the gateway registry's MESSAGE_* handlers. Deleted
+  messages stay, marked "(deleted)"; edits keep the earlier text above the new one.
+- **Frida (JS plugins)**: chains frida-gadget 17.27.4 (`libfrg.so`, wxWindows Library Licence)
+  in as libplg's dependency, in script mode, so the app starts without a PC. The bootstrap
+  (`frida/bootstrap.js`, built into `web/plugins/frida-bootstrap.js` by `frida/build.sh`) runs
+  the plugins from `files/phoenix-plugins/`; ones picked on the page are copied there on first
+  start. A draggable **JS** button on every screen opens the panel: plugin list, add from URL,
+  reload, a JS prompt and the console. The panel also has an optional debug shell on
+  127.0.0.1:27043 (token shown in the panel; `adb forward tcp:27043 tcp:27043`), which takes
+  one JSON per line: `{"id":1,"eval":"..."}`.
+
 ## APK patcher (Python, arm64 + x86_64)
 
 Requirements: Python 3 with `capstone` and `numpy`, Android build-tools (zipalign and

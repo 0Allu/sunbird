@@ -3,6 +3,8 @@ import { patchHostLib } from './arm64.js';
 import { mergeArsc } from './arsc.js';
 import { patchManifest } from './axml.js';
 import { patchDex } from './dex.js';
+import { fridaFiles } from './frida.js';
+import { configurePlugins } from './plugins.js';
 import { signV2 } from './sign.js';
 import { crc32, entryData, readZip, storedEntry, writeZip } from './zip.js';
 
@@ -17,9 +19,14 @@ const SKIP = (n) => V1_SIG.test(n) || n === 'stamp-cert-sha256';
  * @param identity               {pkcs8, spki, cert} (web/signing-key.json)
  * @param packageName            install under another package (next to the original); default com.discord
  * @param label                  launcher name, e.g. when renamed
+ * @param plugins                plugin ids to enable (see plugins.js)
+ * @param pluginLib              libplg.so for arm64 (needed when plugins are enabled)
+ * @param frida                  {gadget, script} for the 'frida' plugin: frida-gadget .so and the bundled JS (frida.js)
  * @returns {Promise<Uint8Array[]>} parts of the signed APK (new Blob(parts))
  */
-export async function buildPatchedApk({ base, abi, configs = [], identity, packageName = 'com.discord', label = null, log = () => {} }) {
+export async function buildPatchedApk({ base, abi, configs = [], identity, packageName = 'com.discord', label = null, plugins = [], pluginLib = null, frida = null, log = () => {} }) {
+  if (plugins.length && !pluginLib) throw new Error('plugins need libplg.so');
+  if (plugins.includes('frida') && !frida) throw new Error('the Frida plugin needs the gadget and a script');
   if (!/^[a-zA-Z][\w]*(\.[a-zA-Z][\w]*)+$/.test(packageName)) throw new Error(`invalid package name: ${packageName}`);
   const baseEntries = readZip(base).filter((e) => !SKIP(e.name));
   const abiEntries = readZip(abi);
@@ -54,7 +61,13 @@ export async function buildPatchedApk({ base, abi, configs = [], identity, packa
       if (e.method !== 0) throw new Error('host lib is compressed; expected stored');
       const data = e.raw; // patched in place inside the caller's split buffer (saves ~100 MB on phones)
       patchHostLib(data, (s) => log(`host lib: ${s}`));
+      const plug = plugins.length ? configurePlugins(data, pluginLib, plugins, log) : null;
       out.push({ ...e, raw: data, crc: crc32(data) });
+      if (plug) out.push(storedEntry('lib/arm64-v8a/libplg.so', plug));
+      if (plug && plugins.includes('frida')) {
+        for (const [n, d] of fridaFiles(frida.gadget, frida.script)) out.push(storedEntry(n, d));
+        log(`Frida: gadget ${(frida.gadget.length / 1048576).toFixed(1)} MB, script ${frida.script.length} chars`);
+      }
       soDone = true;
     } else out.push(e);
   }

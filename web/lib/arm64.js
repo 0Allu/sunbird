@@ -248,6 +248,40 @@ function hook(s) {
   ];
 }
 
+// --- plugin support ----------------------------------------------------------------------
+
+/** Handler-field offsets of the core gateway registry entries {name ptr, name len, handler}. */
+export function findRegistrySlots(u8, names) {
+  const e = new Elf(u8);
+  const text = e.sec['.text'], rel = e.relocs(), out = {};
+  for (const name of names) {
+    const hits = [];
+    for (const s of e.findStr(name))
+      for (const slot of e.slotsTo(s)) {
+        const fn = rel.get(slot + 16);
+        if (e.u64(slot + 8) === name.length && fn >= text.addr && fn < text.addr + text.size) hits.push(slot + 16);
+      }
+    out[name] = one(hits, `registry entry ${name}`);
+  }
+  return out;
+}
+
+/** Rename a DT_NEEDED entry in place (same length), e.g. liblog.so -> libplg.so. */
+export function renameNeeded(u8, from, to) {
+  if (from.length !== to.length) throw new Error('DT_NEEDED rename must keep the length');
+  const e = new Elf(u8), dyn = e.sec['.dynamic'], str = e.sec['.dynstr'];
+  for (let o = dyn.off; o < dyn.off + dyn.size; o += 16) {
+    const tag = Number(e.v.getBigInt64(o, true));
+    if (tag === 0) break;
+    if (tag !== 1) continue;
+    const at = str.off + Number(e.v.getBigUint64(o + 8, true));
+    const cur = new TextDecoder().decode(u8.subarray(at, at + from.length + 1));
+    if (cur === from + '\0') { u8.set(te.encode(to), at); return; }
+    if (cur === to + '\0') return; // already done
+  }
+  throw new Error(`DT_NEEDED ${from} not found`);
+}
+
 /** Patch in place. Returns a log of what was found. */
 export function patchHostLib(u8, log = () => {}) {
   const e = new Elf(u8);
