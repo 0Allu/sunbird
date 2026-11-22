@@ -1,9 +1,0 @@
-{
-  "name": "plumage-plugin-message-logger",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "build": "esbuild src/index.ts --bundle --format=iife --target=es2023 --outfile=dist/message-logger.js",
-    "check": "tsc --noEmit"
-  }
-}

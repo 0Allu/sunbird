@@ -6,7 +6,8 @@
     "strict": true,
     "noEmit": true,
     "lib": ["ES2023"],
-    "types": []
+    "types": [],
+    "moduleDetection": "force"
   },
-  "include": ["src", "../../crates/runtime/plumage.d.ts"]
+  "include": ["*/src", "../crates/runtime/plumage.d.ts"]
 }

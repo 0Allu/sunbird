@@ -1,9 +1,0 @@
-{
-  "name": "plumage-plugin-nsfw-gate-bypass",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "build": "esbuild src/index.ts --bundle --format=iife --target=es2023 --outfile=dist/nsfw-gate-bypass.js",
-    "check": "tsc --noEmit"
-  }
-}

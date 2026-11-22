@@ -1,3 +1,7 @@
+// @description Keeps deleted messages and edit history
+// @version 0.1.0
+// @author amaanq
+
 const { gateway } = plumage;
 
 const settings = plumage.settings.define({

@@ -25,10 +25,9 @@ def main [...apks: path] {
    let plugins = $root | path join target phoenix-plugins
    rm -rf $plugins
    for plugin in (ls plugins | where type == dir | get name | path basename) {
-      let package = open $"plugins/($plugin)/package.json"
-      let header = [description version author]
-         | where {|key| ($package | get -o $key) != null }
-         | each {|key| $"// @($key) ($package | get $key)" }
+      let header = open $"plugins/($plugin)/src/index.ts"
+         | lines
+         | take while {|line| $line starts-with "// @" }
          | str join (char nl)
       ^esbuild $"plugins/($plugin)/src/index.ts" --bundle --format=iife --target=es2023 --log-level=warning $"--banner:js=($header)" $"--outfile=($plugins)/($plugin).js"
    }

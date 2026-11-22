@@ -1,9 +1,0 @@
-{
-  "name": "plumage-plugin-hide-typing",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "build": "esbuild src/index.ts --bundle --format=iife --target=es2023 --outfile=dist/hide-typing.js",
-    "check": "tsc --noEmit"
-  }
-}

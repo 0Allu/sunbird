@@ -1,3 +1,7 @@
+// @description Lets the app open NSFW channels without age verification
+// @version 0.1.0
+// @author amaanq
+
 const { gateway } = plumage;
 
 const VERIFIED_ADULT = 3;

@@ -18,8 +18,7 @@
 
 !plugins/
 !plugins/*/
-!plugins/*/package.json
-!plugins/*/tsconfig.json
+!plugins/tsconfig.json
 !plugins/*/src/
 !plugins/*/src/**
 
