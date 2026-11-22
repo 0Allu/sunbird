@@ -8,6 +8,10 @@ use std::{
    fmt,
    path::Path,
    slice,
+   sync::atomic::{
+      AtomicUsize,
+      Ordering,
+   },
 };
 
 use memchr::memmem;
@@ -228,44 +232,59 @@ impl Image<'static> {
    /// Every slot is a pointer-aligned word in this module, and no thread reads
    /// a slot while it is written.
    pub unsafe fn swap_words(&self, writes: &[(usize, usize)]) -> Result<Vec<usize>, crate::Error> {
-      // SAFETY: sysconf has no preconditions.
-      let page_size = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap_or(4096);
-      let mut pages = writes
-         .iter()
-         .map(|&(slot, _)| slot & !(page_size - 1))
-         .collect::<Vec<usize>>();
-      pages.sort_unstable();
-      pages.dedup();
-
-      let maps = std::fs::read_to_string("/proc/self/maps")
-         .map_err(|source| crate::Error::Protect { addr: 0, source })?;
-      let restore = pages
-         .iter()
-         .map(|&page| Some((page, protection(&maps, page)?)))
-         .collect::<Option<Vec<(usize, c_int)>>>()
-         .ok_or_else(|| crate::Error::Unmapped { addr: pages.first().copied().unwrap_or(0) })?;
-      let protect = |page: usize, prot: c_int| {
-         // SAFETY: `page` is a mapped page of this module, from /proc/self/maps.
-         if unsafe { libc::mprotect(page as *mut c_void, page_size, prot) } == 0 {
-            Ok(())
-         } else {
-            Err(crate::Error::Protect { addr: page, source: std::io::Error::last_os_error() })
-         }
-      };
-
-      for &(page, prot) in &restore {
-         protect(page, prot | libc::PROT_WRITE)?;
-      }
-      let previous = writes
-         .iter()
-         // SAFETY: the caller guarantees aligned slots in this module, now writable.
-         .map(|&(slot, value)| unsafe { (slot as *mut usize).replace(value) })
-         .collect();
-      for &(page, prot) in &restore {
-         protect(page, prot)?;
-      }
-      Ok(previous)
+      // SAFETY: forwarded from the caller.
+      unsafe { swap_words(writes) }
    }
+}
+
+/// Atomically swaps each `(slot, value)` pair in mapped memory and returns the
+/// values the slots held. Read-only pages are made writable for the write and
+/// get their protection back afterwards.
+///
+/// # Safety
+///
+/// Every slot is a mapped, pointer-aligned word, and code that reads it accepts
+/// either value.
+pub unsafe fn swap_words(writes: &[(usize, usize)]) -> Result<Vec<usize>, crate::Error> {
+   // SAFETY: sysconf has no preconditions.
+   let page_size = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap_or(4096);
+   let mut pages = writes
+      .iter()
+      .map(|&(slot, _)| slot & !(page_size - 1))
+      .collect::<Vec<usize>>();
+   pages.sort_unstable();
+   pages.dedup();
+
+   let maps = std::fs::read_to_string("/proc/self/maps")
+      .map_err(|source| crate::Error::Protect { addr: 0, source })?;
+   let restore = pages
+      .iter()
+      .map(|&page| Some((page, protection(&maps, page)?)))
+      .collect::<Option<Vec<(usize, c_int)>>>()
+      .ok_or_else(|| crate::Error::Unmapped { addr: pages.first().copied().unwrap_or(0) })?;
+   let protect = |page: usize, prot: c_int| {
+      // SAFETY: `page` is a mapped page, from /proc/self/maps.
+      if unsafe { libc::mprotect(page as *mut c_void, page_size, prot) } == 0 {
+         Ok(())
+      } else {
+         Err(crate::Error::Protect { addr: page, source: std::io::Error::last_os_error() })
+      }
+   };
+
+   for &(page, prot) in &restore {
+      protect(page, prot | libc::PROT_WRITE)?;
+   }
+   let previous = writes
+      .iter()
+      // SAFETY: the caller guarantees aligned, mapped slots, now writable.
+      .map(|&(slot, value)| {
+         unsafe { AtomicUsize::from_ptr(slot as *mut usize) }.swap(value, Ordering::AcqRel)
+      })
+      .collect();
+   for &(page, prot) in &restore {
+      protect(page, prot)?;
+   }
+   Ok(previous)
 }
 
 /// Protection of the mapping holding `addr`, from `/proc/self/maps`.

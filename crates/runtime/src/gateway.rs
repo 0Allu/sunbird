@@ -177,6 +177,8 @@ unsafe extern "C" fn detour(
    event: *const GatewayEvent,
    ctx: *mut c_void,
 ) -> HandlerResult {
+   #[cfg(target_os = "android")]
+   crate::bridge::attach();
    let gateway = GATEWAY.get().expect("slots point here only after GATEWAY is set");
    // SAFETY: the host passes a live event for the duration of the call.
    let event = unsafe { &*event };

@@ -16,5 +16,9 @@ rquickjs     = { workspace = true }
 # rquickjs-sys ships pregenerated bindings for desktop triples only.
 rquickjs = { features = [ "bindgen" ], workspace = true }
 
+[target.'cfg(target_os = "android")'.dependencies]
+jni-sys = { workspace = true }
+libc    = { workspace = true }
+
 [lints]
 workspace = true

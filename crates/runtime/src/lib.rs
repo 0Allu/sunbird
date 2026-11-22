@@ -23,6 +23,7 @@ use plumage_sigs::{
    LIBRARIES,
 };
 
+#[cfg(target_os = "android")] mod bridge;
 mod gateway;
 mod js;
 

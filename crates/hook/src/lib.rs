@@ -35,6 +35,7 @@ pub use image::{
    BuildId,
    Image,
    Segment,
+   swap_words,
 };
 pub use pattern::Pattern;
 #[cfg(target_os = "android")] pub use plt::PltHook;
