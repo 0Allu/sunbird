@@ -6,6 +6,7 @@ members  = [
   "crates/sigs",
   "crates/sigscan",
   "crates/stand-in",
+  "crates/stand-in-demo",
 ]
 resolver = "3"
 

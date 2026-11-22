@@ -1,0 +1,147 @@
+//! End-to-end demo against the stand-in.
+//!
+//! `stand-in-demo` builds the stand-in and the loader in release, bundles the
+//! example plugin with esbuild, then runs the scenario below in this process.
+//!
+//! `stand-in-demo run <libstand_in.so> <libplumage.so> <home>` runs the
+//! scenario alone, which is how it runs on a phone over adb. It loads the
+//! stand-in the way Android loads Phoenix, loads the loader after it the way a
+//! `DT_NEEDED` entry would, and feeds the stand-in two gateway frames.
+
+use std::{
+   env,
+   ffi::{
+      CStr,
+      CString,
+      c_void,
+   },
+   fs,
+   path::{
+      Path,
+      PathBuf,
+   },
+   process::Command,
+};
+
+use eyre::{
+   OptionExt,
+   WrapErr,
+   bail,
+   eyre,
+};
+
+type Receive = unsafe extern "C" fn(*const u8, usize) -> bool;
+
+const FRAMES: &[&str] = &[
+   r#"{"t":"MESSAGE_CREATE","d":{"id":"1","channel_id":"general","content":"hello from the gateway","author":{"id":"7","username":"wumpus"},"timestamp":"2026-11-22T00:00:00Z"}}"#,
+   r#"{"t":"MESSAGE_CREATE","d":{"id":"2","channel_id":"general","content":"second message","author":{"id":"8","username":"nelly"},"timestamp":"2026-11-22T00:00:01Z"}}"#,
+];
+
+fn main() -> eyre::Result<()> {
+   color_eyre::install()?;
+   let args: Vec<String> = env::args().skip(1).collect();
+   match args.as_slice() {
+      [] => build_and_run(),
+      [run, stand_in, loader, home] if run == "run" => {
+         scenario(Path::new(stand_in), Path::new(loader), Path::new(home))
+      },
+      _ => bail!("usage: stand-in-demo [run <libstand_in.so> <libplumage.so> <home>]"),
+   }
+}
+
+fn build_and_run() -> eyre::Result<()> {
+   let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+      .join("../..")
+      .canonicalize()?;
+   let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+   // Separate invocations, so feature unification with the loader's
+   // dependencies cannot change the stand-in's bytes and with them the build ID
+   // in the sigs table.
+   for package in ["stand-in", "plumage-loader"] {
+      let status = Command::new(&cargo)
+         .current_dir(&root)
+         .args(["build", "--release", "-p", package])
+         .status()
+         .wrap_err("running cargo")?;
+      if !status.success() {
+         bail!("cargo build -p {package} failed with {status}");
+      }
+   }
+
+   let target = root.join("target");
+   let home = target.join("plumage-home");
+   match fs::remove_dir_all(&home) {
+      Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+         return Err(err).wrap_err_with(|| format!("clearing {}", home.display()));
+      },
+      _ => {},
+   }
+   let bundle = home.join("plugins/example.js");
+   let status = Command::new("esbuild")
+      .current_dir(root.join("plugins/example"))
+      .args([
+         "src/index.ts",
+         "--bundle",
+         "--format=iife",
+         "--target=es2023",
+         "--log-level=warning",
+      ])
+      .arg(format!("--outfile={}", bundle.display()))
+      .status()
+      .wrap_err("running esbuild, enter the devshell with `nix develop`")?;
+   if !status.success() {
+      bail!("esbuild failed with {status}");
+   }
+
+   let release = target.join("release");
+   scenario(
+      &release.join("libstand_in.so"),
+      &release.join("libplumage.so"),
+      &home,
+   )
+}
+
+fn scenario(stand_in: &Path, loader: &Path, home: &Path) -> eyre::Result<()> {
+   // SAFETY: no other threads exist yet.
+   unsafe { env::set_var("PLUMAGE_HOME", home) };
+
+   let host = open(stand_in)?;
+   // SAFETY: the symbol is the stand-in's exported receive function with this
+   // signature.
+   let receive: Receive = unsafe {
+      let symbol = libc::dlsym(host, c"stand_in_gateway_receive".as_ptr());
+      std::mem::transmute::<*mut c_void, Receive>(
+         (!symbol.is_null())
+            .then_some(symbol)
+            .ok_or_eyre("stand_in_gateway_receive is missing")?,
+      )
+   };
+
+   println!("loading {}", loader.display());
+   open(loader)?;
+
+   for frame in FRAMES {
+      // SAFETY: the frame is a live byte slice.
+      if !unsafe { receive(frame.as_ptr(), frame.len()) } {
+         bail!("the stand-in rejected {frame}");
+      }
+   }
+   let storage = fs::read_to_string(home.join("storage/example.json")).unwrap_or_default();
+   println!("example plugin storage: {storage}");
+   Ok(())
+}
+
+fn open(path: &Path) -> eyre::Result<*mut c_void> {
+   let path: PathBuf = path
+      .canonicalize()
+      .wrap_err_with(|| format!("{}", path.display()))?;
+   let name = CString::new(path.as_os_str().as_encoded_bytes())?;
+   // SAFETY: plain FFI call with a NUL-terminated path.
+   let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
+   if handle.is_null() {
+      // SAFETY: dlerror returns a NUL-terminated message after a failed dlopen.
+      let message = unsafe { CStr::from_ptr(libc::dlerror()) }.to_string_lossy();
+      return Err(eyre!("dlopen {}: {message}", path.display()));
+   }
+   Ok(handle)
+}
