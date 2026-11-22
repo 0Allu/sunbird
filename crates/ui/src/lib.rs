@@ -161,11 +161,57 @@ pub enum Value {
 
 pub type Props = Vec<(Prop, Value)>;
 
+/// The element type a `Create` names. Phoenix keeps no list of them, so names
+/// outside the ones seen in captured batches pass through as `Other`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ViewKind {
+   View,
+   Text,
+   Image,
+   Input,
+   Scroll,
+   Stack,
+   Navigator,
+   Other(String),
+}
+
+impl ViewKind {
+   #[must_use]
+   pub fn as_str(&self) -> &str {
+      match self {
+         Self::View => "view",
+         Self::Text => "text",
+         Self::Image => "image",
+         Self::Input => "input",
+         Self::Scroll => "scroll",
+         Self::Stack => "stack",
+         Self::Navigator => "navigator",
+         Self::Other(name) => name,
+      }
+   }
+}
+
+impl From<String> for ViewKind {
+   fn from(name: String) -> Self {
+      match name.as_str() {
+         "view" => Self::View,
+         "text" => Self::Text,
+         "image" => Self::Image,
+         "input" => Self::Input,
+         "scroll" => Self::Scroll,
+         "stack" => Self::Stack,
+         "navigator" => Self::Navigator,
+         _ => Self::Other(name),
+      }
+   }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
    Create {
       id:    i32,
-      kind:  String,
+      kind:  ViewKind,
       props: Props,
    },
    Update {
@@ -383,7 +429,7 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<Op>, DecodeError> {
             let kind = reader.str(usize::from(len))?;
             Op::Create {
                id,
-               kind,
+               kind: kind.into(),
                props: reader.props()?,
             }
          },
@@ -552,8 +598,8 @@ pub fn encode(ops: &[Op]) -> Vec<u8> {
          Op::Create { id, kind, props } => {
             out.push(1);
             out.extend_from_slice(&id.to_le_bytes());
-            put_u16_len(&mut out, kind.len());
-            out.extend_from_slice(kind.as_bytes());
+            put_u16_len(&mut out, kind.as_str().len());
+            out.extend_from_slice(kind.as_str().as_bytes());
             put_props(&mut out, props);
          },
          Op::Update { id, props } => {
@@ -734,7 +780,7 @@ pub fn without_frames(bytes: &[u8], offsets: &[usize]) -> Vec<u8> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Node {
-   pub kind:  String,
+   pub kind:  ViewKind,
    pub props: Props,
    pub kids:  Vec<Self>,
    pub src:   Option<u32>,
@@ -867,7 +913,7 @@ fn props(entries: Vec<RawEntry>) -> Props {
 impl From<RawNode> for Node {
    fn from(raw: RawNode) -> Self {
       Self {
-         kind:  raw.kind,
+         kind:  raw.kind.into(),
          props: props(raw.props),
          kids:  raw.kids.into_iter().map(Self::from).collect(),
          src:   raw.src,

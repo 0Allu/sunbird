@@ -37,6 +37,7 @@ use plumage_ui::{
    Prop,
    Props,
    Value,
+   ViewKind,
    decode,
    decode_dispatch,
    encode,
@@ -120,7 +121,7 @@ struct ConsoleIds {
 
 struct Tree {
    id:    i32,
-   kind:  String,
+   kind:  ViewKind,
    props: Props,
    kids:  Vec<Self>,
    src:   Option<u32>,
@@ -324,7 +325,7 @@ fn rewrite_ops(batch: &[u8]) -> Action {
    // pass without being decoded.
    let relevant = settings().screen.is_some()
       || memmem::find(batch, LOGOUT_ROW.as_bytes()).is_some()
-      || memmem::find(batch, b"navigator").is_some();
+      || memmem::find(batch, ViewKind::Navigator.as_str().as_bytes()).is_some();
    if !relevant {
       return Action::Pass;
    }
@@ -707,10 +708,10 @@ impl Settings {
       for op in &ops {
          match op {
             Op::Create { id, kind, props } => {
-               if kind == "navigator" {
+               if *kind == ViewKind::Navigator {
                   self.navigators.insert(*id);
                }
-               creates.insert(*id, (kind.as_str(), props));
+               creates.insert(*id, (kind, props));
             },
             Op::Children { id, ids } => {
                for kid in ids {
@@ -724,7 +725,7 @@ impl Settings {
       self.screen.as_ref()?;
       let stacks = creates
          .iter()
-         .filter(|(_, (kind, _))| *kind == "stack")
+         .filter(|(_, (kind, _))| **kind == ViewKind::Stack)
          .map(|(id, _)| *id)
          .collect::<HashSet<i32>>();
       drop(creates);
@@ -785,7 +786,11 @@ impl Settings {
       changed.then_some(out)
    }
 
-   fn find_screen(&mut self, creates: &HashMap<i32, (&str, &Props)>, parents: &HashMap<i32, i32>) {
+   fn find_screen(
+      &mut self,
+      creates: &HashMap<i32, (&ViewKind, &Props)>,
+      parents: &HashMap<i32, i32>,
+   ) {
       for (id, (_, props)) in creates {
          let is_logout = props.iter().any(|(key, value)| {
             *key == Prop::ACCESSIBILITY_ID
