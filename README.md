@@ -15,7 +15,7 @@ There are two ways to apply it:
 
 ## Web patcher
 
-https://mantikafasi.github.io/discord-phoenix-android-patch/
+https://mantikafasi.github.io/phoenix-unlock/
 
 Open it on the phone. The page downloads the Discord splits, patches them, merges them into
 one APK and signs it, all in the browser, so Android can install it with a single tap.
