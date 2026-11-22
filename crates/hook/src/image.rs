@@ -218,6 +218,73 @@ impl Image<'static> {
    }
 }
 
+impl Image<'static> {
+   /// Writes each `(slot, value)` pair into this module's mapped memory and
+   /// returns the values the slots held. Pages under `PT_GNU_RELRO` are made
+   /// writable for the write and get their protection back afterwards.
+   ///
+   /// # Safety
+   ///
+   /// Every slot is a pointer-aligned word in this module, and no thread reads
+   /// a slot while it is written.
+   pub unsafe fn swap_words(&self, writes: &[(usize, usize)]) -> Result<Vec<usize>, crate::Error> {
+      // SAFETY: sysconf has no preconditions.
+      let page_size = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap_or(4096);
+      let mut pages = writes
+         .iter()
+         .map(|&(slot, _)| slot & !(page_size - 1))
+         .collect::<Vec<usize>>();
+      pages.sort_unstable();
+      pages.dedup();
+
+      let maps = std::fs::read_to_string("/proc/self/maps")
+         .map_err(|source| crate::Error::Protect { addr: 0, source })?;
+      let restore = pages
+         .iter()
+         .map(|&page| Some((page, protection(&maps, page)?)))
+         .collect::<Option<Vec<(usize, c_int)>>>()
+         .ok_or_else(|| crate::Error::Unmapped { addr: pages.first().copied().unwrap_or(0) })?;
+      let protect = |page: usize, prot: c_int| {
+         // SAFETY: `page` is a mapped page of this module, from /proc/self/maps.
+         if unsafe { libc::mprotect(page as *mut c_void, page_size, prot) } == 0 {
+            Ok(())
+         } else {
+            Err(crate::Error::Protect { addr: page, source: std::io::Error::last_os_error() })
+         }
+      };
+
+      for &(page, prot) in &restore {
+         protect(page, prot | libc::PROT_WRITE)?;
+      }
+      let previous = writes
+         .iter()
+         // SAFETY: the caller guarantees aligned slots in this module, now writable.
+         .map(|&(slot, value)| unsafe { (slot as *mut usize).replace(value) })
+         .collect();
+      for &(page, prot) in &restore {
+         protect(page, prot)?;
+      }
+      Ok(previous)
+   }
+}
+
+/// Protection of the mapping holding `addr`, from `/proc/self/maps`.
+fn protection(maps: &str, addr: usize) -> Option<c_int> {
+   maps.lines().find_map(|line| {
+      let mut fields = line.split_ascii_whitespace();
+      let (start, end) = fields.next()?.split_once('-')?;
+      let range = usize::from_str_radix(start, 16).ok()?..usize::from_str_radix(end, 16).ok()?;
+      let perms = fields.next()?.as_bytes();
+      range.contains(&addr).then(|| {
+         [(b'r', libc::PROT_READ), (b'w', libc::PROT_WRITE), (b'x', libc::PROT_EXEC)]
+            .iter()
+            .zip(perms)
+            .filter(|((flag, _), perm)| flag == *perm)
+            .fold(libc::PROT_NONE, |prot, ((_, bit), _)| prot | bit)
+      })
+   })
+}
+
 impl Image<'_> {
    #[must_use]
    pub fn file_name(&self) -> &str {

@@ -4,7 +4,8 @@
 //!   the target, `ShadowHook` on Android ARM and Dobby everywhere else (iOS,
 //!   x86_64 Android and Linux).
 //! - [`PltHook`] rewrites GOT entries through `ByteHook` on Android.
-//! - [`Image`] views a loaded ELF module and scans it for [`Pattern`]s.
+//! - [`Image`] views a loaded ELF module, scans it for [`Pattern`]s, and swaps
+//!   pointers in its read-only data.
 
 use std::{
    ffi::c_void,
@@ -61,6 +62,14 @@ pub enum Error {
       backend: &'static str,
       target:  usize,
       message: String,
+   },
+   #[error("{addr:#x} is not in any mapping")]
+   Unmapped { addr: usize },
+   #[error("mprotect {addr:#x}")]
+   Protect {
+      addr:   usize,
+      #[source]
+      source: std::io::Error,
    },
 }
 
