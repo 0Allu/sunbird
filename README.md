@@ -81,8 +81,10 @@ Optional, ticked on the page. The patcher renames the host lib's `DT_NEEDED` `li
 
 JS plugins live in `files/phoenix-js/`; ones shipped in the APK are copied there and replace older
 copies. Discord's **Settings** gets a **Phoenix** row at the top, opening a page with a switch per
-plugin (turned off = unloaded live, remembered), Install from URL, Remove plugins (app-bundled ones
-can be restored), a Console (live plugin log plus a JS prompt), Reload and About. It is built from Phoenix's own row
+plugin (the switch turns it off live and is remembered; the row opens the plugin's page with its
+settings, Reload and Remove), Install from URL, Restore for removed app plugins, a Console (live
+plugin log plus a JS prompt), Reload and About. Plugins declare settings with
+`phoenix.settings.define({...})` (switch, text, number, button). It is built from Phoenix's own row
 layouts and spliced into its UI-op stream (`plugin/runtime/src/settings.js`, format in
 `plugin/ui/FORMAT.md`).
 
@@ -92,9 +94,9 @@ Phoenix's serializers (`stores`), the guest/host bridge (`bridge`) and `native`:
 (through the kernel, so a bad address throws instead of crashing), `call`, `scan`, and on arm64
 `intercept(addr, ctx => ...)` with x0-x30 as BigInts.
 
-- **MessageLogger** (`web/plugins/message-logger.js`): a JS plugin. Deleted messages stay, marked
-  "(deleted)"; edits keep the earlier text under the new one.
-- **JS plugins (rquickjs)**: your own `.js` files, picked on the page and bundled into the APK.
+- **JS plugins (rquickjs + ShadowHook)**: the runtime above. Ready-made plugins can be included
+  (MessageLogger, `web/plugins/message-logger.js`: deleted messages stay, marked "(deleted)"; edits
+  keep the earlier text; both switchable on its page), plus your own `.js` files.
 - **Frida gadget (advanced)**: chains frida-gadget 17.27.4 (`libfrg.so`, wxWindows Library Licence)
   in as libplg's dependency, in script mode, so the app starts without a PC. The bootstrap
   (`frida/bootstrap.js`, built into `web/plugins/frida-bootstrap.js` by `frida/build.sh`) runs

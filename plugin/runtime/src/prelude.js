@@ -113,6 +113,31 @@ const plugins = new Map();
 let cfg = { disabled: [], removed: [] }; try { cfg = { disabled: [], removed: [], ...JSON.parse(P.readFile('plugins.json') || '{}') }; } catch {}
 const saveCfg = () => P.writeFile('plugins.json', JSON.stringify(cfg));
 let bundled = []; // the APK's plugin bundle ([{id, source?, url?}])
+// Plugin settings: define({key: {type: 'switch'|'text'|'number'|'button', title, description?,
+// default?, onPress?}}); values persist in storage.json and show on the plugin's Settings page.
+const settingDefs = new Map(), settingListeners = new Map();
+const settingValue = (id, key) => {
+  const v = ((store[id] || {}).$settings || {})[key];
+  return v !== undefined ? v : (settingDefs.get(id) || {})[key]?.default;
+};
+const setSetting = (id, key, value) => {
+  const s = ((store[id] ||= {}).$settings ||= {});
+  if (s[key] === value) return;
+  s[key] = value;
+  P.writeFile('storage.json', JSON.stringify(store));
+  for (const f of settingListeners.get(id) || []) try { f(key, value); } catch (e) { console.error(`[${id}] settings.onChange:`, e); }
+};
+const settingsFor = (id) => ({
+  define: (defs) => { settingDefs.set(id, defs || {}); },
+  get: (key) => settingValue(id, key),
+  set: (key, value) => setSetting(id, key, value),
+  /** fn(key, value) after a setting changes; removed when the plugin is turned off. */
+  onChange: (fn) => {
+    if (!settingListeners.has(id)) settingListeners.set(id, new Set());
+    settingListeners.get(id).add(fn);
+    return track(id, () => settingListeners.get(id)?.delete(fn));
+  },
+});
 const track = (id, unsub) => { const p = plugins.get(id); if (p) p.unsubs.push(unsub); return unsub; };
 const api = (id) => ({ id,
   bridge: { onOps: (fn) => track(id, brOn(0, id, fn)), onInvoke: (fn) => track(id, brOn(1, id, fn)),
@@ -126,7 +151,8 @@ const api = (id) => ({ id,
   // Live Phoenix stores via Phoenix's own serializers; store-thread only (inside phoenix.on).
   stores: { me: () => { const s = P.me(); return s == null ? null : JSON.parse(s); },
     raw: (ser, off) => { const s = P.storeJson(ser, off); return s == null ? null : JSON.parse(s); } },
-  native: nativeFor(id) });
+  native: nativeFor(id),
+  settings: settingsFor(id) });
 globalThis.phoenix = api('global');
 
 // "// Name: what it does" on the first line names the plugin in Settings.
@@ -138,6 +164,7 @@ const run = (p) => {
   catch (e) { p.error = String(e); console.error(`plugin ${p.id} failed:`, e, e && e.stack); stop(p); }
 };
 const stop = (p) => {
+  settingDefs.delete(p.id);
   for (const u of p.unsubs.splice(0)) try { u(); } catch {}
   for (const u of p.unload.splice(0)) try { u(); } catch (e) { console.error(`[${p.id}] onUnload:`, e); }
 };
@@ -147,7 +174,20 @@ const load = (id, source) => {
   if (p.enabled) run(p); else console.info(`plugin ${id} is turned off`);
 };
 globalThis.__phx_plugins = {
-  list: () => [...plugins.values()].map(({ id, name, description, enabled, error }) => ({ id, name, description, enabled, error })),
+  list: () => [...plugins.values()].map(({ id, name, description, enabled, error }) => ({ id, name, description, enabled, error,
+    origin: cfg.origins?.[id] || (bundled.some((b) => b.id === id) ? 'app' : 'file') })),
+  /** [{key, type, title, description, value}] from the plugin's settings.define() */
+  settings: (id) => Object.entries(settingDefs.get(id) || {}).map(([key, d]) => ({ key, type: d.type || 'switch', title: d.title || key, description: d.description || '', value: settingValue(id, key) })),
+  setSetting,
+  pressSetting: (id, key) => { const d = (settingDefs.get(id) || {})[key]; if (d && d.onPress) try { d.onPress(); } catch (e) { console.error(`[${id}] ${key}:`, e); } },
+  /** Re-reads one plugin's file and restarts it if enabled. */
+  reloadOne: (id) => {
+    const p = plugins.get(id);
+    if (!p) return;
+    const src = P.readFile(id + '.js');
+    if (src != null && src !== p.source) Object.assign(p, meta(id, src), { source: src });
+    if (p.enabled) { stop(p); run(p); }
+  },
   setEnabled: (id, on) => {
     const p = plugins.get(id);
     if (!p || p.enabled === on) return;
@@ -201,6 +241,7 @@ globalThis.__phx_plugins = {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const src = await r.text();
     try { new Function(src); } catch (e) { throw new Error('not valid JavaScript: ' + e.message); }
+    (cfg.origins ||= {})[m[1]] = url.trim();
     const err = __phx_plugins.install(m[1], src);
     if (err) throw new Error(err);
     return m[1];

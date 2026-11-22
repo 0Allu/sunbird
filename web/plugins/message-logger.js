@@ -1,4 +1,8 @@
 // MessageLogger: Keeps deleted messages (in red, marked "(deleted)") and earlier versions of edited ones.
+phoenix.settings.define({
+  keepDeleted: { type: 'switch', title: 'Keep deleted messages', description: 'Shown in red with "(deleted)" instead of disappearing.', default: true },
+  keepEdits: { type: 'switch', title: 'Keep edit history', description: 'Earlier versions stay under the new text.', default: true },
+});
 const MAX = 8192;
 const cache = new Map(); // id -> { channel_id, guild_id, content, hist: string[], deleted }
 
@@ -27,7 +31,7 @@ phoenix.on('MESSAGE_UPDATE', (ev) => {
   const old = cache.get(m.id);
   if (old && typeof old.content === 'string' && old.content !== m.content) old.hist.unshift(subtext(old.content, ' (edited)'));
   const e = remember(m);
-  if (!e.hist.length) return;
+  if (!e.hist.length || !phoenix.settings.get('keepEdits')) return;
   return { ...m, content: (m.content ? m.content + '\n' : '') + e.hist.join('\n') };
 });
 
@@ -43,5 +47,5 @@ const markDeleted = (id) => {
 };
 
 // Returning false drops the event: Phoenix never removes the message.
-phoenix.on('MESSAGE_DELETE', (ev) => { markDeleted(ev.data.id); return false; });
-phoenix.on('MESSAGE_DELETE_BULK', (ev) => { for (const id of ev.data.ids || []) markDeleted(id); return false; });
+phoenix.on('MESSAGE_DELETE', (ev) => { if (!phoenix.settings.get('keepDeleted')) return; markDeleted(ev.data.id); return false; });
+phoenix.on('MESSAGE_DELETE_BULK', (ev) => { if (!phoenix.settings.get('keepDeleted')) return; for (const id of ev.data.ids || []) markDeleted(id); return false; });

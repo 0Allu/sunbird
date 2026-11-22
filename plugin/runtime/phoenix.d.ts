@@ -32,6 +32,12 @@ declare global {
     delete(key: string): void;
   }
 
+  type PhoenixSetting =
+    | { type: 'switch'; title: string; description?: string; default?: boolean }
+    | { type: 'text'; title: string; description?: string; default?: string }
+    | { type: 'number'; title: string; description?: string; default?: number }
+    | { type: 'button'; title: string; onPress: () => void };
+
   interface Phoenix {
     /** This plugin's id (file name without .js). */
     readonly id: string;
@@ -88,6 +94,17 @@ declare global {
     };
     /** Runs when the plugin is turned off in Settings → Phoenix. */
     onUnload(fn: () => void): void;
+    /**
+     * Settings shown on the plugin's page in Settings → Phoenix, saved per plugin.
+     * define() runs each time the plugin starts; get() falls back to `default`.
+     */
+    readonly settings: {
+      define(defs: Record<string, PhoenixSetting>): void;
+      get<T = any>(key: string): T;
+      set(key: string, value: unknown): void;
+      /** fn(key, value) after a setting changes (also from Settings). Removed when the plugin is turned off. */
+      onChange(fn: (key: string, value: any) => void): () => void;
+    };
     /** The guest <-> host bridge: UI-op batches, guest->host invokes, host->guest dispatches. */
     readonly bridge: {
       onOps(fn: BridgeListener): () => void;

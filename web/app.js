@@ -1,7 +1,7 @@
 import { PROXY as DEFAULT_PROXY, VERIFIED } from './config.js';
 import { ABIS, abiOf, buildPatchedApk } from './lib/apk.js';
 import { BOOTSTRAP_URL, bundleScripts, GADGET_URLS, gunzip } from './lib/frida.js';
-import { PLUGINS } from './lib/plugins.js';
+import { BUNDLED, PLUGINS } from './lib/plugins.js';
 import { readZip } from './lib/zip.js';
 
 const TRACKER = 'https://tracker.vendetta.rocks';
@@ -87,10 +87,8 @@ async function patchAndOffer(vc, base, abi, configs, abiName) {
   const pluginLib = plugins.length ? new Uint8Array(await (await fetch(ABIS[abiName].pluginLib)).arrayBuffer()) : null;
   const nothingUrl = plugins.length && ABIS[abiName].shadowhookNothing;
   const shadowhookNothing = nothingUrl ? new Uint8Array(await (await fetch(nothingUrl)).arrayBuffer()) : null;
-  const pluginSources = Object.fromEntries(await Promise.all(PLUGINS.filter((p) => p.js && plugins.includes(p.id))
-    .map(async (p) => [p.id, await (await fetch(p.js)).text()])));
-  const userScripts = plugins.includes('jsPlugins') ? await jsInput() : [];
-  const parts = await buildPatchedApk({ base, abi, configs, identity: await identity(), packageName, label: side ? 'Discord Phoenix' : null, plugins, pluginLib, shadowhookNothing, pluginSources, userScripts, frida, log });
+  const scripts = plugins.includes('jsPlugins') ? await jsInput() : [];
+  const parts = await buildPatchedApk({ base, abi, configs, identity: await identity(), packageName, label: side ? 'Discord Phoenix' : null, plugins, pluginLib, shadowhookNothing, scripts, frida, log });
   const blob = new Blob(parts, { type: 'application/vnd.android.package-archive' });
   s.done(mb(blob.size));
   $('note-side').hidden = !side; $('note-replace').hidden = side;
@@ -131,12 +129,23 @@ for (const p of PLUGINS) {
   $('plugins').append(l);
 }
 
-// JS plugins (rquickjs): picked .js files and the editor, each bundled as its own plugin
+// JS plugins (rquickjs): ready-made ones (BUNDLED), picked .js files and the editor, each its own plugin
 const jsBox = document.querySelector('#plugins input[value=jsPlugins]');
 jsBox.onchange = () => { $('jsp').hidden = !jsBox.checked; };
+for (const p of BUNDLED) {
+  const l = document.createElement('label');
+  l.className = 'plugin';
+  l.innerHTML = '<input type="checkbox"><b></b><span></span>';
+  Object.assign(l.querySelector('input'), { value: p.id, checked: !!p.default });
+  l.querySelector('b').textContent = p.name;
+  l.querySelector('span').textContent = p.description;
+  $('jsp-bundled').append(l);
+}
 const pluginId = (name) => name.replace(/\.js$/i, '').replace(/[^\w-]+/g, '-').slice(0, 40) || 'plugin';
 async function jsInput() {
-  const scripts = await Promise.all([...$('jsp-files').files].map(async (f) => ({ id: pluginId(f.name), source: await f.text() })));
+  const picked = BUNDLED.filter((p) => $('jsp-bundled').querySelector(`input[value="${p.id}"]`).checked);
+  const scripts = await Promise.all(picked.map(async (p) => ({ id: p.id, source: await (await fetch(p.js)).text() })));
+  scripts.push(...await Promise.all([...$('jsp-files').files].map(async (f) => ({ id: pluginId(f.name), source: await f.text() }))));
   const code = $('jsp-code').value.trim();
   if (code) scripts.push({ id: 'my-plugin', source: code });
   if (scripts.length) log(`JS plugins: ${scripts.map((x) => x.id).join(', ')}`);

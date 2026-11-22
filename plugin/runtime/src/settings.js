@@ -1,7 +1,8 @@
 'use strict';
 // Phoenix in Discord's Settings: a "Phoenix" row at the top of the list opens our pages, pushed on
 // Settings' navigator (tablet) or the app's root one (phone) like Discord's own sub-pages:
-//   Phoenix: plugin switches, Install from URL, Remove plugins, Console, Reload, About
+//   Phoenix: plugins (tap: its page, switch: on/off), Install from URL, Restore, Console, Reload, About
+//   <plugin>: Enabled, the plugin's own settings (phoenix.settings.define), Reload, Remove, Info
 //   Console: a JS prompt and the live log
 // Everything is built from Phoenix's own layouts (settings_tpl.js) and spliced into the UI-op
 // stream (plugin/ui/FORMAT.md). Our nodes use ids from 0x50000000, far above Rust's counter.
@@ -87,22 +88,26 @@
   };
   const subtitleOf = (p) => (p.error ? `Failed: ${p.error}` : p.description) || '';
   // root > row > [icon, column > [title, subtitle], wrap > track > knob]
-  const switchRow = (p, onToggle) => {
-    const r = clone(T.switchRow), sub = subtitleOf(p);
+  // o: {key, title, subtitle, on, icon?}; state() -> {on, subtitle} for refreshes. Tapping the row
+  // runs onRow (default: toggle), tapping the switch runs onToggle.
+  const switchRow = (o, state, onToggle, onRow) => {
+    const r = clone(T.switchRow);
     noRadius(r.props);
-    setProp(r.props, 'accessibilityLabel', str(sub ? `${p.name}, ${sub}` : p.name));
-    setProp(r.props, 'accessibilityChecked', bool(p.enabled));
-    setProp(r.props, 'accessibilityId', str(`phoenix-plugin-${p.id}`));
+    setProp(r.props, 'accessibilityLabel', str(o.subtitle ? `${o.title}, ${o.subtitle}` : o.title));
+    setProp(r.props, 'accessibilityChecked', bool(o.on));
+    setProp(r.props, 'accessibilityId', str(`phoenix-${o.key}`));
     const [icon, column, wrap] = r.kids[0].kids;
-    setProp(icon.props, 'uri', str(ICON.plugin));
-    setProp(column.kids[0].props, 'text', str(p.name));
-    if (sub) setProp(column.kids[1].props, 'text', str(sub)); else column.kids.pop();
+    if (o.icon === null) r.kids[0].kids.shift(); else setProp(icon.props, 'uri', str(o.icon || ICON.plugin));
+    setProp(column.kids[0].props, 'text', str(o.title));
+    if (o.subtitle) setProp(column.kids[1].props, 'text', str(o.subtitle)); else column.kids.pop();
     const track = wrap.kids[0], knob = track.kids[0];
-    if (!p.enabled) { track.props = clone(T.trackOff); knob.props = clone(T.knobOff); }
-    r.sw = { id: p.id, root: r, track, knob, sub: column.kids[1] };
-    r.h = { press: () => onToggle(r.sw) };
+    if (!o.on) { track.props = clone(T.trackOff); knob.props = clone(T.knobOff); }
+    const sw = { root: r, track, knob, sub: column.kids[1], state };
+    r.h = { press: () => (onRow || onToggle)(sw) };
+    track.h = { press: () => onToggle(sw) };
     return r;
   };
+  const pluginState = (id) => () => { const p = PL.list().find((x) => x.id === id); return p && { on: p.enabled, subtitle: subtitleOf(p) }; };
   // Settings' search field: row > box > [icon wrap > icon, input]
   const inputRow = (placeholder, icon, key, onSubmit) => {
     const r = clone(T.input), box = r.kids[0], input = box.kids[0].kids[1];
@@ -174,34 +179,33 @@
   };
 
   const refreshSwitch = (sw) => {
-    const p = PL.list().find((x) => x.id === sw.id);
-    if (!p) return;
-    const on = p.enabled, track = clone(T.switchRow).kids[0].kids[2].kids[0];
+    const st = sw.state();
+    if (!st) return;
+    const on = st.on, track = clone(T.switchRow).kids[0].kids[2].kids[0];
     const ops = [
       { op: 'update', id: sw.track.id, props: on ? track.props : clone(T.trackOff) },
       { op: 'update', id: sw.knob.id, props: on ? track.kids[0].props : clone(T.knobOff) },
       { op: 'update', id: sw.root.id, props: [{ k: 'accessibilityChecked', v: bool(on) }] },
     ];
-    if (sw.sub) ops.push({ op: 'update', id: sw.sub.id, props: [{ k: 'text', v: str(subtitleOf(p)) }] });
+    if (sw.sub && st.subtitle !== undefined) ops.push({ op: 'update', id: sw.sub.id, props: [{ k: 'text', v: str(st.subtitle) }] });
     send(ops);
   };
-  const toggle = (sw) => { const p = PL.list().find((x) => x.id === sw.id); if (p) PL.setEnabled(p.id, !p.enabled); refreshSwitch(sw); };
+  const togglePlugin = (id) => (sw) => { const p = PL.list().find((x) => x.id === id); if (p) PL.setEnabled(id, !p.enabled); refreshSwitch(sw); };
   const rerenderMain = () => { const main = inst && inst.stack.find((p) => p.def === PHOENIX); if (main) rerender(main); };
+  const pluginRow = (p) => switchRow({ key: `plugin-${p.id}`, title: p.name, subtitle: subtitleOf(p), on: p.enabled }, pluginState(p.id), togglePlugin(p.id), () => openPage(pluginPage(p.id)));
   const setText = (node, text, color) => send([{ op: 'update', id: node.id, props: [{ k: 'text', v: str(text) }, ...(color ? [{ k: 'color', v: col(color) }] : [])] }]);
   const clearInput = (h) => { h.text = ''; send([{ op: 'update', id: h.node.id, props: [{ k: 'value', v: str('') }] }]); };
 
   const PHOENIX = {
     title: 'Phoenix',
     render: () => {
-      const plugins = PL.list();
-      const rows = plugins.map((p) => switchRow(p, toggle));
+      const plugins = PL.list(), removed = PL.removedBundled();
+      const rows = plugins.map(pluginRow);
       if (!rows.length) rows.push(buttonRow('No JS plugins installed', ICON.plugin));
       return [
         section('Plugins', rows),
-        section('', [
-          buttonRow('Install from URL', ICON.url, () => openPage(INSTALL), { chevron: true, key: 'install-url' }),
-          buttonRow('Remove plugins', ICON.remove, () => openPage(REMOVE), { chevron: true, key: 'remove' }),
-        ]),
+        section('', [buttonRow('Install from URL', ICON.url, () => openPage(INSTALL), { chevron: true, key: 'install-url' })]),
+        ...(removed.length ? [section('Removed (came with the app)', removed.map((p) => buttonRow(`Restore ${p.name}`, ICON.plugin, () => { PL.restore(p.id); rerenderMain(); }, { key: `restore-${p.id}` })))] : []),
         section('Debug', [
           buttonRow('Console', ICON.console, () => openPage(CONSOLE), { chevron: true, key: 'console' }),
           buttonRow('Reload plugins', ICON.reload, () => { PL.reload(); rerenderMain(); }, { key: 'reload' }),
@@ -210,6 +214,54 @@
           valueRow('Plugins', String(plugins.length)), valueRow('Folder', 'files/phoenix-js')]),
       ];
     },
+  };
+
+  // One plugin: Enabled, its settings, Reload, Remove, Info.
+  const pluginPage = (id) => ({
+    title: (PL.list().find((x) => x.id === id) || { name: id }).name,
+    render: (page) => {
+      const p = PL.list().find((x) => x.id === id);
+      if (!p) return [section('', [textLine('This plugin was removed.', COLOR.muted, false)], false)];
+      const settingRows = PL.settings(id).map((st) => settingRow(id, st));
+      const origin = p.origin === 'app' ? 'Came with the app' : p.origin === 'file' ? 'Added to files/phoenix-js' : p.origin;
+      const enabledState = () => { const q = PL.list().find((x) => x.id === id); return q && { on: q.enabled, subtitle: q.error ? `Failed: ${q.error}` : '' }; };
+      return [
+        ...(p.description ? [section('', [textLine(p.description, COLOR.muted, false)], false)] : []),
+        section('', [switchRow({ key: `enabled-${id}`, title: 'Enabled', subtitle: p.error ? `Failed: ${p.error}` : '', on: p.enabled, icon: null },
+          enabledState, (sw) => { togglePlugin(id)(sw); rerender(page); rerenderMain(); })]),
+        ...(settingRows.length ? [section('Settings', settingRows)] : p.enabled ? [] : [section('', [textLine('Turn it on to see its settings.', COLOR.muted, false)], false)]),
+        section('', [
+          buttonRow('Reload', ICON.reload, () => { PL.reloadOne(id); rerender(page); rerenderMain(); }, { key: `reload-${id}` }),
+          buttonRow('Remove', ICON.remove, () => { PL.remove(id); closeTop(); rerenderMain(); }, { danger: true, key: `remove-${id}` }),
+        ]),
+        section('Info', [valueRow('ID', id), valueRow('Source', origin)]),
+      ];
+    },
+  });
+  // A plugin setting row by type: switch, text / number (Enter or leaving the field saves), button.
+  const settingRow = (id, st) => {
+    if (st.type === 'button') return buttonRow(st.title, ICON.plugin, () => PL.pressSetting(id, st.key), { key: `setting-${id}-${st.key}` });
+    if (st.type === 'text' || st.type === 'number') {
+      const save = (text, h) => {
+        const v = st.type === 'number' ? Number(text) : text;
+        if (st.type === 'number' && (text.trim() === '' || Number.isNaN(v))) return;
+        PL.setSetting(id, st.key, v);
+        h.saved = text;
+      };
+      const r = inputRow(st.description || st.title, ICON.plugin, `setting-${id}-${st.key}`, (text, h) => save(text, h));
+      const input = r.kids[0].kids[0].kids[1], h = input.h;
+      h.text = h.saved = st.value == null ? '' : String(st.value);
+      setProp(input.props, 'value', str(h.text));
+      if (st.type === 'number') setProp(input.props, 'keyboard', str('numeric'));
+      h.blur = () => { if (h.text !== h.saved) save(h.text, h); };
+      const wrap = { type: 'view', props: clone(T.section.props), kids: [textLine(st.title, COLOR.text, false), r] };
+      setProp(wrap.props, 'padding', { t: 'rect', v: [12, 12, 12, 12] });
+      setProp(wrap.props, 'gap', num(6));
+      return wrap;
+    }
+    return switchRow({ key: `setting-${id}-${st.key}`, title: st.title, subtitle: st.description, on: !!st.value, icon: null },
+      () => { const cur = PL.settings(id).find((x) => x.key === st.key); return cur && { on: !!cur.value }; },
+      (sw) => { const cur = PL.settings(id).find((x) => x.key === st.key); PL.setSetting(id, st.key, !(cur && cur.value)); refreshSwitch(sw); });
   };
 
   const INSTALL = {
@@ -228,17 +280,6 @@
         })]),
         section('', [status], false),
       ];
-    },
-  };
-
-  const REMOVE = {
-    title: 'Remove plugins',
-    render: (page) => {
-      const rows = PL.list().map((p) => buttonRow(`Remove ${p.name}`, ICON.remove, () => { PL.remove(p.id); rerender(page); rerenderMain(); }, { danger: true, key: `remove-${p.id}` }));
-      const back = PL.removedBundled().map((p) => buttonRow(`Restore ${p.name}`, ICON.plugin, () => { PL.restore(p.id); rerender(page); rerenderMain(); }, { key: `restore-${p.id}` }));
-      return [section('Installed', rows.length ? rows : [buttonRow('No JS plugins installed', ICON.plugin)]),
-        ...(back.length ? [section('Came with the app', back)] : []),
-        section('', [textLine('Plugins that came with the app stay removed until you restore them here.', COLOR.muted, false)], false)];
     },
   };
 

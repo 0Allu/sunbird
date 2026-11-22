@@ -8,22 +8,26 @@ import { GADGET } from './frida.js';
 
 export const PLUGINS = [
   {
-    id: 'messageLogger',
-    js: 'plugins/message-logger.js',
-    runtime: true,
-    name: 'MessageLogger',
-    description: 'Keeps deleted messages (shown in red with "(deleted)") and shows earlier versions of edited messages.',
-  },
-  {
     id: 'jsPlugins',
     runtime: true,
     name: 'JS plugins (rquickjs + ShadowHook)',
-    description: 'The built-in plugin runtime, with native hooks through ShadowHook on arm64 phones. Add your own .js plugins below; turn them on and off in Discord Settings → Phoenix.',
+    description: 'The built-in plugin runtime, with native hooks through ShadowHook on arm64 phones. Pick ready-made plugins and/or add your own below; manage them in Discord Settings → Phoenix.',
   },
   {
     id: 'frida',
     name: 'Frida gadget (advanced)',
     description: 'Embeds frida-gadget (+40 MB) for Frida scripts and debugging: a floating JS panel, a console and an optional debug shell. Not needed for the plugins above.',
+  },
+];
+
+// Ready-made JS plugins offered under 'JS plugins' (sources in web/plugins/).
+export const BUNDLED = [
+  {
+    id: 'messageLogger',
+    js: 'plugins/message-logger.js',
+    name: 'MessageLogger',
+    description: 'Keeps deleted messages (shown in red with "(deleted)") and earlier versions of edited ones.',
+    default: true,
   },
 ];
 
@@ -45,11 +49,10 @@ export function buildId(u8) {
  * @param {Uint8Array} hostLib  liblibdiscord_wasm_host.so (patched in place: DT_NEEDED rename)
  * @param {Uint8Array} plugLib  libplg.so for the same ABI (a configured copy is returned)
  * @param {string[]} enabled    plugin ids
- * @param {Record<string,string>} sources  JS source per enabled JS plugin id
- * @param {{id: string, source: string}[]} userScripts  your own plugins (with 'jsPlugins')
+ * @param {{id: string, source: string}[]} scripts  JS plugins to bundle (with 'jsPlugins'): BUNDLED picks + your own
  * @returns {{lib: Uint8Array, bundle: Uint8Array|null} | null}
  */
-export function configurePlugins(hostLib, plugLib, enabled, sources = {}, userScripts = [], log = () => {}) {
+export function configurePlugins(hostLib, plugLib, enabled, scripts = [], log = () => {}) {
   const chosen = PLUGINS.filter((p) => enabled.includes(p.id));
   if (!chosen.length) return null;
   const lib = plugLib.slice();
@@ -66,11 +69,7 @@ export function configurePlugins(hostLib, plugLib, enabled, sources = {}, userSc
   // 56/64: <Me as Serialize> + Me's store offset; not located by the patcher yet (stores.me() reports that)
   log(`plugins: host build ${[...id].map((b) => b.toString(16).padStart(2, '0')).join('')}, gateway registry at 0x${anchor.toString(16)}`);
 
-  const bundle = chosen.filter((p) => p.js).map((p) => {
-    if (typeof sources[p.id] !== 'string') throw new Error(`no source for plugin ${p.id}`);
-    return { id: p.id, source: sources[p.id] };
-  });
-  if (enabled.includes('jsPlugins')) bundle.push(...userScripts);
+  const bundle = enabled.includes('jsPlugins') ? scripts : [];
   if (chosen.some((p) => p.id === 'frida')) renameNeeded(lib, 'liblog.so', GADGET);
   renameNeeded(hostLib, 'liblog.so', 'libplg.so');
   log(`plugins: ${chosen.map((p) => p.name).join(', ')} (host lib now loads libplg.so)`);
