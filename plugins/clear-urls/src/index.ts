@@ -1,4 +1,4 @@
-// @description Removes tracking parameters from links in messages
+// @description Removes tracking parameters from links you send and receive
 // @version 0.1.0
 // @author amaanq
 
@@ -32,10 +32,13 @@ const clean = (url: string) => {
   return url.slice(0, query) + (kept.length ? `?${kept.join("&")}` : "") + url.slice(end);
 };
 
+const cleanLinks = (text: string) => text.replace(/https?:\/\/[^\s<>()]+/g, clean);
+
 const rewrite = (message: { content?: string }) => {
   if (typeof message.content !== "string" || !message.content.includes("?")) return;
-  message.content = message.content.replace(/https?:\/\/[^\s<>()]+/g, clean);
+  message.content = cleanLinks(message.content);
 };
 
 plumage.hook(gateway.messageCreate, { before: rewrite });
 plumage.hook(gateway.messageUpdate, { before: rewrite });
+plumage.messages.onSend((text) => (text.includes("?") ? cleanLinks(text) : undefined));
