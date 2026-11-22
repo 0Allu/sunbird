@@ -12,11 +12,13 @@ use std::{
    ptr::NonNull,
 };
 
-#[cfg(not(all(
+#[cfg(not(any(windows, all(
    target_os = "android",
    any(target_arch = "aarch64", target_arch = "arm")
-)))]
+))))]
 mod dobby;
+// On Windows only the parts the host-side patcher reads build; the rest needs dl_iterate_phdr.
+#[cfg_attr(windows, allow(dead_code, unused_imports))]
 mod image;
 mod pattern;
 #[cfg(target_os = "android")] mod plt;
@@ -26,16 +28,16 @@ mod pattern;
 ))]
 mod shadowhook;
 
-#[cfg(not(all(
+#[cfg(not(any(windows, all(
    target_os = "android",
    any(target_arch = "aarch64", target_arch = "arm")
-)))]
+))))]
 pub use dobby::Dobby as Inline;
+#[cfg(unix)] pub use image::swap_words;
 pub use image::{
    BuildId,
    Image,
    Segment,
-   swap_words,
 };
 pub use pattern::Pattern;
 #[cfg(target_os = "android")] pub use plt::PltHook;

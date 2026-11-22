@@ -147,6 +147,7 @@ pub struct Image<'a> {
    pub eh_frame_hdr: Option<usize>,
 }
 
+#[cfg(unix)]
 impl Image<'static> {
    /// Every module `dl_iterate_phdr` reports.
    ///
@@ -222,6 +223,7 @@ impl Image<'static> {
    }
 }
 
+#[cfg(unix)]
 impl Image<'static> {
    /// Writes each `(slot, value)` pair into this module's mapped memory and
    /// returns the values the slots held. Pages under `PT_GNU_RELRO` are made
@@ -237,6 +239,7 @@ impl Image<'static> {
    }
 }
 
+#[cfg(unix)]
 /// Atomically swaps each `(slot, value)` pair in mapped memory and returns the
 /// values the slots held. Read-only pages are made writable for the write and
 /// get their protection back afterwards.
@@ -287,6 +290,7 @@ pub unsafe fn swap_words(writes: &[(usize, usize)]) -> Result<Vec<usize>, crate:
    Ok(previous)
 }
 
+#[cfg(unix)]
 /// Protection of the mapping holding `addr`, from `/proc/self/maps`.
 fn protection(maps: &str, addr: usize) -> Option<c_int> {
    maps.lines().find_map(|line| {
