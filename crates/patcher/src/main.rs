@@ -5,7 +5,7 @@
 //! base split's launcher always picks Phoenix, the host library's access gate
 //! returns true and loads the loader through a renamed `DT_NEEDED` entry, and
 //! the loader, any extra libraries and the plugin bundle land next to the host
-//! library in its ABI split. Every split is then zipaligned and signed with the debug key, so
+//! library in its ABI split. Every split is then zipaligned and signed with phoenix's key, so
 //! `adb install-multiple <dir>/*.apk` installs the set.
 
 mod dex;
@@ -253,8 +253,8 @@ fn is_v1_signature(name: &str) -> bool {
 }
 
 struct BuildTools {
-   dir: PathBuf,
-   key: PathBuf,
+   dir:  PathBuf,
+   keys: PathBuf,
 }
 
 impl BuildTools {
@@ -266,16 +266,15 @@ impl BuildTools {
          .collect::<Result<Vec<PathBuf>, _>>()?;
       versions.sort();
 
-      let home = env::var_os("HOME").context("HOME is unset")?;
-      let key = Path::new(&home).join(".android/debug.keystore");
-      ensure!(key.exists(), "{} is missing", key.display());
-
       Ok(Self {
-         dir: versions.pop().context("no Android build-tools installed")?,
-         key,
+         dir:  versions.pop().context("no Android build-tools installed")?,
+         keys: Path::new(env!("CARGO_MANIFEST_DIR")).join("keys"),
       })
    }
 
+   /// Signs with phoenix's key and the proof of rotation from the key earlier
+   /// builds used (see `keys/README.md`), so either kind of install updates in
+   /// place. v3 only: v1 and v2 would need the old private key, so Android 9+.
    fn align_and_sign(&self, unsigned: &Path, signed: &Path) -> misstep::Result<()> {
       let aligned = unsigned.with_extension("aligned");
       // -P 16 page-aligns stored libraries for 16 KiB page kernels.
@@ -285,19 +284,17 @@ impl BuildTools {
             .arg(unsigned)
             .arg(&aligned),
       )?;
+      let apksigner = if cfg!(windows) { "apksigner.bat" } else { "apksigner" };
+      let key = |name: &str| self.keys.join(name);
       self.run(
-         Command::new(self.dir.join("apksigner"))
-            .args(["sign", "--ks"])
-            .arg(&self.key)
-            .args([
-               "--ks-key-alias",
-               "androiddebugkey",
-               "--ks-pass",
-               "pass:android",
-               "--key-pass",
-               "pass:android",
-               "--out",
-            ])
+         Command::new(self.dir.join(apksigner))
+            .args(["sign", "--v1-signing-enabled", "false", "--v2-signing-enabled", "false", "--key"])
+            .arg(key("phoenix.pk8"))
+            .arg("--cert")
+            .arg(key("phoenix.der"))
+            .arg("--lineage")
+            .arg(key("lineage"))
+            .args(["--rotation-min-sdk-version", "28", "--out"])
             .arg(signed)
             .arg(&aligned),
       )?;
