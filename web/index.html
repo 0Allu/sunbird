@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phoenix Unlock</title>
+<meta name="description" content="Patch Discord's Phoenix client in your browser: no access gate, plugins built in.">
+<style>
+  :root { color-scheme: light dark; --bg:#f6f6f8; --card:#fff; --fg:#17171c; --mut:#6b6b76; --line:#e3e3e8; --acc:#5865f2; --ok:#1f8a4c; --err:#c2353a; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111214; --card:#1c1d21; --fg:#ececf1; --mut:#9a9aa6; --line:#2c2d33; --ok:#3fb977; --err:#ef6b6f; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width:560px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:26px; margin:8px 0 4px; letter-spacing:-.01em; }
+  .lede { color:var(--mut); margin:0 0 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin:0 0 14px; }
+  .row { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:8px 0; border-bottom:1px solid var(--line); }
+  .row:last-child { border-bottom:0; }
+  .row label { color:var(--mut); }
+  select { -webkit-appearance:none; appearance:none; font:inherit; color:var(--fg); background-color:var(--card); border:1px solid var(--line); border-radius:10px; padding:8px 34px 8px 12px; min-width:0; max-width:60%; cursor:pointer;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%239a9aa6' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat:no-repeat; background-position:right 12px center; transition:border-color .15s; }
+  select:hover, select:focus { border-color:var(--acc); outline:none; }
+  input[type=text] { font:inherit; color:var(--fg); background:var(--card); border:1px solid var(--line); border-radius:10px; padding:8px 12px; min-width:0; width:60%; text-align:right; transition:border-color .15s; }
+  input[type=text]:hover, input[type=text]:focus { border-color:var(--acc); outline:none; }
+  input[type=text][aria-invalid=true] { border-color:var(--err); }
+  option { background:var(--card); color:var(--fg); }
+  button, .btn { display:block; width:100%; font:inherit; font-weight:600; padding:14px; border:0; border-radius:12px; background:var(--acc); color:#fff; text-align:center; text-decoration:none; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  .ghost { background:transparent; color:var(--acc); border:1px solid var(--line); margin-top:10px; }
+  ol.steps { list-style:none; padding:0; margin:0; font-size:14px; }
+  ol.steps li { padding:6px 0; display:grid; grid-template-columns:1fr auto; gap:2px 8px; }
+  ol.steps li .bar { grid-column:1/-1; height:4px; background:var(--line); border-radius:2px; overflow:hidden; }
+  ol.steps li .bar i { display:block; height:100%; width:0; background:var(--acc); transition:width .2s; }
+  .state { color:var(--mut); font-variant-numeric:tabular-nums; }
+  .done .state { color:var(--ok); } .fail .state { color:var(--err); }
+  pre { font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap; color:var(--mut); margin:10px 0 0; max-height:180px; overflow:auto; }
+  .note { font-size:14px; color:var(--mut); }
+  .note b { color:var(--fg); }
+  .err { color:var(--err); font-size:14px; }
+  ul.links { padding-left:18px; font-size:14px; }
+  a { color:var(--acc); }
+  [hidden] { display:none !important; }
+  h2 { font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; color:var(--mut); margin:18px 4px 8px; }
+  label.plugin { display:grid; grid-template-columns:auto 1fr; gap:2px 12px; align-items:start; padding:10px 0; border-bottom:1px solid var(--line); cursor:pointer; }
+  label.plugin:last-child { border-bottom:0; }
+  label.plugin input { grid-row:1/3; width:20px; height:20px; margin:2px 0 0; accent-color:var(--acc); cursor:pointer; }
+  label.plugin b { font-weight:600; }
+  label.plugin span { font-size:14px; color:var(--mut); }
+  #frida textarea, #jsp textarea { display:block; width:100%; margin-top:10px; font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--fg); background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:10px; resize:vertical; }
+  #frida input[type=file], #jsp input[type=file] { max-width:100%; font-size:14px; }
+  .contributors { display:flex; flex-wrap:wrap; gap:12px 24px; }
+  .contributors a { display:flex; align-items:center; gap:10px; font-weight:600; text-decoration:none; color:var(--fg); }
+  .contributors a:hover { color:var(--acc); }
+  .contributors img { border-radius:50%; background:var(--line); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Phoenix Unlock</h1>
+  <p class="lede">Patches Discord's new native client (Phoenix) so it opens without the access gate, with Phoenix Unlock's plugin runtime and the plugins you pick built in. It all runs in this browser; nothing is uploaded.</p>
+
+  <section class="card" id="setup">
+    <div class="row"><label for="ver">Discord build</label><select id="ver"></select></div>
+    <div class="row"><label for="dpi">Screen density</label><select id="dpi"></select></div>
+    <div class="row"><label for="lang">Language</label><select id="lang"></select></div>
+    <div class="row"><label for="mode">Install</label><select id="mode">
+      <option value="replace" selected>Replace Discord</option>
+      <option value="side">Next to Discord</option>
+    </select></div>
+    <div class="row" id="pkg-row" hidden><label for="pkg">Package name</label><input type="text" id="pkg" value="com.discord.phoenix" spellcheck="false" autocapitalize="off" autocomplete="off"></div>
+  </section>
+
+  <h2>Plugins</h2>
+  <section class="card" id="plugins">
+    <label class="plugin"><input type="checkbox" id="runtime" checked><b>Plugin runtime</b><span>Phoenix Unlock's plugin runtime, with native hooks through ShadowHook. Pick ready-made plugins and/or add your own below; manage them in Discord Settings → Phoenix. Off: only the access patches.</span></label>
+    <label class="plugin"><input type="checkbox" id="frida-on"><b>Frida gadget (advanced)</b><span>Embeds frida-gadget (+40 MB) for Frida scripts and debugging: a floating JS panel, a console and an optional debug shell. Not needed for the plugins above.</span></label>
+  </section>
+  <section class="card" id="jsp">
+    <p class="note"><b>Include</b></p>
+    <div id="jsp-bundled"></div>
+    <p class="note"><b>Your plugins</b> run next to the ones above (the global <code>phoenix</code> API, plain scripts; types in <a href="https://github.com/mantikafasi/phoenix-unlock/blob/rust/crates/runtime/phoenix.d.ts">phoenix.d.ts</a>). Leading <code>// @description</code>, <code>// @version</code> and <code>// @author</code> lines describe it in Discord Settings → Phoenix; a file is named after itself. Optional: pick .js files and/or write one below.</p>
+    <input type="file" id="jsp-files" multiple accept=".js,text/javascript">
+    <textarea id="jsp-code" rows="8" spellcheck="false" aria-label="Your plugin" placeholder="// @description Logs incoming messages (adb logcat -s phoenix)
+phoenix.on(phoenix.gateway.messageCreate, (m) => phoenix.log.info(m.author?.username, ':', m.content));"></textarea>
+  </section>
+
+  <section class="card" id="frida" hidden>
+    <p class="note"><b>Frida scripts</b> run inside Discord when it starts (Frida 17 API with <code>Java</code>, plain scripts without imports). The ones you pick here are installed on first start; in the app, the floating <b>JS</b> button opens a panel to turn plugins on and off, add more from a URL, reload them, and see their console.</p>
+    <input type="file" id="frida-files" multiple accept=".js,text/javascript">
+    <textarea id="frida-code" rows="10" spellcheck="false" aria-label="Frida script"></textarea>
+  </section>
+
+  <button id="go">Patch Discord</button>
+  <p class="err" id="err" hidden></p>
+
+  <section class="card" id="progress" hidden>
+    <ol class="steps" id="steps"></ol>
+    <pre id="log"></pre>
+  </section>
+
+  <section class="card" id="manual" hidden>
+    <p class="note"><b>Automatic download isn't available.</b> Download these files, then pick all of them below.</p>
+    <ul class="links" id="links"></ul>
+    <input type="file" id="files" multiple accept=".apk,application/vnd.android.package-archive,application/octet-stream">
+  </section>
+
+  <section class="card" id="result" hidden>
+    <a class="btn" id="dl" download>Download patched APK</a>
+    <p class="note"><span id="note-side">1. It installs as <b>Discord Phoenix</b>, next to your normal Discord, and you sign in once.</span><span id="note-replace" hidden>1. Uninstall Discord first if it came from the Play Store; Android won't update an app signed with a different key.</span><br>
+    2. Open the downloaded file and allow your browser to install apps if asked.<br>
+    3. Later builds: just patch again. Builds are signed with Phoenix Unlock's key, rotated from the one earlier builds used, so it installs as an update over either (Android 9+) and you stay logged in.</p>
+  </section>
+
+  <h2>Contributors</h2>
+  <section class="card contributors">
+    <a href="https://github.com/mantikafasi"><img src="https://github.com/mantikafasi.png?size=96" alt="" width="48" height="48" loading="lazy">mantikafasi</a>
+    <a href="https://github.com/amaanq"><img src="https://github.com/amaanq.png?size=96" alt="" width="48" height="48" loading="lazy">Amaan Qureshi</a>
+  </section>
+
+  <p class="note">Unofficial and not affiliated with Discord. Source: <a href="https://github.com/mantikafasi/phoenix-unlock">github.com/mantikafasi/phoenix-unlock</a></p>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>

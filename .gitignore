@@ -1,6 +1,7 @@
 *
 
 !.cade
+!AGENTS.md
 !.editorconfig
 !.gitignore
 !.rustfmt.toml
@@ -24,3 +25,17 @@
 
 !scripts/
 !scripts/*.nu
+
+!.github/
+!.github/**
+
+!web/
+!web/**
+# built from plugins/*/src by web/tools/bundle-plugins.mjs (CI does it for the site)
+web/plugins/*.js
+web/plugins/index.json
+!web/plugins/frida-*.js
+
+!frida/
+!frida/**
+frida/node_modules/
