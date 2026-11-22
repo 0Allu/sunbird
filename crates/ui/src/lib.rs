@@ -400,6 +400,19 @@ pub fn encode(ops: &[Op]) -> Vec<u8> {
    out
 }
 
+/// Sets `key` to `value` in `props`, or removes it when `value` is `None`.
+pub fn set_prop(props: &mut Props, key: Prop, value: Option<Value>) {
+   let at = props.iter().position(|(existing, _)| *existing == key);
+   match (at, value) {
+      (Some(index), Some(value)) => props[index].1 = value,
+      (Some(index), None) => {
+         props.remove(index);
+      },
+      (None, Some(value)) => props.push((key, value)),
+      (None, None) => {},
+   }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Node {
    pub kind:  ViewKind,

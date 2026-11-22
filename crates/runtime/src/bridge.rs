@@ -105,6 +105,9 @@ static GUEST_HOST: AtomicPtr<_jobject> = AtomicPtr::new(ptr::null_mut());
 static INVOKE_METHOD: AtomicPtr<_jmethodID> = AtomicPtr::new(ptr::null_mut());
 static NATIVES_BOUND: AtomicBool = AtomicBool::new(false);
 static ORIGINAL_DISPATCH: OnceLock<DispatchFn> = OnceLock::new();
+/// `GuestHost.d([B, Function0)`, which queues a view frame for the
+/// `wasm-guest` thread. Rust drops a `nativeDispatch` from any other thread.
+static ENQUEUE_METHOD: AtomicPtr<_jmethodID> = AtomicPtr::new(ptr::null_mut());
 
 pub fn install(sink: Box<dyn Sink>) {
    SINKS
@@ -121,8 +124,8 @@ fn consult(bytes: &[u8], ask: impl Fn(&dyn Sink, &[u8]) -> Action) -> Action {
    let mut replaced: Option<Vec<u8>> = None;
    for sink in sinks.iter() {
       let current = replaced.as_deref().unwrap_or(bytes);
-      let action = catch_unwind(AssertUnwindSafe(|| ask(sink.as_ref(), current)))
-         .unwrap_or_else(|_| {
+      let action =
+         catch_unwind(AssertUnwindSafe(|| ask(sink.as_ref(), current))).unwrap_or_else(|_| {
             log::warn!("bridge: a sink panicked, the frame went on unmodified");
             Action::Pass
          });
@@ -236,6 +239,51 @@ pub fn invoke(frame: &[u8]) -> bool {
    true
 }
 
+/// Queues view `frame` for Rust as if Java had dispatched it. The frame
+/// still passes the sinks. Same conditions as [`apply_ops`].
+pub fn inject(frame: &[u8]) -> bool {
+   let guest_host = GUEST_HOST.load(Ordering::Acquire);
+   let (Some(body), false) = (frame.strip_prefix(&[0; 4]), guest_host.is_null()) else {
+      return false;
+   };
+   let Some(env) = env() else {
+      return false;
+   };
+   // SAFETY: `env` belongs to this thread and `guest_host` is a global ref.
+   // `d` takes the frame without its 4-byte header and a nullable callback.
+   unsafe {
+      let mut method = ENQUEUE_METHOD.load(Ordering::Acquire);
+      if method.is_null() {
+         let class = jni!(env, GetObjectClass, guest_host);
+         method = jni!(
+            env,
+            GetMethodID,
+            class,
+            c"d".as_ptr(),
+            c"([BLkotlin/jvm/functions/Function0;)V".as_ptr()
+         );
+         jni!(env, DeleteLocalRef, class);
+         if clear_exception(env) || method.is_null() {
+            log::warn!("bridge: GuestHost has no d([B, Function0)");
+            return false;
+         }
+         ENQUEUE_METHOD.store(method, Ordering::Release);
+      }
+      let Some((array, _)) = new_bytes(env, body) else {
+         return false;
+      };
+      jni!(
+         env,
+         CallVoidMethodA,
+         guest_host,
+         method,
+         [jvalue { l: array }, jvalue { l: ptr::null_mut() }].as_ptr()
+      );
+      jni!(env, DeleteLocalRef, array);
+      !clear_exception(env)
+   }
+}
+
 /// Which `GuestHost` method `method` is, cached per method id.
 ///
 /// # Safety
@@ -334,6 +382,7 @@ unsafe extern "system" fn call_void_method_a(
       }
 
       let batch = read_bytes(env, (*args).l, Some((*args.add(1)).i));
+      let _guard = UI_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
       match consult(&batch, |sink, batch| sink.ops(batch)) {
          Action::Drop => {},
          Action::Pass => original(env, obj, method, args),
@@ -350,7 +399,9 @@ unsafe extern "system" fn call_void_method_a(
 }
 
 /// `invoke` returns null for UI-op batches, and `UIManager` parses them on the
-/// caller's thread, so Rust's batches and [`apply_ops`] share `UI_LOCK`.
+/// caller's thread, so Rust's batches and [`apply_ops`] share `UI_LOCK`. It is
+/// held while the sinks run, so a follow-up batch a sink queues lands after
+/// the batch that made its parents.
 unsafe extern "system" fn call_object_method_a(
    env: *mut JNIEnv,
    obj: jobject,
@@ -385,8 +436,8 @@ unsafe extern "system" fn call_object_method_a(
          return original(env, obj, method, args);
       }
       let frame = read_bytes(env, request, None);
-      let action = consult(&frame[4..], |sink, batch| sink.ops(batch));
       let _guard = UI_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+      let action = consult(&frame[4..], |sink, batch| sink.ops(batch));
       match action {
          Action::Drop => ptr::null_mut(),
          Action::Pass => original(env, obj, method, args),

@@ -43,6 +43,7 @@ use plumage_ui::{
       Spring,
       Worklet,
    },
+   set_prop,
    templates,
 };
 use plumage_wire::{
@@ -205,18 +206,6 @@ impl Tree {
       let mut ids = vec![self.id];
       ids.extend(self.kids.iter().flat_map(Self::ids));
       ids
-   }
-}
-
-fn set_prop(props: &mut Props, key: Prop, value: Option<Value>) {
-   let at = props.iter().position(|(existing, _)| *existing == key);
-   match (at, value) {
-      (Some(index), Some(value)) => props[index].1 = value,
-      (Some(index), None) => {
-         props.remove(index);
-      },
-      (None, Some(value)) => props.push((key, value)),
-      (None, None) => {},
    }
 }
 

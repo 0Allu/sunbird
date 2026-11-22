@@ -31,6 +31,7 @@ mod gateway;
 mod js;
 mod local;
 #[cfg(target_os = "android")] mod jvm;
+#[cfg(target_os = "android")] mod patches;
 #[cfg(target_os = "android")] mod settings;
 #[cfg(target_os = "android")] mod store;
 
@@ -308,7 +309,10 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
 
    let plugins = js::load_plugins(state, bundled)?;
    #[cfg(target_os = "android")]
-   settings::start();
+   {
+      settings::start();
+      patches::start();
+   }
    Ok(Started {
       target: state.image.path.clone(),
       build: state.build.map(|build| build.label),

@@ -52,6 +52,18 @@ use crate::{
 use crate::{
    discord,
    fetch,
+   patches::{
+      self,
+      Command,
+      Contribution,
+      ContributionId,
+      Outcome,
+      Place,
+      Rendered,
+      Sent,
+      UiContext,
+      targets::Target,
+   },
    store,
 };
 
@@ -122,19 +134,37 @@ pub enum Before {
 /// stay JS values owned by the runtime, and the only thing plugins can reach is
 /// their own `plumage` object.
 struct Registry<'js> {
-   gateway: Object<'js>,
-   handles: Vec<(EventId, Object<'js>)>,
-   hooks:   RefCell<HashMap<EventId, Vec<Hook<'js>>>>,
-   defined: RefCell<BTreeMap<String, Vec<Definition<'js>>>>,
+   gateway:      Object<'js>,
+   handles:      Vec<(EventId, Object<'js>)>,
+   hooks:        RefCell<HashMap<EventId, Vec<Hook<'js>>>>,
+   defined:      RefCell<BTreeMap<String, Vec<Definition<'js>>>>,
    /// Kept across unloads, so a reloaded plugin sees what the user chose.
-   chosen:  RefCell<ChosenMap>,
+   chosen:       RefCell<ChosenMap>,
    /// `plumage.onUnload` callbacks, run when the plugin is turned off,
    /// reloaded or removed.
-   unloads: RefCell<HashMap<String, Vec<Function<'js>>>>,
+   unloads:      RefCell<HashMap<String, Vec<Function<'js>>>>,
    /// The resolve and reject of each promise a worker thread will settle, by
    /// id.
    #[cfg(target_os = "android")]
-   pending: RefCell<HashMap<u64, (Function<'js>, Function<'js>)>>,
+   pending:      RefCell<HashMap<u64, (Function<'js>, Function<'js>)>>,
+   #[cfg(target_os = "android")]
+   ui:           RefCell<HashMap<ContributionId, Callbacks<'js>>>,
+   /// Slash commands by lowercase name, with the plugin that registered each.
+   #[cfg(target_os = "android")]
+   commands:     RefCell<HashMap<String, (String, Function<'js>)>>,
+   /// `plumage.messages.onSend` interceptors in registration order, by id.
+   #[cfg(target_os = "android")]
+   interceptors: RefCell<Vec<(u64, String, Function<'js>)>>,
+}
+
+/// A contribution's plugin callbacks. `evaluate` is `render`, or `visible`
+/// for a message action.
+#[cfg(target_os = "android")]
+struct Callbacks<'js> {
+   plugin:   String,
+   target:   Target,
+   press:    Option<Function<'js>>,
+   evaluate: Option<Function<'js>>,
 }
 
 // SAFETY: every field is bound to 'js, and Changed swaps exactly that lifetime.
@@ -260,6 +290,170 @@ impl Engine {
       drain(&self.runtime);
    }
 
+   /// Asks contribution `id` what it shows at `place`. A promise answers
+   /// later through [`patches::evaluated`], and this returns `None`.
+   #[cfg(target_os = "android")]
+   pub fn ui_evaluate(
+      &self,
+      id: ContributionId,
+      place: &Place,
+      context: &UiContext,
+   ) -> Option<Outcome> {
+      let outcome = self.context.with(|ctx| {
+         let (plugin, target, evaluate) = {
+            let registry = ctx.userdata::<Registry<'_>>()?;
+            let callbacks = registry.ui.borrow();
+            let callbacks = callbacks.get(&id)?;
+            (
+               callbacks.plugin.clone(),
+               callbacks.target,
+               callbacks.evaluate.clone()?,
+            )
+         };
+         let failed = || outcome_of(target, None);
+         let argument = match context_object(&ctx, context) {
+            Ok(argument) => argument,
+            Err(err) => {
+               log::error!("[{plugin}] ui context: {err}");
+               return Some(failed());
+            },
+         };
+         let result = match evaluate.call::<_, Value<'_>>((argument,)).catch(&ctx) {
+            Ok(result) => result,
+            Err(err) => {
+               log::error!("[{plugin}] render: {err}");
+               return Some(failed());
+            },
+         };
+         let Some(promise) = result.as_promise() else {
+            return Some(outcome_of(target, Some(&result)));
+         };
+         let settle = |place: Place, plugin: String| {
+            let settled = place.clone();
+            let ok = Function::new(ctx.clone(), move |value: Value<'_>| {
+               patches::evaluated(id, settled.clone(), outcome_of(target, Some(&value)));
+            });
+            let err = Function::new(ctx.clone(), move |reason: Value<'_>| {
+               log::error!("[{plugin}] render: {reason:?}");
+               patches::evaluated(id, place.clone(), outcome_of(target, None));
+            });
+            let then = promise.then()?;
+            then.call::<_, ()>((rquickjs::function::This(promise.clone()), ok?, err?))
+         };
+         if let Err(err) = settle(place.clone(), plugin.clone()).catch(&ctx) {
+            log::error!("[{plugin}] render: {err}");
+            return Some(failed());
+         }
+         None
+      });
+      drain(&self.runtime);
+      outcome
+   }
+
+   #[cfg(target_os = "android")]
+   pub fn ui_press(&self, id: ContributionId, context: &UiContext) {
+      self.context.with(|ctx| {
+         let Some((plugin, press)) = ctx.userdata::<Registry<'_>>().and_then(|registry| {
+            let callbacks = registry.ui.borrow();
+            let callbacks = callbacks.get(&id)?;
+            Some((callbacks.plugin.clone(), callbacks.press.clone()?))
+         }) else {
+            return;
+         };
+         let run = || -> rquickjs::Result<()> {
+            press.call::<_, Value<'_>>((context_object(&ctx, context)?,))?;
+            Ok(())
+         };
+         if let Err(err) = run().catch(&ctx) {
+            log::error!("[{plugin}] onPress: {err}");
+         }
+      });
+      drain(&self.runtime);
+   }
+
+   /// Runs the slash command `text` names, if any, then every send
+   /// interceptor.
+   #[cfg(target_os = "android")]
+   pub fn submit(&self, text: &str, context: &UiContext) -> Sent {
+      let sent = self.context.with(|ctx| {
+         let Some(registry) = ctx.userdata::<Registry<'_>>() else {
+            return Sent::Unchanged;
+         };
+         let argument = match context_object(&ctx, context) {
+            Ok(argument) => argument,
+            Err(err) => {
+               log::error!("send context: {err}");
+               return Sent::Unchanged;
+            },
+         };
+         let mut value = text.to_owned();
+         let invoked = text.strip_prefix('/').and_then(|rest| {
+            let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            let commands = registry.commands.borrow();
+            let (plugin, execute) = commands.get(&name.to_lowercase())?;
+            Some((
+               name.to_owned(),
+               args.trim().to_owned(),
+               plugin.clone(),
+               execute.clone(),
+            ))
+         });
+         if let Some((name, args, plugin, execute)) = invoked {
+            let result = match execute
+               .call::<_, Value<'_>>((args, argument.clone()))
+               .catch(&ctx)
+            {
+               Ok(result) => result,
+               Err(err) => {
+                  log::error!("[{plugin}] /{name}: {err}");
+                  return Sent::Cancel;
+               },
+            };
+            if result.is_promise() {
+               return Sent::Cancel;
+            }
+            let outgoing = match result.as_object() {
+               Some(object) if !result.is_string() => {
+                  object.get::<_, Option<String>>("content").ok().flatten()
+               },
+               _ => result.as_string().and_then(|text| text.to_string().ok()),
+            };
+            match outgoing {
+               Some(outgoing) if !outgoing.is_empty() => value = outgoing,
+               _ => return Sent::Cancel,
+            }
+         }
+         let interceptors = registry
+            .interceptors
+            .borrow()
+            .iter()
+            .map(|(_, plugin, function)| (plugin.clone(), function.clone()))
+            .collect::<Vec<_>>();
+         drop(registry);
+         for (plugin, function) in interceptors {
+            match function
+               .call::<_, Value<'_>>((value.clone(), argument.clone()))
+               .catch(&ctx)
+            {
+               Ok(result) if result.as_bool() == Some(false) => return Sent::Cancel,
+               Ok(result) => {
+                  if let Some(text) = result.as_string().and_then(|text| text.to_string().ok()) {
+                     value = text;
+                  }
+               },
+               Err(err) => log::error!("[{plugin}] onSend: {err}"),
+            }
+         }
+         if value == text {
+            Sent::Unchanged
+         } else {
+            Sent::Text(value)
+         }
+      });
+      drain(&self.runtime);
+      sent
+   }
+
    /// Evaluates `name` with a fresh `plumage` object, recording any error.
    fn eval(&mut self, name: &str) {
       let Some(loaded) = self.plugins.get_mut(name) else {
@@ -304,6 +498,22 @@ impl Engine {
             }
          }
          registry.defined.borrow_mut().remove(name);
+         #[cfg(target_os = "android")]
+         {
+            registry
+               .ui
+               .borrow_mut()
+               .retain(|_, callbacks| callbacks.plugin != name);
+            registry
+               .commands
+               .borrow_mut()
+               .retain(|_, (plugin, _)| plugin != name);
+            registry
+               .interceptors
+               .borrow_mut()
+               .retain(|(_, plugin, _)| plugin != name);
+            patches::forget(name);
+         }
          let mut hooks = registry.hooks.borrow_mut();
          for (event, list) in hooks.iter_mut() {
             list.retain(|hook| hook.plugin != name);
@@ -602,6 +812,12 @@ fn registry<'js>(ctx: &Ctx<'js>, events: &GatewayRegistry) -> rquickjs::Result<R
       unloads: RefCell::default(),
       #[cfg(target_os = "android")]
       pending: RefCell::default(),
+      #[cfg(target_os = "android")]
+      ui: RefCell::default(),
+      #[cfg(target_os = "android")]
+      commands: RefCell::default(),
+      #[cfg(target_os = "android")]
+      interceptors: RefCell::default(),
    })
 }
 
@@ -716,7 +932,10 @@ fn api<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
       )?,
    )?;
 
-   api.set("messages", messages_object(ctx)?)?;
+   let messages = messages_object(ctx)?;
+   #[cfg(target_os = "android")]
+   patch_api(ctx, plugin, &api, &messages)?;
+   api.set("messages", messages)?;
    api.set("log", log_object(ctx, plugin)?)?;
    api.set("storage", storage(ctx, plugin)?)?;
    let settings = Object::new(ctx.clone())?;
@@ -779,7 +998,11 @@ fn messages_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
                None => (None, None, None),
             };
             let embeds = match embeds {
-               Some(embeds) => ctx.json_stringify(embeds)?.map(|json| json.to_string()).transpose()?,
+               Some(embeds) => {
+                  ctx.json_stringify(embeds)?
+                     .map(|json| json.to_string())
+                     .transpose()?
+               },
                None => None,
             };
             let embeds = RawValue::from_string(embeds.unwrap_or_else(|| "[]".to_owned()))
@@ -811,6 +1034,314 @@ fn messages_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
       })?,
    )?;
    Ok(messages)
+}
+
+/// `plumage.ui`, `plumage.commands` and `plumage.messages.onSend`.
+#[cfg(target_os = "android")]
+fn patch_api<'js>(
+   ctx: &Ctx<'js>,
+   plugin: &str,
+   api: &Object<'js>,
+   messages: &Object<'js>,
+) -> rquickjs::Result<()> {
+   let name = plugin.to_owned();
+   messages.set(
+      "onSend",
+      Function::new(
+         ctx.clone(),
+         move |ctx: Ctx<'js>, function: Function<'js>| on_send(&ctx, &name, function),
+      )?,
+   )?;
+   api.set("ui", ui_object(ctx, plugin)?)?;
+   api.set("commands", commands_object(ctx, plugin)?)
+}
+
+/// The `ctx` a plugin callback receives.
+#[cfg(target_os = "android")]
+fn context_object<'js>(ctx: &Ctx<'js>, context: &UiContext) -> rquickjs::Result<Object<'js>> {
+   let object = Object::new(ctx.clone())?;
+   object.set("channelId", context.channel_id.clone())?;
+   if let Some(id) = &context.message_id {
+      object.set("messageId", id.as_str())?;
+   }
+   if let Some(id) = &context.user_id {
+      object.set("userId", id.as_str())?;
+   }
+   if let Some(message) = &context.message {
+      object.set("message", ctx.json_parse(message.as_str())?)?;
+   }
+   let channel = context.channel_id.clone();
+   object.set(
+      "reply",
+      Function::new(ctx.clone(), move |ctx: Ctx<'js>, text: String| {
+         let channel = channel
+            .as_deref()
+            .ok_or_else(|| Exception::throw_message(&ctx, "no open channel to reply in"))?;
+         let embeds = RawValue::from_string("[]".to_owned())
+            .map_err(|err| Exception::throw_internal(&ctx, &err.to_string()))?;
+         let options = local::Options {
+            author:   "Plumage",
+            guild_id: None,
+            embeds:   &embeds,
+         };
+         local::add(channel, &text, &options)
+            .ok_or_else(|| Exception::throw_message(&ctx, "this build has no MESSAGE_CREATE"))
+      })?,
+   )?;
+   Ok(object)
+}
+
+/// A `render` or `visible` result as the patches draw it.
+#[cfg(target_os = "android")]
+fn outcome_of(target: Target, value: Option<&Value<'_>>) -> Outcome {
+   if target == Target::Action {
+      return Outcome::Shown(value.is_some_and(|value| {
+         value
+            .as_bool()
+            .unwrap_or_else(|| !value.is_null() && !value.is_undefined())
+      }));
+   }
+   let rendered = value.and_then(|value| {
+      if value.is_null() || value.is_undefined() || value.as_bool() == Some(false) {
+         return None;
+      }
+      if let Some(text) = value.as_string() {
+         return Some(Rendered {
+            text:  text.to_string().ok()?,
+            color: None,
+         });
+      }
+      if let Some(object) = value.as_object() {
+         return Some(Rendered {
+            text:  object.get::<_, Option<String>>("text").ok().flatten()?,
+            color: object
+               .get::<_, Option<f64>>("color")
+               .ok()
+               .flatten()
+               .map(|color| {
+                  #[expect(clippy::cast_possible_truncation, reason = "colors are 32-bit ARGB")]
+                  let color = color as i64;
+                  color
+               }),
+         });
+      }
+      Some(Rendered {
+         text:  value.as_number()?.to_string(),
+         color: None,
+      })
+   });
+   Outcome::Text(rendered)
+}
+
+/// A function that undoes a registration, with `update` to redraw it.
+#[cfg(target_os = "android")]
+fn remover<'js>(
+   ctx: &Ctx<'js>,
+   remove: impl Fn(&Ctx<'js>) + 'js,
+   update: Option<ContributionId>,
+) -> rquickjs::Result<Function<'js>> {
+   let function = Function::new(ctx.clone(), move |ctx: Ctx<'js>| remove(&ctx))?;
+   if let Some(id) = update {
+      function.set(
+         "update",
+         Function::new(ctx.clone(), move || patches::update(id))?,
+      )?;
+   }
+   Ok(function)
+}
+
+/// `plumage.ui`, the UI patch targets.
+#[cfg(target_os = "android")]
+fn ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
+   let ui = Object::new(ctx.clone())?;
+   for (method, target) in [
+      ("addHeaderButton", Target::Header),
+      ("addComposerButton", Target::Composer),
+      ("addMessageAccessory", Target::Content),
+      ("addMessageAction", Target::Action),
+      ("addProfileSection", Target::Profile),
+   ] {
+      let name = plugin.to_owned();
+      ui.set(
+         method,
+         Function::new(ctx.clone(), move |ctx: Ctx<'js>, options: Object<'js>| {
+            add_contribution(&ctx, &name, target, &options)
+         })?,
+      )?;
+   }
+   Ok(ui)
+}
+
+#[cfg(target_os = "android")]
+fn add_contribution<'js>(
+   ctx: &Ctx<'js>,
+   plugin: &str,
+   target: Target,
+   options: &Object<'js>,
+) -> rquickjs::Result<Function<'js>> {
+   let placement = options.get::<_, Option<String>>("placement")?;
+   let target = match (target, placement.as_deref()) {
+      (Target::Content, Some("header")) => Target::Timestamp,
+      _ => target,
+   };
+   let press = options.get::<_, Option<Function<'js>>>("onPress")?;
+   let evaluate = if target == Target::Action {
+      options.get::<_, Option<Function<'js>>>("visible")?
+   } else {
+      options.get::<_, Option<Function<'js>>>("render")?
+   };
+   let label = match target {
+      Target::Profile => options.get::<_, Option<String>>("title")?,
+      _ => options.get::<_, Option<String>>("label")?,
+   };
+   let needs = match target {
+      Target::Header | Target::Composer | Target::Action => (label.is_some(), "label and onPress"),
+      Target::Content | Target::Timestamp => (evaluate.is_some(), "render"),
+      Target::Profile => (label.is_some() && evaluate.is_some(), "title and render"),
+   };
+   let missing_press =
+      matches!(target, Target::Header | Target::Composer | Target::Action) && press.is_none();
+   if !needs.0 || missing_press {
+      return Err(Exception::throw_type(
+         ctx,
+         &format!("expected an object with {}", needs.1),
+      ));
+   }
+
+   let id = ContributionId::next();
+   let conditional = target == Target::Action && evaluate.is_some();
+   ctx.userdata::<Registry<'js>>()
+      .ok_or_else(|| Exception::throw_internal(ctx, "no registry"))?
+      .ui
+      .borrow_mut()
+      .insert(id, Callbacks {
+         plugin: plugin.to_owned(),
+         target,
+         press,
+         evaluate,
+      });
+   patches::add(Contribution {
+      id,
+      plugin: plugin.to_owned(),
+      target,
+      label: label.unwrap_or_default(),
+      icon: options.get("icon")?,
+      danger: options
+         .get::<_, Option<bool>>("danger")?
+         .unwrap_or_default(),
+      priority: options
+         .get::<_, Option<i32>>("priority")?
+         .unwrap_or_default(),
+      conditional,
+   });
+   remover(
+      ctx,
+      move |ctx| {
+         if let Some(registry) = ctx.userdata::<Registry<'js>>() {
+            registry.ui.borrow_mut().remove(&id);
+         }
+         patches::remove(id);
+      },
+      Some(id),
+   )
+}
+
+/// `plumage.commands`, slash commands typed in the message box.
+#[cfg(target_os = "android")]
+fn commands_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
+   let commands = Object::new(ctx.clone())?;
+   let owner = plugin.to_owned();
+   commands.set(
+      "register",
+      Function::new(ctx.clone(), move |ctx: Ctx<'js>, options: Object<'js>| {
+         let name = options
+            .get::<_, Option<String>>("name")?
+            .map(|name| name.trim_start_matches('/').to_lowercase())
+            .filter(|name| !name.is_empty() && !name.contains(char::is_whitespace));
+         let execute = options.get::<_, Option<Function<'js>>>("execute")?;
+         let (Some(name), Some(execute)) = (name, execute) else {
+            return Err(Exception::throw_type(
+               &ctx,
+               "commands.register({name, execute}) expected, with a name without spaces",
+            ));
+         };
+         ctx.userdata::<Registry<'js>>()
+            .ok_or_else(|| Exception::throw_internal(&ctx, "no registry"))?
+            .commands
+            .borrow_mut()
+            .insert(name.clone(), (owner.clone(), execute.clone()));
+         patches::add_command(Command {
+            name:        name.clone(),
+            description: options
+               .get::<_, Option<String>>("description")?
+               .unwrap_or_default(),
+            icon:        options.get("icon")?,
+            plugin:      owner.clone(),
+         });
+         remover(
+            &ctx,
+            move |ctx| {
+               if let Some(registry) = ctx.userdata::<Registry<'js>>() {
+                  let mut commands = registry.commands.borrow_mut();
+                  if commands
+                     .get(&name)
+                     .is_some_and(|(_, current)| *current == execute)
+                  {
+                     commands.remove(&name);
+                     patches::remove_command(&name);
+                  }
+               }
+            },
+            None,
+         )
+      })?,
+   )?;
+   commands.set(
+      "list",
+      Function::new(ctx.clone(), |ctx: Ctx<'js>| {
+         let list = rquickjs::Array::new(ctx.clone())?;
+         for (index, command) in patches::commands().into_iter().enumerate() {
+            let entry = Object::new(ctx.clone())?;
+            entry.set("name", command.name)?;
+            entry.set("description", command.description)?;
+            entry.set("plugin", command.plugin)?;
+            list.set(index, entry)?;
+         }
+         Ok::<_, rquickjs::Error>(list)
+      })?,
+   )?;
+   Ok(commands)
+}
+
+#[cfg(target_os = "android")]
+fn on_send<'js>(
+   ctx: &Ctx<'js>,
+   plugin: &str,
+   function: Function<'js>,
+) -> rquickjs::Result<Function<'js>> {
+   static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+   let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+   let registry = ctx
+      .userdata::<Registry<'js>>()
+      .ok_or_else(|| Exception::throw_internal(ctx, "no registry"))?;
+   registry
+      .interceptors
+      .borrow_mut()
+      .push((id, plugin.to_owned(), function));
+   patches::set_interceptors(registry.interceptors.borrow().len());
+   drop(registry);
+   remover(
+      ctx,
+      move |ctx| {
+         if let Some(registry) = ctx.userdata::<Registry<'js>>() {
+            let mut interceptors = registry.interceptors.borrow_mut();
+            interceptors.retain(|(existing, ..)| *existing != id);
+            patches::set_interceptors(interceptors.len());
+         }
+      },
+      None,
+   )
 }
 
 /// `plumage.log`, whose lines carry the plugin's name.

@@ -532,6 +532,28 @@ fn walk(
    Ok(())
 }
 
+/// The view frame (`yq.d`) Java sends Rust when `event` fires on `node`.
+#[must_use]
+pub fn encode_view_event(node: i32, event: Key, payload: &Value) -> Vec<u8> {
+   let mut out = vec![0, 0, 0, 0, 1, 1];
+   out.extend_from_slice(&node.to_le_bytes());
+   out.extend_from_slice(&event.get().to_le_bytes());
+   put_value(&mut out, payload);
+   out
+}
+
+/// Wraps `frames` in one kind-4 batch with an empty header.
+#[must_use]
+pub fn encode_batch(frames: &[Vec<u8>]) -> Vec<u8> {
+   let mut out = vec![0; HEADER];
+   out[0] = BATCH;
+   for frame in frames {
+      put_i32_len(&mut out, frame.len());
+      out.extend_from_slice(frame);
+   }
+   out
+}
+
 /// Rebuilds a kind-4 batch without the top-level frames at `offsets`. Any other
 /// input is one frame at offset 0, so it comes back empty when `offsets` holds
 /// 0 and unchanged otherwise.

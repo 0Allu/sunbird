@@ -933,6 +933,8 @@ declare namespace Plumage {
     /// just before the next gateway event it handles, usually well under a second later.
     enqueue<P>(sig: Sig<P>, payload: Partial<P>): void;
     readonly messages: Messages;
+    readonly ui: Ui;
+    readonly commands: Commands;
     readonly log: Log;
     readonly storage: Storage;
     readonly settings: Settings;
@@ -972,6 +974,97 @@ declare namespace Plumage {
     addLocal(channelId: string, content: string, options?: LocalOptions): string;
     updateLocal(message: Partial<Message> & { id: string; channel_id: string }): boolean;
     deleteLocal(channelId: string, id: string): boolean;
+    /// Runs before a message from the message box is sent, after any slash command. Return a
+    /// string to send that instead, `false` to cancel, or nothing to leave it.
+    onSend(interceptor: (text: string, ctx: UiContext) => string | false | void): Remover;
+  }
+
+  /// `channelId` is the open channel, `reply` posts a local message there.
+  interface UiContext {
+    channelId: string | null;
+    reply(text: string): string;
+  }
+
+  interface MessageContext extends UiContext {
+    messageId: string;
+    /// The message as Phoenix cached it, when it did.
+    message?: Message;
+  }
+
+  interface ProfileContext extends UiContext {
+    /// Null for profiles with a default avatar.
+    userId?: string;
+  }
+
+  /// Text a `render` returns: plain, colored (32-bit ARGB), or nothing.
+  type Rendered = string | { text: string; color?: number } | null | undefined | false;
+
+  /// Undoes a registration. `update` draws it again, asking the plugin anew.
+  interface Remover {
+    (): void;
+    update?(): void;
+  }
+
+  /// A drawable in Phoenix's resources, like `res://ic_mana_puzzle_piece_plus`.
+  type Icon = string;
+
+  interface ButtonOptions {
+    icon: Icon;
+    label: string;
+    priority?: number;
+    onPress(ctx: UiContext): void;
+  }
+
+  /// Plugin UI next to Phoenix's own. Plugin callbacks run off the UI threads, so drawn results
+  /// land a moment after the screen they belong to. Everything goes away when the plugin is
+  /// turned off.
+  interface Ui {
+    /// In the chat header, left of search.
+    addHeaderButton(options: ButtonOptions): Remover;
+    /// In the message box, left of the emoji button.
+    addComposerButton(options: ButtonOptions): Remover;
+    /// A line under each message's content, or after its timestamp with `placement: "header"`.
+    /// It runs once per message and place, and the result is kept until `update`.
+    addMessageAccessory(options: {
+      placement?: "content" | "header";
+      priority?: number;
+      render(ctx: MessageContext): Rendered | Promise<Rendered>;
+    }): Remover;
+    /// A row in the message long-press menu, above Delete. The menu closes on press.
+    addMessageAction(options: {
+      label: string;
+      icon?: Icon;
+      danger?: boolean;
+      priority?: number;
+      visible?(ctx: MessageContext): boolean | Promise<boolean>;
+      onPress(ctx: MessageContext): void;
+    }): Remover;
+    /// A section at the end of a profile's main tab.
+    addProfileSection(options: {
+      title: string;
+      priority?: number;
+      render(ctx: ProfileContext): Rendered | Promise<Rendered>;
+    }): Remover;
+  }
+
+  interface CommandInfo {
+    name: string;
+    description: string;
+    plugin: string;
+  }
+
+  /// Slash commands typed in the message box. Matching ones are listed first in Discord's `/`
+  /// suggestions, and picking one fills in `/name `.
+  interface Commands {
+    /// `execute` runs when `/name args` is sent. Return text to send that instead, or nothing
+    /// (or a promise) to send nothing.
+    register(options: {
+      name: string;
+      description?: string;
+      icon?: Icon;
+      execute(args: string, ctx: UiContext): string | { content: string } | void | Promise<unknown>;
+    }): Remover;
+    list(): CommandInfo[];
   }
 
   interface Stores {
