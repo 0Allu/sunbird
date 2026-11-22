@@ -17,10 +17,11 @@ use std::time::{Duration, Instant};
 
 const PRELUDE: &str = include_str!("prelude.js");
 /// Built in after the prelude: the UI-op codec, Settings row templates and the Settings page.
-const MODULES: [(&str, &str); 3] = [
+const MODULES: [(&str, &str); 4] = [
     ("uiops", include_str!("../../ui/uiops.js")),
     ("settings_tpl", include_str!("settings_tpl.js")),
     ("settings", include_str!("settings.js")),
+    ("patches", include_str!("patches.js")),
 ];
 
 pub struct Config {

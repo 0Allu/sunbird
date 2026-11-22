@@ -1,4 +1,4 @@
-# Phoenix plugin API v1
+# Phoenix plugin API v2
 
 Plugins are plain JavaScript run by libplg's runtime (rquickjs / QuickJS-ng) inside Discord's
 Phoenix client. Each one gets `phoenix` and a tagged `console` in scope. Types:
@@ -19,11 +19,11 @@ Leading comment lines, read before the plugin runs:
 // @description What it does (shown in Settings)
 // @version 1.0.0
 // @author you
-// @api 1
+// @api 2
 ```
 
 `@api` is the plugin API version it needs; an app with an older API shows the plugin as failed
-instead of running it. The older one-line form `// Name: what it does` still works.
+instead of running it. v2 added the UI patch targets, `commands` and `messages.onSend`. The older one-line form `// Name: what it does` still works.
 
 ## Threads
 
@@ -69,6 +69,27 @@ Change notifications: listen to the matching gateway events (`on`/`observe`).
 | `fetch(url, {method, headers, body})` | HTTP through Android's HttpURLConnection; `{status, ok, text(), json()}`. |
 
 `ui.*` calls made before Phoenix's first screen is up wait for it.
+
+## UI patch targets
+
+Plugin UI goes next to Phoenix's own, styled like its neighbours. Each `add*` returns a remover
+with `.update()` (re-render, e.g. after your data changed); everything is removed when the plugin
+is turned off. Icons are Phoenix's drawables, e.g. `res://ic_mana_puzzle_piece_plus`,
+`res://ic_mana_id`, `res://ic_mana_angle_brackets`. Handlers get a `ctx` with `channelId` and
+`reply(text)` (a local "only you can see this" message from Phoenix).
+
+| | |
+|---|---|
+| `ui.addHeaderButton({icon, label, onPress(ctx)})` | Icon button in the chat header, left of search. |
+| `ui.addComposerButton({icon, label, onPress(ctx)})` | Icon button in the message box, left of the emoji button. |
+| `ui.addMessageAccessory({render(ctx), placement?})` | A line of text under each message's content (`placement: 'header'`: after its timestamp). `ctx = {messageId, channelId}`; return a string, `{text, color}`, `null` for nothing, or a Promise of those. Runs for every message row, so keep it fast. |
+| `ui.addMessageAction({label, icon?, danger?, visible?(ctx), onPress(ctx)})` | A row in the message long-press menu, in a group above Delete. `ctx = {messageId, channelId, message}`; the menu closes on press. |
+| `ui.addProfileSection({title, render(ctx)})` | A section at the end of a profile's Main tab. `ctx = {userId}` (from the avatar; null for default avatars); `render` returns text or a Promise of it. |
+| `commands.register({name, description?, execute(args, ctx)})` | Runs when you send `/name args` from the message box. Return text to send that instead; return nothing (or a Promise) and nothing is sent. `commands.list()` shows them all. |
+| `messages.onSend((text, ctx) => …)` | Before a message from the message box is sent: return a string to change it, `false` to cancel. Synchronous. |
+
+Not there yet: profile tabs, bottom tabs, custom pages outside Settings, our commands in
+Discord's `/` suggestions.
 
 ## Plugin
 

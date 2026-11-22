@@ -1,4 +1,4 @@
-// Phoenix plugin API v1 (libplg's rquickjs runtime). A plugin is a plain script run with `phoenix`
+// Phoenix plugin API v2 (libplg's rquickjs runtime). A plugin is a plain script run with `phoenix`
 // and a tagged `console` in scope; bundle TypeScript with esbuild (see plugins/example).
 // Reference: plugin/API.md.
 //
@@ -7,7 +7,7 @@
 //   // @description What it does
 //   // @version 1.0.0
 //   // @author you
-//   // @api 1            (refused cleanly by apps with an older API)
+//   // @api 2            (refused cleanly by apps with an older API)
 
 declare global {
   // ---- gateway payloads (the fields plugins usually need; Discord sends more) -------------------
@@ -51,6 +51,14 @@ declare global {
     | { type: 'number'; title: string; description?: string; default?: number }
     | { type: 'button'; title: string; onPress: () => void };
 
+  /** A remover; update() re-renders this contribution everywhere it is shown. */
+  interface Contribution { (): void; update(): void }
+  /** Phoenix drawable, e.g. "res://ic_mana_puzzle_piece_plus". */
+  type Icon = string;
+  interface UiContext { channelId: string | null; /** Local "only you can see this" message from Phoenix. */ reply(text: string): Promise<string> }
+  type UiText = string | { text: string; color?: number } | null | undefined | false;
+  interface CommandContext { channelId: string | null; reply(text: string): Promise<string> }
+
   interface PluginInfo { id: string; name: string; description: string; version: string; author: string; enabled: boolean; error: string | null; origin: string }
 
   interface Phoenix {
@@ -77,6 +85,8 @@ declare global {
       addLocal(channelId: string, content: string, opts?: { author?: string; guildId?: string; embeds?: any[] }): Promise<string>;
       updateLocal(message: Partial<Message> & { id: string; channel_id: string }): Promise<boolean | null>;
       deleteLocal(channelId: string, messageId: string): Promise<boolean | null>;
+      /** Before a message from the message box is sent: a string replaces it, false cancels. Synchronous. */
+      onSend(fn: (text: string, ctx: CommandContext) => string | false | void): () => void;
     };
     /**
      * Phoenix's stores: its own database (files/store/<account>/cache.sqlite, read-only) plus
@@ -128,6 +138,23 @@ declare global {
       confirm(title: string, message?: string, opts?: { ok?: string; cancel?: string }): Promise<boolean>;
       /** Android's document picker. Resolves to the file's name and text, or null if cancelled (4 MB max). */
       pickFile(mime?: string): Promise<{ name: string; text: string } | null>;
+      /** Icon button in the chat header, left of search. */
+      addHeaderButton(o: { id?: string; icon: Icon; label: string; priority?: number; onPress(ctx: UiContext): void }): Contribution;
+      /** Icon button in the message box, left of the emoji button. */
+      addComposerButton(o: { id?: string; icon: Icon; label: string; priority?: number; onPress(ctx: UiContext): void }): Contribution;
+      /** Text under each message's content, or after its timestamp with placement 'header'. Runs per row: keep it fast. */
+      addMessageAccessory(o: { id?: string; placement?: 'content' | 'header'; priority?: number; render(ctx: { messageId: string; channelId: string | null }): UiText | Promise<UiText> }): Contribution;
+      /** Row in the message long-press menu (above Delete); the menu closes on press. */
+      addMessageAction(o: { id?: string; label: string; icon?: Icon; danger?: boolean; priority?: number; visible?(ctx: { messageId: string | null; channelId: string | null }): boolean;
+        onPress(ctx: UiContext & { messageId: string | null; message: Message | null }): void }): Contribution;
+      /** Section at the end of a profile's Main tab. userId comes from the avatar (null for default avatars). */
+      addProfileSection(o: { id?: string; title: string; priority?: number; render(ctx: { userId: string | null }): UiText | Promise<UiText> }): Contribution;
+    };
+    /** Slash commands typed in the message box. */
+    readonly commands: {
+      /** execute's returned text is sent instead; nothing returned (or a Promise) sends nothing. */
+      register(o: { name: string; description?: string; execute(args: string, ctx: CommandContext): string | { content: string } | void | Promise<unknown> }): () => void;
+      list(): { name: string; description: string; plugin: string }[];
     };
     /** HTTP through Android's HttpURLConnection. */
     fetch(url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }): Promise<PhoenixResponse>;

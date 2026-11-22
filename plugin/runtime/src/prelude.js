@@ -126,7 +126,7 @@ const pickFile = (mime = '*/*') => new Promise((resolve, reject) => {
 });
 
 // ---- plugin API v1 ----------------------------------------------------------------------------
-const API = 1;
+const API = 2; // 2: ui.add*, commands, messages.onSend
 // Work that must run on Phoenix's store thread (dispatch, store reads): now if we are already there
 // (inside a phoenix.on listener), else just before Phoenix's next gateway event. Always a Promise.
 const storeQ = [];
@@ -303,6 +303,14 @@ const settingsFor = (id) => ({
     return track(id, () => settingListeners.get(id)?.delete(fn));
   },
 });
+// UI patch targets (patches.js): each returns a remover with .update() to re-render.
+const PT = () => globalThis.__phx_patches;
+const uiFor = (id) => ({ ...ui,
+  addHeaderButton: (o) => track(id, PT().add(id, 'header', o)),
+  addComposerButton: (o) => track(id, PT().add(id, 'composer', o)),
+  addMessageAccessory: (o) => track(id, PT().add(id, o && o.placement === 'header' ? 'mheader' : 'content', o)),
+  addMessageAction: (o) => track(id, PT().add(id, 'action', o)),
+  addProfileSection: (o) => track(id, PT().add(id, 'profile', o)) });
 const track = (id, unsub) => { const p = plugins.get(id); if (p) p.unsubs.push(unsub); return unsub; };
 const api = (id) => ({ id,
   bridge: { onOps: (fn) => track(id, brOn(0, id, fn)), onInvoke: (fn) => track(id, brOn(1, id, fn)),
@@ -319,7 +327,9 @@ const api = (id) => ({ id,
     raw: (ser, off) => onStore(() => parseOrNull(P.storeJson(ser, off))),
     /** fn({me, raw}) on the store thread, with synchronous readers. */
     read: (fn) => onStore(() => fn({ me: meNow, raw: (ser, off) => parseOrNull(P.storeJson(ser, off)) })) },
-  ui, messages, ready,
+  ui: uiFor(id), messages: { ...messages, onSend: (fn) => track(id, PT().onSend(id, fn)) }, ready,
+  /** Slash commands, run when you send "/name args" (nothing reaches Discord unless execute returns text). */
+  commands: { register: (o) => track(id, PT().command(id, o)), list: () => PT().commands() },
   version: { api: API, runtime: 'rquickjs (QuickJS-ng)', arch: N.arch, inlineHooks: N.inlineHooks },
   /** What this plugin offers other plugins (phoenix.plugins.get(id)). */
   exports: {},

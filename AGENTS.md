@@ -25,7 +25,7 @@ is about how to work on it without repeating past mistakes.
 | `web/` | The browser patcher (GitHub Pages): `lib/arm64.js`, `lib/x86.js` (host lib patches), `dex.js`, `axml.js`, `arsc.js`, `zip.js`, `sign.js`, `apk.js` (pipeline), `plugins.js` (plugin options + config block), `frida.js`; `tools/node-build.mjs` is the same pipeline as a CLI; `worker/proxy.js` is the Cloudflare CORS proxy. |
 | `web/plugins/` | Prebuilt artifacts served by the site: `libplg-{arm64,x86_64}.so`, `libshadowhook_nothing-arm64.so`, `message-logger.js`, frida gadget + bootstrap. `*.so` is gitignored except here. |
 | `plugin/` | The plugin host, a Rust workspace building `libplg.so`: `loader` (cdylib, `.init_array` constructor), `sigs` (typed config block filled by the patcher), `hook` (gateway registry hooks, JNI bridge, scanner, ShadowHook, Java helper loader), `runtime` (rquickjs, JS API). |
-| `plugin/runtime/src/prelude.js` | The JS side of the `phoenix` API. `settings.js` = the Settings → Phoenix pages. |
+| `plugin/runtime/src/prelude.js` | The JS side of the `phoenix` API. `settings.js` = the Settings → Phoenix pages. `patches.js` = UI patch targets (`ui.add*`, `commands`, `messages.onSend`). |
 | `plugin/API.md`, `plugin/runtime/phoenix.d.ts` | Plugin API reference and types. Keep both in sync with prelude.js. |
 | `plugin/ui/` | Phoenix UI-op format (`FORMAT.md`), codec (`uiops.js`), template generator (`mktpl.mjs`). |
 | `plugin/hook/java/phx/` | Java helper classes (picker, toast/confirm, DB) compiled to `picker.dex` and embedded in libplg. |
@@ -70,6 +70,20 @@ is about how to work on it without repeating past mistakes.
   child list, so the Phoenix row is spliced in by mirroring Rust's list and re-sending full
   `children` ops. The phone layout pushes Settings onto the app's root navigator; the tablet one
   has its own. Page headers copy the live status-bar inset from Rust's `stackHeader`.
+- **UI patch targets (`patches.js`):** it mirrors Rust's tree (children + accessibilityIds) and
+  anchors on language-neutral ids: `search.entry` (chat header), `composer.expressions` /
+  `composer` / `send` (message box), `message.content:<id>` / `message.timestamp:<id>` (rows),
+  `message.actions.root` (long-press sheet; its message comes from the list's `rowLongPress`
+  index), `profile-tab-pages` (profile sheet; user id from the avatar URL). Layouts are cloned
+  from the live neighbours, so themes carry over. Closing a sheet = a `dismiss` event to the
+  `sheet` node. Sending = `submit` on `composer` or `press` on `send`; Rust keeps the text from
+  `changeText`, so a rewrite is `changeText(new)` + the original event in one batch frame.
+  Our ids start at 0x58000000. Text set from a Promise waits ~100 ms so Java has applied the batch.
+- **Testing sends:** never post to real channels while testing; load a guard plugin (a
+  `phoenix.bridge.onDispatch` listener returning `false` for `submit` and `send` presses) and check `/commands` with `ctx.reply`.
+  `uiautomator dump` pops an accessibility toast over the bottom of the phone screen for a few
+  seconds: wait before tapping there. Git Bash turns `/word` into a Windows path in
+  `adb shell input text`: set `MSYS_NO_PATHCONV=1`.
 - **ShadowHook:** its constructors are patched to priority 101 (they must run before libplg's),
   it needs `libshadowhook_nothing.so` next to libplg (shipped by the patcher), and compiler-rt
   builtins linked in (`__clear_cache`). arm64 only.
