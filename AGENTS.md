@@ -7,6 +7,9 @@ is about how to work on it without repeating past mistakes.
 
 - **No self-attribution.** Never add `Co-Authored-By` (or any other agent attribution) to commits
   or PRs. Existing history was rewritten to remove them.
+- **API in Rust.** New plugin API features and their machinery (UI-op handling, patch targets,
+  settings pages, stores) are written in Rust inside libplg and exposed to JS as `__phx` natives.
+  JS (`prelude.js` etc.) stays thin `phoenix.*` wiring; don't grow the JS modules.
 - **One signing key.** Every APK (site, `node-build`, `patch.py`) is signed with
   `web/signing-key.json`, so builds install over each other. Don't introduce other keys.
 - **Push only what works.** Test on a device (WSA and/or the owner's phone) before pushing.
