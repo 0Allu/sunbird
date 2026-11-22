@@ -26,6 +26,7 @@ use plumage_sigs::{
 #[cfg(target_os = "android")] mod bridge;
 mod gateway;
 mod js;
+#[cfg(target_os = "android")] mod settings;
 
 #[derive(Debug, flub::Error)]
 pub enum Error {
@@ -106,6 +107,8 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    std::thread::spawn(|| gateway::verify(state));
 
    let plugins = js::load_plugins(state, bundled)?;
+   #[cfg(target_os = "android")]
+   settings::start(plugins.clone());
    Ok(Started {
       target: state.image.path.clone(),
       build: state.build.map(|build| build.label),

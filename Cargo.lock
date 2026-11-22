@@ -437,6 +437,7 @@ dependencies = [
  "log",
  "plumage-hook",
  "plumage-sigs",
+ "plumage-ui",
  "rquickjs",
 ]
 

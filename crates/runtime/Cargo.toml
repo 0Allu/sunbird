@@ -17,8 +17,9 @@ rquickjs     = { workspace = true }
 rquickjs = { features = [ "bindgen" ], workspace = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
-jni-sys = { workspace = true }
-libc    = { workspace = true }
+jni-sys    = { workspace = true }
+libc       = { workspace = true }
+plumage-ui = { workspace = true }
 
 [lints]
 workspace = true
