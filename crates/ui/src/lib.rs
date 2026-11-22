@@ -58,6 +58,7 @@ impl Prop {
    pub const ROLE: Self = Self::named("role");
    pub const SELECTABLE: Self = Self::named("selectable");
    pub const STACK_HEADER: Self = Self::named("stackHeader");
+   pub const SUBMIT: Self = Self::named("submit");
    pub const TEXT: Self = Self::named("text");
    pub const TINT: Self = Self::named("tint");
    pub const UIKIT_PUSH: Self = Self::named("uikitPush");

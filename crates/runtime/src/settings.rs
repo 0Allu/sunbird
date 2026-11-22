@@ -16,6 +16,10 @@ use std::{
       MutexGuard,
       OnceLock,
       PoisonError,
+      atomic::{
+         AtomicBool,
+         Ordering,
+      },
       mpsc::{
          self,
          Sender,
@@ -53,6 +57,7 @@ const FIRST_ID: i32 = 0x5000_0000;
 const LOGOUT_ROW: &str = "settings.row.logout";
 const ICON_PLUGIN: &str = "res://ic_mana_puzzle_piece_plus";
 const ICON_RELOAD: &str = "res://ic_mana_puzzle_piece_retry";
+const ICON_CONSOLE: &str = "res://ic_mana_angle_brackets";
 /// Ids Phoenix's captured page layout uses for the parts plumage fills in.
 const PAGE_HEADER_SPACER: u32 = 0x4E1;
 const PAGE_CONTENT: u32 = 0x4E4;
@@ -73,6 +78,7 @@ const RADII: [Prop; 5] = [
 #[derive(Clone, Copy, Debug)]
 enum Press {
    OpenMain,
+   OpenConsole,
    OpenPlugin(usize),
    Toggle(usize),
    Reload(usize),
@@ -84,15 +90,32 @@ enum Press {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PageKind {
    Main,
+   Console,
    Plugin(usize),
 }
 
 /// What the UI thread hands to the worker. UI ops must not be sent from the
 /// main thread, where Rust may hold the UI lock while it waits on Java.
-#[derive(Clone, Copy)]
 enum Job {
    Press(Press),
    NavigateTo(usize),
+   /// The console input's text after an edit.
+   Draft(String),
+   Submit,
+   Log,
+}
+
+/// Nodes the console page updates in place, so typing is not interrupted.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Slot {
+   Input,
+   Log,
+}
+
+#[derive(Clone, Copy)]
+struct ConsoleIds {
+   input: i32,
+   log:   i32,
 }
 
 struct Tree {
@@ -102,6 +125,7 @@ struct Tree {
    kids:  Vec<Self>,
    src:   Option<u32>,
    press: Option<Press>,
+   slot:  Option<Slot>,
 }
 
 impl Tree {
@@ -113,6 +137,7 @@ impl Tree {
          kids:  node.kids.iter().map(Self::from_template).collect(),
          src:   node.src,
          press: None,
+         slot:  None,
       }
    }
 
@@ -125,6 +150,13 @@ impl Tree {
          return Some(self);
       }
       self.kids.iter_mut().find_map(|kid| kid.find(src))
+   }
+
+   fn slot(&self, slot: Slot) -> Option<i32> {
+      if self.slot == Some(slot) {
+         return Some(self.id);
+      }
+      self.kids.iter().find_map(|kid| kid.slot(slot))
    }
 
    fn ids(&self) -> Vec<i32> {
@@ -162,6 +194,7 @@ struct Page {
    kind:     PageKind,
    content:  i32,
    sections: Vec<i32>,
+   console:  Option<ConsoleIds>,
 }
 
 /// The open Settings screen and what plumage added to it.
@@ -184,6 +217,7 @@ struct Settings {
    screen:     Option<Screen>,
    handlers:   HashMap<i32, Press>,
    plugins:    Vec<PluginInfo>,
+   draft:      String,
 }
 
 static SETTINGS: LazyLock<Mutex<Settings>> = LazyLock::new(|| {
@@ -193,10 +227,13 @@ static SETTINGS: LazyLock<Mutex<Settings>> = LazyLock::new(|| {
       screen:     None,
       handlers:   HashMap::new(),
       plugins:    Vec::new(),
+      draft:      String::new(),
    })
 });
 
 static WORKER: OnceLock<Sender<Job>> = OnceLock::new();
+/// Set while a [`Job::Log`] is queued, so a burst of lines costs one update.
+static LOG_QUEUED: AtomicBool = AtomicBool::new(false);
 
 fn settings() -> MutexGuard<'static, Settings> {
    SETTINGS.lock().unwrap_or_else(PoisonError::into_inner)
@@ -226,6 +263,16 @@ pub fn start() {
       for job in receiver {
          // Runtime calls take the engine lock, so they run before the
          // settings lock is taken.
+         match &job {
+            Job::Log => LOG_QUEUED.store(false, Ordering::Relaxed),
+            Job::Submit => {
+               let code = std::mem::take(&mut settings().draft);
+               if !code.trim().is_empty() {
+                  crate::evaluate(&code);
+               }
+            },
+            _ => {},
+         }
          if let Job::Press(
             press @ (Press::Toggle(index) | Press::Reload(index) | Press::Switch(index, _)),
          ) = job
@@ -244,10 +291,12 @@ pub fn start() {
                (None, _) => {},
             }
          }
-         let plugins = crate::plugins();
+         let plugins = matches!(job, Job::Press(_)).then(crate::plugins);
          let ops = {
             let mut state = settings();
-            state.plugins = plugins;
+            if let Some(plugins) = plugins {
+               state.plugins = plugins;
+            }
             state.run(job)
          };
          if !ops.is_empty() && !bridge::apply_ops(&encode(&ops)) {
@@ -255,6 +304,18 @@ pub fn start() {
          }
       }
    });
+}
+
+/// Refreshes the console page's log, if one is open.
+pub fn log_changed() {
+   if LOG_QUEUED.swap(true, Ordering::Relaxed) {
+      return;
+   }
+   if let Some(worker) = WORKER.get()
+      && worker.send(Job::Log).is_err()
+   {
+      LOG_QUEUED.store(false, Ordering::Relaxed);
+   }
 }
 
 /// Splices plumage's nodes into a Rust-to-Java UI batch.
@@ -308,6 +369,15 @@ fn filter_dispatch(frame: &[u8]) -> Action {
             Some(Job::NavigateTo(
                index.unwrap_or_else(|| state.page_index().saturating_sub(1)),
             ))
+         } else if state
+            .console()
+            .is_some_and(|console| console.input == *node)
+         {
+            if *event == Prop::CHANGE_TEXT {
+               text_of(payload).map(Job::Draft)
+            } else {
+               (*event == Prop::SUBMIT).then_some(Job::Submit)
+            }
          } else if let Some(press) = state.handlers.get(node) {
             (*event == Prop::PRESS).then_some(Job::Press(*press))
          } else {
@@ -331,6 +401,27 @@ fn filter_dispatch(frame: &[u8]) -> Action {
       (count, _) if count == items.len() => Action::Drop,
       (_, Some(4)) => Action::Replace(without_frames(frame, &taken)),
       _ => Action::Drop,
+   }
+}
+
+/// A `changeText` payload is the text itself or an object holding it.
+fn text_of(payload: &Value) -> Option<String> {
+   match payload {
+      Value::Str(text) => Some(text.clone()),
+      Value::Obj(fields) => {
+         fields.iter().find_map(|(field, value)| {
+            match value {
+               Value::Str(text) if *field == Prop::TEXT || *field == Prop::VALUE => {
+                  Some(text.clone())
+               },
+               _ => None,
+            }
+         })
+      },
+      _ => {
+         log::warn!("settings: unexpected changeText payload {payload:?}");
+         None
+      },
    }
 }
 
@@ -403,9 +494,43 @@ impl Settings {
       }]
    }
 
+   fn console(&self) -> Option<ConsoleIds> {
+      self
+         .screen
+         .as_ref()?
+         .stack
+         .iter()
+         .find_map(|page| page.console)
+   }
+
+   fn log_ops(&self) -> Vec<Op> {
+      self.console().map_or_default(|console| {
+         vec![Op::Update {
+            id:    console.log,
+            props: vec![(Prop::TEXT, text(&log_text()))],
+         }]
+      })
+   }
+
    fn run(&mut self, job: Job) -> Vec<Op> {
       match job {
+         Job::Draft(draft) => {
+            self.draft = draft;
+            Vec::new()
+         },
+         Job::Log => self.log_ops(),
+         Job::Submit => {
+            let mut ops = self.log_ops();
+            if let Some(console) = self.console() {
+               ops.push(Op::Update {
+                  id:    console.input,
+                  props: vec![(Prop::VALUE, text(""))],
+               });
+            }
+            ops
+         },
          Job::Press(Press::OpenMain) => self.open_page(PageKind::Main),
+         Job::Press(Press::OpenConsole) => self.open_page(PageKind::Console),
          Job::Press(Press::OpenPlugin(index)) => self.open_page(PageKind::Plugin(index)),
          Job::Press(Press::Toggle(_) | Press::Reload(_) | Press::Switch(..)) => self.rerender_all(),
          Job::Press(Press::Back) => self.close_top(),
@@ -427,6 +552,7 @@ impl Settings {
    fn render(&self, kind: PageKind) -> (String, Vec<Tree>) {
       match kind {
          PageKind::Main => ("Plumage".to_owned(), main_sections(&self.plugins)),
+         PageKind::Console => ("Console".to_owned(), console_sections()),
          PageKind::Plugin(index) => {
             self.plugins.get(index).map_or_else(
                || ("Plugin".to_owned(), Vec::new()),
@@ -455,6 +581,9 @@ impl Settings {
       });
       let mut ops = Vec::new();
       for (position, kind) in kinds.into_iter().enumerate() {
+         if kind == PageKind::Console {
+            continue;
+         }
          let (_, mut sections) = self.render(kind);
          let (roots, ids) = self.build_sections(&mut sections, &mut ops);
          let Some(page) = self
@@ -524,6 +653,10 @@ impl Settings {
       let mut ops = Vec::new();
       let root = self.build(&mut page, None, &mut ops);
       let ids = page.ids();
+      let console = page
+         .slot(Slot::Input)
+         .zip(page.slot(Slot::Log))
+         .map(|(input, log)| ConsoleIds { input, log });
       let Some(content) = page.find(PAGE_CONTENT) else {
          log::warn!("settings: the page layout has no content node");
          return Vec::new();
@@ -537,6 +670,7 @@ impl Settings {
             kind,
             content,
             sections,
+            console,
          });
       }
       ops.extend(self.navigator_ops());
@@ -944,12 +1078,56 @@ fn main_sections(plugins: &[PluginInfo]) -> Vec<Tree> {
    let enabled = plugins.iter().filter(|plugin| plugin.enabled).count();
    vec![
       section("Plugins", rows),
+      section("", vec![button_row(
+         "Console",
+         ICON_CONSOLE,
+         Some(Press::OpenConsole),
+         true,
+      )]),
       section("About", vec![
          value_row("Runtime", "rquickjs"),
          value_row("Hooks", "registry pointer swap"),
          value_row("Enabled", &format!("{enabled} of {}", plugins.len())),
       ]),
    ]
+}
+
+fn log_text() -> String {
+   let lines = crate::console::lines();
+   if lines.is_empty() {
+      return "Nothing logged yet".to_owned();
+   }
+   lines.join("\n")
+}
+
+/// `root > field > row > [icon wrap > icon, input]`, Phoenix's search box.
+fn console_sections() -> Vec<Tree> {
+   let mut input_row = Tree::from_template(&templates().input);
+   if let Some(row) = input_row
+      .kids
+      .first_mut()
+      .and_then(|field| field.kids.first_mut())
+   {
+      if let Some(icon) = row.kids.first_mut().and_then(|wrap| wrap.kids.first_mut()) {
+         icon.set(Prop::URI, Some(text(ICON_CONSOLE)));
+      }
+      if let Some(input) = row.kids.get_mut(1) {
+         input.set(Prop::PLACEHOLDER, Some(text("Evaluate JavaScript")));
+         input.set(Prop::RETURN_KEY, Some(text("go")));
+         input.set(Prop::ROLE, None);
+         input.set(Prop::ACCESSIBILITY_ID, Some(text("plumage-console-input")));
+         input.slot = Some(Slot::Input);
+      }
+   }
+
+   let mut log = button_row(&log_text(), ICON_CONSOLE, None, false);
+   if let Some(row) = log.kids.first_mut() {
+      row.kids.remove(0);
+      if let Some(label) = row.kids.first_mut() {
+         label.slot = Some(Slot::Log);
+      }
+   }
+   vec![section("", vec![input_row]), section("Log", vec![log])]
 }
 
 fn plugin_sections(index: usize, plugin: &PluginInfo) -> Vec<Tree> {

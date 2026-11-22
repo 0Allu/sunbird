@@ -281,6 +281,27 @@ impl Engine {
       }
    }
 
+   /// The result as JSON when it has a JSON form, else as `String(result)`.
+   pub fn evaluate(&self, code: &str) -> Result<String, Error> {
+      self.context.with(|ctx| {
+         let run = || -> rquickjs::Result<String> {
+            let result = ctx.eval::<Value<'_>, _>(code)?;
+            if let Some(text) = result.as_string() {
+               return text.to_string();
+            }
+            match ctx.json_stringify(result.clone())? {
+               Some(json) => json.to_string(),
+               None => {
+                  ctx.globals()
+                     .get::<_, Function<'_>>("String")?
+                     .call((result,))
+               },
+            }
+         };
+         run().catch(&ctx).map_err(js_error)
+      })
+   }
+
    /// Runs the `before` hooks for `event`. Each sees the previous hook's
    /// payload.
    pub fn before(&self, event: EventId, name: &str, json: &str) -> Result<Before, Error> {

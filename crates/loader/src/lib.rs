@@ -33,7 +33,10 @@ use std::{
 };
 
 use misstep::ResultExt;
-use plumage_runtime::Plugin;
+use plumage_runtime::{
+   Plugin,
+   console::Tee,
+};
 use plumage_sigs::PLUGIN_BUNDLE;
 use zip::{
    ZipArchive,
@@ -52,7 +55,9 @@ extern "C" fn init() {
    logging();
    // Unwinding out of a constructor aborts the host, so a bug here costs
    // plugins, not the app.
-   match panic::catch_unwind(AssertUnwindSafe(|| plumage_runtime::start(home(), bundled()))) {
+   match panic::catch_unwind(AssertUnwindSafe(|| {
+      plumage_runtime::start(home(), bundled())
+   })) {
       Ok(Ok(started)) => {
          log::info!(
             "plumage started on {} ({}), plugins: {:?}",
@@ -103,7 +108,8 @@ fn read_bundle() -> misstep::Result<Vec<Plugin>> {
       dli_saddr: std::ptr::null_mut(),
    };
    // SAFETY: dladdr fills `info` for an address inside a loaded module.
-   if unsafe { libc::dladdr(init as *const c_void, &raw mut info) } == 0 || info.dli_fname.is_null() {
+   if unsafe { libc::dladdr(init as *const c_void, &raw mut info) } == 0 || info.dli_fname.is_null()
+   {
       return Ok(Vec::new());
    }
    // SAFETY: dli_fname is NUL-terminated and lives as long as the module.
@@ -111,7 +117,8 @@ fn read_bundle() -> misstep::Result<Vec<Plugin>> {
 
    let bytes = if let Some((apk, inner)) = path.split_once("!/") {
       let dir = inner.rsplit_once('/').map_or("", |(dir, _)| dir);
-      let mut archive = ZipArchive::new(File::open(apk).with_context(|| format!("opening {apk}"))?)?;
+      let mut archive =
+         ZipArchive::new(File::open(apk).with_context(|| format!("opening {apk}"))?)?;
       let mut entry = match archive.by_name(&format!("{dir}/{PLUGIN_BUNDLE}")) {
          Ok(entry) => entry,
          Err(ZipError::FileNotFound) => return Ok(Vec::new()),
@@ -136,11 +143,13 @@ fn read_bundle() -> misstep::Result<Vec<Plugin>> {
 
 #[cfg(target_os = "android")]
 fn logging() {
-   android_logger::init_once(
-      android_logger::Config::default()
-         .with_tag("plumage")
-         .with_max_level(log::LevelFilter::Info),
-   );
+   let config = android_logger::Config::default()
+      .with_tag("plumage")
+      .with_max_level(log::LevelFilter::Info);
+   let logger = Tee(android_logger::AndroidLogger::new(config));
+   if log::set_logger(Box::leak(Box::new(logger))).is_ok() {
+      log::set_max_level(log::LevelFilter::Info);
+   }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -161,7 +170,7 @@ fn logging() {
       fn flush(&self) {}
    }
 
-   if log::set_logger(&Stderr).is_ok() {
+   if log::set_logger(&Tee(Stderr)).is_ok() {
       log::set_max_level(log::LevelFilter::Info);
    }
 }

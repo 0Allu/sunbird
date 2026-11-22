@@ -24,6 +24,7 @@ use plumage_sigs::{
 };
 
 #[cfg(target_os = "android")] mod bridge;
+pub mod console;
 mod gateway;
 mod js;
 #[cfg(target_os = "android")] mod settings;
@@ -108,6 +109,18 @@ pub fn set_enabled(name: &str, enabled: bool) {
 pub fn set_switch(plugin: &str, key: &str, on: bool) {
    if let Some(engine) = engine() {
       engine.set_switch(plugin, key, on);
+   }
+}
+
+/// Runs `code` in the plugin runtime's global scope and logs it with its
+/// result.
+pub fn evaluate(code: &str) {
+   log::info!("> {code}");
+   let result = engine().map(|engine| engine.evaluate(code));
+   match result {
+      Some(Ok(result)) => log::info!("{result}"),
+      Some(Err(err)) => log::error!("{err}"),
+      None => log::error!("the runtime is not running"),
    }
 }
 
