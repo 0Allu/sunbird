@@ -232,6 +232,10 @@ impl Engine {
       })
    }
 
+   pub fn source(&self, name: &str) -> Option<String> {
+      self.plugins.get(name).map(|loaded| loaded.source.clone())
+   }
+
    pub fn plugins(&self) -> Vec<PluginInfo> {
       self.context.with(|ctx| {
          let registry = ctx.userdata::<Registry<'_>>();

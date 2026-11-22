@@ -455,6 +455,12 @@ unsafe extern "system" fn call_object_method_a(
    }
 }
 
+/// Phoenix's `GuestHost` as a global reference, null until Rust's first UI
+/// batch.
+pub fn guest_host() -> jobject {
+   GUEST_HOST.load(Ordering::Acquire)
+}
+
 /// # Safety
 ///
 /// `env` is the current thread's `JNIEnv`, and `obj` is the `GuestHost` that

@@ -28,10 +28,12 @@ pub mod console;
 #[cfg(target_os = "android")] mod discord;
 #[cfg(target_os = "android")] mod fetch;
 mod gateway;
+#[cfg(target_os = "android")] mod highlight;
 mod js;
 #[cfg(target_os = "android")] mod jvm;
 mod local;
 #[cfg(target_os = "android")] mod patches;
+#[cfg(target_os = "android")] mod picker;
 #[cfg(target_os = "android")] mod settings;
 #[cfg(target_os = "android")] mod store;
 
@@ -57,6 +59,8 @@ pub enum Error {
    Hook(#[from] phoenix_hook::Error),
    #[error("{url}: plugins install from https:// URLs ending in a name like plugin.js")]
    PluginUrl { url: String },
+   #[error("{name}: plugin files are .js files named with letters, digits, - or _")]
+   PluginFile { name: String },
    #[error("{url}: the download is not UTF-8 text")]
    NotUtf8 { url: String },
    #[cfg(target_os = "android")]
@@ -230,13 +234,7 @@ pub fn install(url: &str) -> Result<String, Error> {
    let name = path
       .rsplit('/')
       .next()
-      .and_then(|file| file.strip_suffix(".js"))
-      .filter(|name| {
-         !name.is_empty()
-            && name
-               .bytes()
-               .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-      })
+      .and_then(plugin_name)
       .ok_or_else(bad_url)?;
 
    let body = fetch::get(url)?;
@@ -245,6 +243,42 @@ pub fn install(url: &str) -> Result<String, Error> {
          url: url.to_owned(),
       }
    })?;
+   save_source(name, source)?;
+   Ok(name.to_owned())
+}
+
+/// The plugin name a file name like `plugin.js` gives.
+fn plugin_name(file: &str) -> Option<&str> {
+   file.strip_suffix(".js").filter(|name| {
+      !name.is_empty()
+         && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+   })
+}
+
+/// Installs a bundle the user picked from the device, named by its file name.
+/// Returns the plugin's name.
+#[cfg(target_os = "android")]
+pub fn install_file(file: &str, bytes: Vec<u8>) -> Result<String, Error> {
+   let name = plugin_name(file).ok_or_else(|| {
+      Error::PluginFile {
+         name: file.to_owned(),
+      }
+   })?;
+   let source = String::from_utf8(bytes).map_err(|_| {
+      Error::NotUtf8 {
+         url: file.to_owned(),
+      }
+   })?;
+   save_source(name, source)?;
+   Ok(name.to_owned())
+}
+
+/// Writes `source` to `home/plugins/<name>.js` and loads it, replacing the
+/// plugin's code, bundled or not.
+#[cfg(target_os = "android")]
+pub fn save_source(name: &str, source: String) -> Result<(), Error> {
    let state = STATE.get().ok_or(Error::NotStarted)?;
    let file = state.plugins_dir().join(format!("{name}.js"));
    let write = || {
@@ -255,7 +289,13 @@ pub fn install(url: &str) -> Result<String, Error> {
    if let Some(mut engine) = engine() {
       engine.install(name, source);
    }
-   Ok(name.to_owned())
+   Ok(())
+}
+
+/// A plugin's current code.
+#[must_use]
+pub fn source(name: &str) -> Option<String> {
+   engine()?.source(name)
 }
 
 /// Deletes a plugin installed into `home/plugins` and unloads it.

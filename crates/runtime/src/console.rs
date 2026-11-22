@@ -18,7 +18,15 @@ const REDACTED: &str = "[redacted]";
 
 const CAPACITY: usize = 200;
 
-static LINES: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+static LINES: Mutex<VecDeque<Line>> = Mutex::new(VecDeque::new());
+
+/// A kept log line: its level, local time as `HH:MM:SS`, and text.
+#[derive(Clone)]
+pub struct Line {
+   pub level: log::Level,
+   pub time:  String,
+   pub text:  String,
+}
 static SECRETS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Sets the values every later line is scrubbed of, each also in its
@@ -84,10 +92,11 @@ impl<L: Log> Log for Tee<L> {
             .build(),
       );
 
-      let line = format!(
-         "{} {text}",
-         record.level().as_str().chars().next().unwrap_or('?'),
-      );
+      let line = Line {
+         level: record.level(),
+         time: clock(),
+         text,
+      };
       {
          let mut lines = LINES.lock().unwrap_or_else(PoisonError::into_inner);
          if lines.len() == CAPACITY {
@@ -107,8 +116,25 @@ impl<L: Log> Log for Tee<L> {
    }
 }
 
+/// The local time of day.
+fn clock() -> String {
+   #[cfg(target_os = "android")]
+   {
+      // SAFETY: `time` accepts null, and `localtime_r` only writes `tm`.
+      let tm = unsafe {
+         let now = libc::time(std::ptr::null_mut());
+         let mut tm = std::mem::zeroed::<libc::tm>();
+         libc::localtime_r(&raw const now, &raw mut tm);
+         tm
+      };
+      format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
+   }
+   #[cfg(not(target_os = "android"))]
+   String::new()
+}
+
 /// Every kept line, newest first.
-pub fn lines() -> Vec<String> {
+pub fn lines() -> Vec<Line> {
    LINES
       .lock()
       .unwrap_or_else(PoisonError::into_inner)
