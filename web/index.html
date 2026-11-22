@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phoenix Unlock</title>
+<meta name="description" content="Patch Discord's Phoenix client in your browser: no access gate, staff tools.">
+<style>
+  :root { color-scheme: light dark; --bg:#f6f6f8; --card:#fff; --fg:#17171c; --mut:#6b6b76; --line:#e3e3e8; --acc:#5865f2; --ok:#1f8a4c; --err:#c2353a; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111214; --card:#1c1d21; --fg:#ececf1; --mut:#9a9aa6; --line:#2c2d33; --ok:#3fb977; --err:#ef6b6f; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width:560px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:26px; margin:8px 0 4px; letter-spacing:-.01em; }
+  .lede { color:var(--mut); margin:0 0 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin:0 0 14px; }
+  .row { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:8px 0; border-bottom:1px solid var(--line); }
+  .row:last-child { border-bottom:0; }
+  .row label { color:var(--mut); }
+  select, input[type=number] { font:inherit; color:inherit; background:transparent; border:1px solid var(--line); border-radius:8px; padding:6px 8px; min-width:0; max-width:60%; }
+  button, .btn { display:block; width:100%; font:inherit; font-weight:600; padding:14px; border:0; border-radius:12px; background:var(--acc); color:#fff; text-align:center; text-decoration:none; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  .ghost { background:transparent; color:var(--acc); border:1px solid var(--line); margin-top:10px; }
+  ol.steps { list-style:none; padding:0; margin:0; font-size:14px; }
+  ol.steps li { padding:6px 0; display:grid; grid-template-columns:1fr auto; gap:2px 8px; }
+  ol.steps li .bar { grid-column:1/-1; height:4px; background:var(--line); border-radius:2px; overflow:hidden; }
+  ol.steps li .bar i { display:block; height:100%; width:0; background:var(--acc); transition:width .2s; }
+  .state { color:var(--mut); font-variant-numeric:tabular-nums; }
+  .done .state { color:var(--ok); } .fail .state { color:var(--err); }
+  pre { font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap; color:var(--mut); margin:10px 0 0; max-height:180px; overflow:auto; }
+  .note { font-size:14px; color:var(--mut); }
+  .note b { color:var(--fg); }
+  .err { color:var(--err); font-size:14px; }
+  ul.links { padding-left:18px; font-size:14px; }
+  a { color:var(--acc); }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Phoenix Unlock</h1>
+  <p class="lede">Patches Discord's new native client (Phoenix) so it opens without the access gate, with staff tools turned on. It all runs in this browser; nothing is uploaded.</p>
+
+  <section class="card" id="setup">
+    <div class="row"><label for="ver">Discord build</label><select id="ver"></select></div>
+    <div class="row"><label for="dpi">Screen density</label><select id="dpi"></select></div>
+    <div class="row"><label for="lang">Language</label><select id="lang"></select></div>
+    <div class="row"><label>CPU</label><span>arm64 (64-bit phones)</span></div>
+  </section>
+
+  <button id="go">Patch Discord</button>
+  <p class="err" id="err" hidden></p>
+
+  <section class="card" id="progress" hidden>
+    <ol class="steps" id="steps"></ol>
+    <pre id="log"></pre>
+  </section>
+
+  <section class="card" id="manual" hidden>
+    <p class="note"><b>Automatic download isn't available.</b> Download these files, then pick all of them below.</p>
+    <ul class="links" id="links"></ul>
+    <input type="file" id="files" multiple accept=".apk,application/vnd.android.package-archive,application/octet-stream">
+  </section>
+
+  <section class="card" id="result" hidden>
+    <a class="btn" id="dl" download>Download patched APK</a>
+    <p class="note">1. Uninstall Discord first if it came from the Play Store; Android won't update an app signed with a different key.<br>
+    2. Open the downloaded file and allow your browser to install apps if asked.<br>
+    3. Later builds: patch again <b>in this same browser</b>. It keeps your signing key, so the new APK installs as an update and you stay logged in.</p>
+  </section>
+
+  <p class="note">Unofficial and not affiliated with Discord. Source: <a href="https://github.com/mantikafasi/discord-phoenix-android-patch">github.com/mantikafasi/discord-phoenix-android-patch</a></p>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>

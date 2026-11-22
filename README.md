@@ -13,7 +13,43 @@ There are two ways to apply it:
 2. **Xposed module (`native/`, `java/`)**: patches the library in memory at runtime, with
    offsets hardcoded for 356207 x86_64. Used for WSA with LSPosed.
 
-## APK patcher
+## Web patcher
+
+https://mantikafasi.github.io/discord-phoenix-android-patch/
+
+Open it on the phone. The page downloads the Discord splits, patches them, merges them into
+one APK and signs it, all in the browser, so Android can install it with a single tap.
+`web/lib/` is a JS port of the APK patcher (arm64 only):
+
+- `arm64.js`: the same anchors as `patcher/sopatch.py`, with a hand-written decoder and a
+  hand-encoded staff hook. Its output is byte-identical to the Python/clang build.
+- `dex.js`: patches `PhoenixLaunch.i`.
+- `axml.js`: removes `requiredSplitTypes`/`splitTypes` from the manifest and sets
+  `com.android.vending.splits.required` to false.
+- `arsc.js`: merges the density and language splits' `resources.arsc` into base's.
+- `zip.js`: copies unchanged entries without recompressing them and aligns stored entries
+  (`.so` to 16 KiB).
+- `sign.js`: APK Signature Scheme v2 with WebCrypto RSA-2048 and a self-signed certificate.
+  The key is kept in `localStorage`, so patched updates install over the previous build.
+
+The APKs come from `tracker.vendetta.rocks`, which redirects to Google's CDN. The CDN sends
+no CORS headers, so automatic download needs the small proxy in `web/worker/proxy.js`
+(Cloudflare Worker), with its URL set in `web/config.js` or passed as `?proxy=`. Without
+the proxy, the page falls back to a manual mode: it links each split and the user picks
+the downloaded files.
+
+Local test, using the same code as the page:
+
+```sh
+node web/tools/node-build.mjs out.apk base.apk config.arm64_v8a.apk config.xxhdpi.apk config.en.apk
+node web/tools/dev-server.mjs <dir with the split apks>   # then open http://localhost:8787/?proxy=http://localhost:8787
+```
+
+Verified on 356207 arm64 (Android 16). The APK built in the browser is byte-identical to
+the Node build. It installs and runs: Phoenix reaches READY in 3.1 s, chat loads, and
+drawables render. The whole page flow also runs in the phone's own Chrome in about 30 s.
+
+## APK patcher (Python, arm64 + x86_64)
 
 Requirements: Python 3 with `capstone` and `numpy`, Android build-tools (zipalign and
 apksigner), and the NDK (clang and lld, used to assemble the staff hook).

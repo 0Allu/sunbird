@@ -5,3 +5,5 @@ out/
 *.jks
 *.png
 __pycache__/
+phoenix-unlock-key.json
+upload.apk
