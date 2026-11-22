@@ -32,6 +32,7 @@ use plumage_sigs::{
    HandlerResult,
    RawStr,
 };
+use seq_macro::seq;
 
 use crate::{
    Error,
@@ -42,20 +43,39 @@ use crate::{
 
 type HandlerFn = <GatewayHandler as Abi>::Fn;
 
-const SLOTS: usize = 32;
-
-/// Trampolines to the original handlers, indexed like [`DETOURS`].
-static ORIGINALS: [AtomicPtr<c_void>; SLOTS] = [const { AtomicPtr::new(ptr::null_mut()) }; SLOTS];
-
-macro_rules! detours {
-   ($($slot:literal)*) => { [$(detour::<$slot> as HandlerFn,)*] };
+struct Slot {
+   detour:   HandlerFn,
+   original: AtomicPtr<c_void>,
 }
 
-/// One detour per slot, so each knows its own original even when Phoenix routes
-/// several events through one handler (`MESSAGE_DELETE` and
-/// `MESSAGE_DELETE_BULK`).
-static DETOURS: [HandlerFn; SLOTS] =
-   detours!(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31);
+impl Slot {
+   const fn new(detour: HandlerFn) -> Self {
+      Self {
+         detour,
+         original: AtomicPtr::new(ptr::null_mut()),
+      }
+   }
+
+   /// Waits out the window between `Inline::attach` returning and the
+   /// trampoline being stored, since the hook is live as soon as it attaches.
+   fn original(&self) -> HandlerFn {
+      loop {
+         let original = self.original.load(Ordering::Acquire);
+         if !original.is_null() {
+            // SAFETY: the backend returned a trampoline with the handler's ABI.
+            break unsafe { std::mem::transmute::<*mut c_void, HandlerFn>(original) };
+         }
+         thread::yield_now();
+      }
+   }
+}
+
+/// Phoenix routes several events through one handler (`MESSAGE_DELETE` and
+/// `MESSAGE_DELETE_BULK`), so every hooked handler needs a detour that knows
+/// its own original.
+static SLOTS: [Slot; 32] = seq!(N in 0..32 {
+   [#(Slot::new(detour::<N>),)*]
+});
 
 thread_local! {
    #[allow(
@@ -111,16 +131,16 @@ pub fn install(state: &State, event: EventId) -> Result<(), Error> {
       return Ok(());
    }
 
-   let slot = installed.hooks.len();
-   if slot == SLOTS {
-      return Err(Error::OutOfSlots(SLOTS));
-   }
+   let index = installed.hooks.len();
+   let slot = SLOTS.get(index).ok_or(Error::OutOfSlots(SLOTS.len()))?;
    let target = NonNull::new(located.addr as *mut c_void).expect("resolved addresses are non-null");
-   let detour = NonNull::new(DETOURS[slot] as *mut c_void).expect("function pointers are non-null");
+   let detour = NonNull::new(slot.detour as *mut c_void).expect("function pointers are non-null");
    // SAFETY: the rule resolved to a gateway handler entry, and every detour has
    // its ABI.
    let hook = unsafe { Inline::attach(target, detour) }?;
-   ORIGINALS[slot].store(hook.original().as_ptr(), Ordering::Release);
+   slot
+      .original
+      .store(hook.original().as_ptr(), Ordering::Release);
    log::info!(
       "hooked {name} at {:#x} (image offset {:#x}) via `{anchor}`, {}/{} anchors agree",
       located.addr,
@@ -134,8 +154,8 @@ pub fn install(state: &State, event: EventId) -> Result<(), Error> {
       sig.anchors.len(),
    );
    installed.hooks.push(hook);
-   installed.by_addr.insert(located.addr, slot);
-   installed.by_event.insert(event, slot);
+   installed.by_addr.insert(located.addr, index);
+   installed.by_event.insert(event, index);
    Ok(())
 }
 
@@ -144,15 +164,7 @@ unsafe extern "C" fn detour<const SLOT: usize>(
    event: *const GatewayEvent,
    ctx: *mut c_void,
 ) -> HandlerResult {
-   // A hook can fire between attach returning and the store above.
-   let original = loop {
-      let original = ORIGINALS[SLOT].load(Ordering::Acquire);
-      if !original.is_null() {
-         // SAFETY: the backend returned a trampoline with the handler's ABI.
-         break unsafe { std::mem::transmute::<*mut c_void, HandlerFn>(original) };
-      }
-      thread::yield_now();
-   };
+   let original = SLOTS[SLOT].original();
    // SAFETY: the target passes a live event for the duration of the call.
    let event = unsafe { &*event };
    // SAFETY: as above, forwarded to the original unchanged or with replaced

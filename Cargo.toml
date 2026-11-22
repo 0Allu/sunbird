@@ -30,6 +30,7 @@ plumage-hook    = { path = "crates/hook" }
 plumage-runtime = { path = "crates/runtime" }
 plumage-sigs    = { path = "crates/sigs" }
 rquickjs        = { features = [ "parallel" ], version = "0.14" }
+seq-macro       = "0.3"
 serde           = { features = [ "derive" ], version = "1" }
 serde_json      = { features = [ "raw_value" ], version = "1" }
 
