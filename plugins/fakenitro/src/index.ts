@@ -1,16 +1,10 @@
 // @description Sends custom emojis from any server, and animated ones, as image links
-// @version 0.1.0
+// @version 0.2.0
 // @author mantikafasi
 
 const { gateway } = phoenix;
 
 const settings = phoenix.settings.define({
-  unlockPicker: {
-    type: "switch",
-    title: "Unlock the emoji picker",
-    description: "Tell the app you have Nitro so it offers every emoji. Applies after a restart",
-    default: true,
-  },
   emojiSize: {
     type: "select",
     title: "Emoji size",
@@ -48,6 +42,8 @@ interface Emoji {
 const emojis = new Map<string, Emoji>();
 const byName = new Map<string, Emoji[]>();
 const channelGuild = new Map<string, string>();
+// The emoji last picked for each name, which `:name:` in the message box means.
+const picked = new Map<string, Emoji>();
 // The real tier, before any spoofing. Unknown until the app's first API request.
 let premiumType = 0;
 
@@ -88,9 +84,8 @@ if (gateway.guildEmojisUpdate) {
   phoenix.on(gateway.guildEmojisUpdate, (update: any) => addEmojis(update.guild_id, update.emojis));
 }
 
-// The real tier, and with "unlock" a USER_UPDATE claiming Nitro so the picker
-// offers every emoji. The API rejects until the app made a request of its own,
-// so this retries on the next gateway events.
+// The real tier. The API rejects until the app made a request of its own, so
+// this retries on the next gateway events.
 let asked: "no" | "asking" | "done" = "no";
 const me = () => {
   if (asked !== "no") return;
@@ -98,12 +93,8 @@ const me = () => {
   phoenix.discord
     .get("/users/@me")
     .then((res) => {
-      const user = res.json<Phoenix.User & { premium_type?: number }>();
-      premiumType = user.premium_type ?? 0;
+      premiumType = res.json<{ premium_type?: number }>().premium_type ?? 0;
       asked = "done";
-      if (settings.unlockPicker && premiumType < 2 && gateway.userUpdate) {
-        phoenix.enqueue(gateway.userUpdate, { ...user, premium_type: 2 });
-      }
     })
     .catch(() => (asked = "no"));
 };
@@ -140,6 +131,8 @@ const rewrite = (text: string, guild: string | undefined) =>
     let emoji: Emoji | undefined;
     if (id) {
       emoji = emojis.get(id);
+    } else if (picked.has(name)) {
+      emoji = picked.get(name);
     } else {
       const found = byName.get(name);
       if (!found || found.some((e) => usable(e, guild))) return match;
@@ -149,8 +142,20 @@ const rewrite = (text: string, guild: string | undefined) =>
     return spaced(whole, offset, match.length, link(emoji));
   });
 
+const guildOf = (ctx: Phoenix.UiContext) => (ctx.channelId ? channelGuild.get(ctx.channelId) : undefined);
+
+// Phoenix answers a press on a locked emoji with a Nitro ad. Put `:name:` in
+// the message box instead, like an unlocked pick, and remember which emoji it
+// was, since several servers can have one by that name.
+phoenix.messages.onEmojiPick((id, ctx) => {
+  const emoji = emojis.get(id);
+  if (!emoji || usable(emoji, guildOf(ctx))) return;
+  picked.set(emoji.name, emoji);
+  return `:${emoji.name}: `;
+});
+
 phoenix.messages.onSend((text, ctx) => {
   if (!text.includes(":")) return;
-  const result = rewrite(text, ctx.channelId ? channelGuild.get(ctx.channelId) : undefined);
+  const result = rewrite(text, guildOf(ctx));
   return result === text ? undefined : result;
 });

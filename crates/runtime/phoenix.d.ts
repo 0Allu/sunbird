@@ -1002,6 +1002,11 @@ declare namespace Phoenix {
     /// Runs before a message from the message box is sent, after any slash command. Return a
     /// string to send that instead, `false` to cancel, or nothing to leave it.
     onSend(interceptor: (text: string, ctx: UiContext) => string | false | void): Remover;
+    /// Runs when a custom emoji is pressed in the emoji picker under the message box (not the
+    /// reaction picker), with its id. Return text to add to the end of the message box instead of
+    /// what Phoenix would do (insert it, or show a Nitro ad for a locked one), or nothing to leave
+    /// the press to Phoenix. While a handler exists, that picker draws no locks on emojis.
+    onEmojiPick(handler: (emojiId: string, ctx: UiContext) => string | void): Remover;
   }
 
   /// `channelId` is the open channel, `reply` posts a local message there.

@@ -11,6 +11,7 @@
 //!   on a worker, and their results reach the screen as follow-up batches.
 
 mod commands;
+mod emoji;
 mod mirror;
 mod tabs;
 pub mod targets;
@@ -376,6 +377,14 @@ enum Job {
    },
    /// Close menu `menu`, answering `index`.
    CloseMenu { menu: u32, index: i32 },
+   /// A press on custom emoji `id` in the picker, held for the `onEmojiPick`
+   /// handlers.
+   Emoji {
+      input: i32,
+      id:    String,
+      text:  String,
+      frame: Vec<u8>,
+   },
 }
 
 #[derive(Default)]
@@ -386,6 +395,7 @@ struct Patches {
    contributions: Vec<Contribution>,
    commands:      Vec<Command>,
    interceptors:  usize,
+   pickers:       usize,
    slots:         Vec<Slot>,
    anchors:       HashMap<Target, HashSet<i32>>,
    handlers:      HashMap<i32, Handler>,
@@ -658,6 +668,12 @@ fn run(job: Job) -> Vec<Op> {
          out
       },
       Job::Submit { input, text, frame } => commands::submit(input, &text, &frame),
+      Job::Emoji {
+         input,
+         id,
+         text,
+         frame,
+      } => emoji::pick(input, &id, text, frame),
    }
 }
 
@@ -830,6 +846,15 @@ pub fn set_interceptors(count: usize) {
    patches().interceptors = count;
 }
 
+/// How many `onEmojiPick` handlers plugins hold, so picker presses are taken
+/// only while one exists.
+pub fn set_emoji_pickers(count: usize) {
+   if count > 0 {
+      ACTIVE.store(true, Ordering::Release);
+   }
+   patches().pickers = count;
+}
+
 /// Drops everything `plugin` added.
 pub fn forget(plugin: &str) {
    let mut state = patches();
@@ -872,8 +897,12 @@ impl Patches {
       let mut mine = Vec::new();
       let mut touched = HashSet::new();
       let mut extra_deletes;
+      let mut unlocks = Vec::new();
       {
          let (created, deleted) = self.mirror.apply(&ops);
+         if self.pickers > 0 {
+            unlocks = self.emoji_locks(&created);
+         }
          extra_deletes = self.drop_deleted(&deleted);
          for id in &deleted {
             self.texts.remove(id);
@@ -952,7 +981,7 @@ impl Patches {
          .mirror
          .composer()
          .is_some_and(|(_, text)| text.starts_with('/'));
-      let mut extra = Vec::new();
+      let mut extra = unlocks;
       if !self.commands.is_empty()
          && self.suggestions.scroll.is_some()
          && (self.has_suggestions() || composer_slash)
@@ -1153,6 +1182,24 @@ impl Patches {
             } else {
                self.page_event(*node, &handler, *event, payload);
             }
+            continue;
+         }
+         if self.pickers > 0
+            && *event == Prop::PRESS.key()
+            && let Some(id) = self
+               .mirror
+               .accessibility_id(*node)
+               .and_then(|aid| aid.strip_prefix("expression.emoji:custom:"))
+            && self.in_message_picker(*node)
+            && let Some((input, text)) = self.mirror.composer()
+         {
+            queue(Job::Emoji {
+               input,
+               id: id.to_owned(),
+               text: text.to_owned(),
+               frame: raw,
+            });
+            changed = true;
             continue;
          }
          if let Some(input) = self.sending(*node, *event)

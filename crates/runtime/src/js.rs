@@ -175,6 +175,9 @@ struct Registry<'js> {
    /// `phoenix.messages.onSend` interceptors in registration order, by id.
    #[cfg(target_os = "android")]
    interceptors: RefCell<Vec<(u64, String, Function<'js>)>>,
+   /// `phoenix.messages.onEmojiPick` handlers in registration order, by id.
+   #[cfg(target_os = "android")]
+   pickers:      RefCell<Vec<(u64, String, Function<'js>)>>,
 }
 
 /// A contribution's plugin callbacks. `evaluate` is `render`, or `visible`
@@ -523,6 +526,37 @@ impl Engine {
       sent
    }
 
+   /// Asks the `onEmojiPick` handlers about a press on custom emoji `id` in
+   /// the picker. Returns the text the first one puts in the message box.
+   #[cfg(target_os = "android")]
+   pub fn pick_emoji(&self, id: &str, context: &UiContext) -> Option<String> {
+      let picked = self.context.with(|ctx| {
+         let registry = ctx.userdata::<Registry<'_>>()?;
+         let argument = context_object(&ctx, context).ok()?;
+         let pickers = registry
+            .pickers
+            .borrow()
+            .iter()
+            .map(|(_, plugin, function)| (plugin.clone(), function.clone()))
+            .collect::<Vec<_>>();
+         drop(registry);
+         pickers.into_iter().find_map(|(plugin, function)| {
+            match function
+               .call::<_, Value<'_>>((id, argument.clone()))
+               .catch(&ctx)
+            {
+               Ok(result) => result.as_string().and_then(|text| text.to_string().ok()),
+               Err(err) => {
+                  log::error!("[{plugin}] onEmojiPick: {err}");
+                  None
+               },
+            }
+         })
+      });
+      drain(&self.runtime);
+      picked
+   }
+
    /// Evaluates `name` with a fresh `phoenix` object, recording any error.
    fn eval(&mut self, name: &str) {
       let Some(loaded) = self.plugins.get_mut(name) else {
@@ -581,6 +615,10 @@ impl Engine {
                .interceptors
                .borrow_mut()
                .retain(|(_, plugin, _)| plugin != name);
+            let mut pickers = registry.pickers.borrow_mut();
+            pickers.retain(|(_, plugin, _)| plugin != name);
+            patches::set_emoji_pickers(pickers.len());
+            drop(pickers);
             patches::forget(name);
          }
          let mut hooks = registry.hooks.borrow_mut();
@@ -890,6 +928,8 @@ fn registry<'js>(ctx: &Ctx<'js>, events: &GatewayRegistry) -> rquickjs::Result<R
       commands: RefCell::default(),
       #[cfg(target_os = "android")]
       interceptors: RefCell::default(),
+      #[cfg(target_os = "android")]
+      pickers: RefCell::default(),
    })
 }
 
@@ -1122,6 +1162,14 @@ fn patch_api<'js>(
       Function::new(
          ctx.clone(),
          move |ctx: Ctx<'js>, function: Function<'js>| on_send(&ctx, &name, function),
+      )?,
+   )?;
+   let name = plugin.to_owned();
+   messages.set(
+      "onEmojiPick",
+      Function::new(
+         ctx.clone(),
+         move |ctx: Ctx<'js>, function: Function<'js>| on_emoji_pick(&ctx, &name, function),
       )?,
    )?;
    api.set("ui", ui_object(ctx, plugin)?)?;
@@ -1608,6 +1656,37 @@ fn on_send<'js>(
             let mut interceptors = registry.interceptors.borrow_mut();
             interceptors.retain(|(existing, ..)| *existing != id);
             patches::set_interceptors(interceptors.len());
+         }
+      },
+      None,
+   )
+}
+
+#[cfg(target_os = "android")]
+fn on_emoji_pick<'js>(
+   ctx: &Ctx<'js>,
+   plugin: &str,
+   function: Function<'js>,
+) -> rquickjs::Result<Function<'js>> {
+   static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+   let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+   let registry = ctx
+      .userdata::<Registry<'js>>()
+      .ok_or_else(|| Exception::throw_internal(ctx, "no registry"))?;
+   registry
+      .pickers
+      .borrow_mut()
+      .push((id, plugin.to_owned(), function));
+   patches::set_emoji_pickers(registry.pickers.borrow().len());
+   drop(registry);
+   remover(
+      ctx,
+      move |ctx| {
+         if let Some(registry) = ctx.userdata::<Registry<'js>>() {
+            let mut pickers = registry.pickers.borrow_mut();
+            pickers.retain(|(existing, ..)| *existing != id);
+            patches::set_emoji_pickers(pickers.len());
          }
       },
       None,
