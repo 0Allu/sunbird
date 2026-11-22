@@ -153,6 +153,16 @@ fn install(ctx: &Ctx) -> rquickjs::Result<()> {
     f(&p, "confirm", Function::new(ctx.clone(), |ctx: Ctx, id: i32, title: String, message: String, ok: String, cancel: String| -> rquickjs::Result<()> {
         hook::jni::confirm(id, &title, &message, &ok, &cancel).map_err(|e| rquickjs::Exception::throw_message(&ctx, &e))
     }))?;
+    // Phoenix's databases (read-only): dbDataDir(), dbFiles(dir), dbQuery(path, sql, args[], limit) -> JSON strings
+    f(&p, "dbDataDir", Function::new(ctx.clone(), |ctx: Ctx| -> rquickjs::Result<Option<String>> {
+        hook::jni::data_dir().map_err(|e| rquickjs::Exception::throw_message(&ctx, &e))
+    }))?;
+    f(&p, "dbFiles", Function::new(ctx.clone(), |ctx: Ctx, dir: String| -> rquickjs::Result<Option<String>> {
+        hook::jni::list_files(&dir).map_err(|e| rquickjs::Exception::throw_message(&ctx, &e))
+    }))?;
+    f(&p, "dbQuery", Function::new(ctx.clone(), |ctx: Ctx, path: String, sql: String, args: Vec<String>, limit: i32| -> rquickjs::Result<Option<String>> {
+        hook::jni::db_query(&path, &sql, &args, limit).map_err(|e| rquickjs::Exception::throw_message(&ctx, &e))
+    }))?;
     f(&p, "uiReady", Function::new(ctx.clone(), hook::jni::ui_ready))?;
     f(&p, "inHandler", Function::new(ctx.clone(), registry::in_handler))?;
     f(&p, "wantStore", Function::new(ctx.clone(), registry::request_store_thread))?;

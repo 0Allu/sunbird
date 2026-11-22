@@ -78,10 +78,45 @@ declare global {
       updateLocal(message: Partial<Message> & { id: string; channel_id: string }): Promise<boolean | null>;
       deleteLocal(channelId: string, messageId: string): Promise<boolean | null>;
     };
-    /** Live Phoenix stores, read with Phoenix's own serializers on its store thread. */
+    /**
+     * Phoenix's stores: its own database (files/store/<account>/cache.sqlite, read-only) plus
+     * live reads on its store thread. Tables are key/value with JSON values; ids in keys are
+     * zero-padded to 20 digits ("<guild>:<channel>", "<channel>:<message>", ...).
+     */
     readonly stores: {
-      /** The signed-in user; null if this build's Me store was not found by the patcher. */
+      /** The signed-in user (live serializer, else the persisted copy). */
       me(): Promise<any | null>;
+      user(id: string): Promise<User | null>;
+      users(opts?: { limit?: number }): Promise<User[]>;
+      /** {id, properties (name, icon, ...), roles, emojis, stickers, member_count, joined_at_ms} */
+      guilds(opts?: { limit?: number }): Promise<any[]>;
+      guild(id: string): Promise<any | null>;
+      /** Members Phoenix has seen in a guild (not the full list). */
+      members(guildId: string, opts?: { limit?: number }): Promise<any[]>;
+      member(guildId: string, userId: string): Promise<any | null>;
+      /** Your notification settings for a guild. */
+      guildSettings(guildId: string): Promise<any | null>;
+      channel(id: string): Promise<any | null>;
+      /** A guild's channels; guildId 0/null for DMs and group DMs. */
+      channels(guildId: string | null, opts?: { limit?: number }): Promise<any[]>;
+      privateChannels(opts?: { limit?: number }): Promise<any[]>;
+      /** Cached messages, newest first. */
+      messages(channelId: string, opts?: { limit?: number; before?: string }): Promise<Message[]>;
+      message(channelId: string, id: string): Promise<Message | null>;
+      readState(channelId: string): Promise<any | null>;
+      relationships(): Promise<any[]>;
+      /** A key of the meta table: me, guild_order, experiments, my_members, selected, ... */
+      meta(key: string): Promise<any>;
+      /** A persisted domain: profiles, threads, scheduled_events, collectibles, connections, user_affinities, ... */
+      domain(name: string): Promise<any>;
+      /** Every table of the database. */
+      tables(): Promise<string[]>;
+      get(table: string, key: string): Promise<any>;
+      /** [{key, value}] ordered by key. */
+      scan(table: string, opts?: { prefix?: string; after?: string; before?: string; reverse?: boolean; limit?: number }): Promise<{ key: string; value: any }[]>;
+      count(table: string, opts?: { prefix?: string }): Promise<number>;
+      /** Read-only SQL on the database. */
+      sql(query: string, args?: (string | number)[], limit?: number): Promise<{ cols: string[]; rows: any[][]; more: boolean }>;
       /** Any serializer at host-lib offset `ser` on the store field at `off` (per-build offsets). */
       raw(ser: number, off: number): Promise<any | null>;
       /** Several reads in one go, synchronously, on the store thread. */

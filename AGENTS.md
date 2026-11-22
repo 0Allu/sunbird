@@ -74,9 +74,16 @@ is about how to work on it without repeating past mistakes.
   it needs `libshadowhook_nothing.so` next to libplg (shipped by the patcher), and compiler-rt
   builtins linked in (`__clear_cache`). arm64 only.
 - **BigInt:** arm64 heap pointers carry tag bits above 2^53; native addresses/registers are BigInts.
-- **Persisted stores:** Phoenix writes its state to SQLite key/value tables (`k`, `v`) through
-  the Java module `nativeapp.modules.w4` (tables like guilds, users, channels, members,
-  messages, read_states, settings.*, domain.*). `<Me as Serialize>` is callable on the live store.
+- **Stores:** Phoenix persists its state in `files/store/<account>/cache.sqlite` (Java module
+  `nativeapp.modules.w4`): key/value tables (`k`, `v` JSON) like guilds, members, channels,
+  users, messages, read_states, user_guild_settings, relationships, and a `meta` table (`me`,
+  `guild_order`, `domain.*`, experiments, ...). Keys are 20-digit zero-padded ids. The runtime
+  reads it read-only through the Java helper (`phx.Db`). READY does not go through the hooked
+  event table on the phone build, so don't rely on observing it. `files/kv-storage/` is the
+  old React Native app's storage.
+- **Credentials on the bridge:** HTTP requests travel over `GuestHost.invoke` with the user's
+  `authorization` header. Never capture/log invoke frames wholesale; filter before saving and
+  delete captures that contain tokens.
 - **Plugins dir:** JS plugins live in `files/phoenix-js/`; Frida plugins in `files/phoenix-plugins/`.
 - **esbuild drops line comments**: keep plugin headers with a banner (see plugins/example/build.mjs).
 - **Shell gotchas (Windows Git Bash):** long heredocs sometimes fail to parse; write scripts to a

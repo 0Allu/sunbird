@@ -50,8 +50,19 @@ gateway event (usually well under a second). Both always return Promises.
 | `messages.addLocal(channelId, content, {author?, guildId?, embeds?})` | Shows a message only on this device (from "Phoenix" or `author`). Resolves to its id. |
 | `messages.updateLocal(message)` / `deleteLocal(channelId, id)` | Local-only edit / removal. Nothing is sent to Discord. |
 | `stores.me()` | The signed-in user. |
-| `stores.read(s => …)` | Several store reads at once, synchronously on the store thread. |
-| `stores.raw(ser, off)` | Any of Phoenix's serde serializers on a store field (per-build offsets, advanced). |
+| `stores.guilds()` / `guild(id)` / `members(guildId)` / `member(g, u)` / `guildSettings(g)` | Guilds (`properties`, `roles`, `emojis`, …), members Phoenix has seen, your notification settings. |
+| `stores.channels(guildId)` / `privateChannels()` / `channel(id)` | Channels (guild 0 = DMs). |
+| `stores.messages(channelId, {limit, before})` / `message(ch, id)` | Cached messages, newest first. |
+| `stores.user(id)` / `users()` / `relationships()` / `readState(channelId)` | |
+| `stores.meta(key)` / `domain(name)` | Phoenix's meta table (`guild_order`, `experiments`, `my_members`, …) and persisted domains (`profiles`, `threads`, `scheduled_events`, `collectibles`, `connections`, `user_affinities`, …). |
+| `stores.tables()` / `get(t, key)` / `scan(t, {prefix, after, before, reverse, limit})` / `count(t)` / `sql(query, args)` | Every table, generically, and read-only SQL. |
+| `stores.read(s => …)` | Several live reads at once, synchronously on the store thread. |
+| `stores.raw(ser, off)` | Any of Phoenix's serde serializers on a live store field (per-build offsets, advanced). |
+
+The stores are Phoenix's own database (`files/store/<account>/cache.sqlite`), opened read-only:
+key/value tables with JSON values, written by Phoenix as it handles events. Ids in keys are
+zero-padded to 20 digits (`"<guild>:<channel>"`, `"<channel>:<message>"`, `"<guild>:<user>"`).
+Change notifications: listen to the matching gateway events (`on`/`observe`).
 | `ui.toast(text, {long?})` | Android toast. |
 | `ui.confirm(title, message, {ok?, cancel?})` | Dialog; resolves to `true` for OK. |
 | `ui.pickFile(mime?)` | Android's document picker; resolves to `{name, text}` or `null` (4 MB max). |

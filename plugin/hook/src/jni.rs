@@ -436,3 +436,42 @@ pub fn confirm(id: i32, title: &str, message: &str, ok: &str, cancel: &str) -> R
             vec![jvalue { i: id }, s(title), s(message), s(ok), s(cancel)])
     }
 }
+
+/// Calls a static String method of a helper class (no GuestHost argument unless `owner`).
+unsafe fn helper_str(class: &'static str, method: &CStr, sig: &CStr, owner: bool, mut args: Vec<jvalue>) -> Result<Option<String>, String> {
+    let env = env().ok_or("no JNI env")?;
+    let cls = helper_class(env, class)?;
+    let m = jcall!(env, GetStaticMethodID, cls, method.as_ptr(), sig.as_ptr());
+    if clear_exc(env) || m.is_null() { return Err(format!("{class}.{method:?} not found")); }
+    if owner { args.insert(0, jvalue { l: GUEST_HOST.load(Relaxed) as jobject }); }
+    let r = jcall!(env, CallStaticObjectMethodA, cls, m, args.as_ptr());
+    if clear_exc(env) { return Err(format!("{class}.{method:?} threw")); }
+    let s = jstr16(env, r);
+    if !r.is_null() { jcall!(env, DeleteLocalRef, r); }
+    Ok(s)
+}
+
+/// The app's data directory (Phoenix's databases live under it).
+pub fn data_dir() -> Result<Option<String>, String> {
+    unsafe { helper_str("phx.Db", c"dataDir", c"(Ljava/lang/Object;)Ljava/lang/String;", true, vec![]) }
+}
+/// Files under `dir` as JSON [[path, size], ...].
+pub fn list_files(dir: &str) -> Result<Option<String>, String> {
+    unsafe {
+        let env = env().ok_or("no JNI env")?;
+        helper_str("phx.Db", c"files", c"(Ljava/lang/String;)Ljava/lang/String;", false, vec![jvalue { l: new_jstr(env, dir) }])
+    }
+}
+/// Read-only SQL on one of Phoenix's databases: JSON {cols, rows, more} or {error}.
+pub fn db_query(path: &str, sql: &str, args: &[String], limit: i32) -> Result<Option<String>, String> {
+    unsafe {
+        let env = env().ok_or("no JNI env")?;
+        let sc = jcall!(env, FindClass, c"java/lang/String".as_ptr());
+        let arr = jcall!(env, NewObjectArray, args.len() as jsize, sc, std::ptr::null_mut());
+        for (i, a) in args.iter().enumerate() { jcall!(env, SetObjectArrayElement, arr, i as jsize, new_jstr(env, a)); }
+        let r = helper_str("phx.Db", c"query", c"(Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;I)Ljava/lang/String;", false,
+            vec![jvalue { l: new_jstr(env, path) }, jvalue { l: new_jstr(env, sql) }, jvalue { l: arr }, jvalue { i: limit }]);
+        jcall!(env, DeleteLocalRef, arr);
+        r
+    }
+}

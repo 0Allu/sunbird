@@ -197,9 +197,85 @@ let meCache = null;
 add(async, 1, 'READY', (ev) => { try { meCache = jsonField(ev.raw, 'user') ?? meCache; } catch (e) { console.warn('READY user:', e.message); } });
 add(async, 1, 'USER_UPDATE', (ev) => { try { if (meCache && ev.data.id === meCache.id) meCache = { ...meCache, ...ev.data }; } catch {} });
 const meNow = () => { try { const s = P.me(); if (s != null) return JSON.parse(s); } catch {} return meCache; };
+const meAny = async () => (await onStore(meNow)) ?? (await db.get('meta', 'me').catch(() => null));
+// ---- stores: Phoenix's own database (files/store/<account>/cache.sqlite), opened read-only ----
+// Key/value tables with JSON values; ids in keys are zero-padded to 20 digits, e.g. channels are
+// "<guild>:<channel>", messages "<channel>:<message>".
+let dbPath = null;
+const pad = (id) => String(id).padStart(20, '0');
+const TABLE = /^[a-z][a-z0-9_]{0,63}$/;
+const dbFile = () => {
+  if (dbPath) return dbPath;
+  const dir = P.dbDataDir();
+  if (!dir) throw new Error('Phoenix is not up yet');
+  const files = JSON.parse(P.dbFiles(dir + '/files/store')).map(([f]) => f).filter((f) => f.endsWith('/cache.sqlite'));
+  const me = meCache && meCache.id;
+  // ponytail: one Phoenix account per install in practice; with several, the READY user (if seen) picks
+  dbPath = files.find((f) => me && f.includes(`/${me}/`)) || files[0] || null;
+  if (!dbPath) throw new Error("Phoenix's database was not found");
+  return dbPath;
+};
+const sql = async (query, args = [], limit = 1000) => {
+  await uiReady();
+  const r = JSON.parse(P.dbQuery(dbFile(), query, args.map(String), limit));
+  if (r.error) throw new Error(r.error);
+  return r;
+};
+const val = (v) => { if (typeof v !== 'string') return v; try { return JSON.parse(v); } catch { return v; } };
+const table = (t) => { if (!TABLE.test(t)) throw new Error(`bad table name "${t}"`); return `"${t}"`; };
+const db = {
+  tables: async () => (await sql("SELECT name FROM sqlite_master WHERE type = 'table' AND name != 'android_metadata' ORDER BY name")).rows.map((r) => r[0]),
+  get: async (t, key) => { const r = await sql(`SELECT v FROM ${table(t)} WHERE k = ?`, [key], 1); return r.rows.length ? val(r.rows[0][0]) : null; },
+  /** [{key, value}] ordered by key: {prefix, after, before, reverse, limit (100, max 5000)} */
+  scan: async (t, o = {}) => {
+    const where = [], args = [];
+    if (o.prefix != null) { where.push('k >= ? AND k < ?'); args.push(o.prefix, o.prefix + '￿'); }
+    if (o.after != null) { where.push('k > ?'); args.push(o.after); }
+    if (o.before != null) { where.push('k < ?'); args.push(o.before); }
+    const n = Math.max(1, Math.min(o.limit ?? 100, 5000));
+    const r = await sql(`SELECT k, v FROM ${table(t)}${where.length ? ' WHERE ' + where.join(' AND ') : ''} ORDER BY k ${o.reverse ? 'DESC' : 'ASC'} LIMIT ${n}`, args, n);
+    return r.rows.map(([k, v]) => ({ key: k, value: val(v) }));
+  },
+  count: async (t, o = {}) => {
+    const r = o.prefix != null ? await sql(`SELECT count(*) FROM ${table(t)} WHERE k >= ? AND k < ?`, [o.prefix, o.prefix + '￿'])
+      : await sql(`SELECT count(*) FROM ${table(t)}`);
+    return r.rows[0][0];
+  },
+  /** Read-only SQL: {cols, rows, more}. */
+  sql: (query, args = [], limit = 1000) => sql(query, args, limit),
+};
+const values = (rows) => rows.map((r) => r.value);
+const typed = {
+  user: (id) => db.get('users', pad(id)),
+  users: (o = {}) => db.scan('users', { limit: o.limit ?? 1000 }).then(values),
+  channel: async (id) => { const r = await sql('SELECT v FROM channels WHERE k LIKE ? LIMIT 1', ['%:' + pad(id)], 1); return r.rows.length ? val(r.rows[0][0]) : null; },
+  /** A guild's channels; guildId 0 or null for DMs and group DMs. */
+  channels: (guildId, o = {}) => db.scan('channels', { prefix: pad(guildId || 0) + ':', limit: o.limit ?? 1000 }).then(values),
+  privateChannels: (o = {}) => db.scan('channels', { prefix: pad(0) + ':', limit: o.limit ?? 1000 }).then(values),
+  /** Newest first: {limit (50), before: messageId} */
+  messages: (channelId, o = {}) => db.scan('messages', { prefix: pad(channelId) + ':', reverse: true, limit: o.limit ?? 50,
+    ...(o.before != null ? { before: pad(channelId) + ':' + pad(o.before) } : {}) }).then(values),
+  message: (channelId, id) => db.get('messages', pad(channelId) + ':' + pad(id)),
+  readState: (channelId) => db.get('read_states', pad(channelId)),
+  relationships: () => db.scan('relationships', { limit: 5000 }).then(values),
+  /** Guilds as Phoenix stores them: {id, properties (name, icon, ...), roles, emojis, stickers, member_count, joined_at_ms}. */
+  guilds: (o = {}) => db.scan('guilds', { limit: o.limit ?? 5000 }).then((rows) => rows.map(({ key, value }) => ({ id: String(BigInt(key)), ...value }))),
+  guild: async (id) => { const v = await db.get('guilds', pad(id)); return v && { id: String(id), ...v }; },
+  /** Members Phoenix has seen in a guild (not the whole member list). */
+  members: (guildId, o = {}) => db.scan('members', { prefix: pad(guildId) + ':', limit: o.limit ?? 1000 }).then(values),
+  member: (guildId, userId) => db.get('members', pad(guildId) + ':' + pad(userId)),
+  /** Your notification settings for a guild. */
+  guildSettings: (guildId) => db.get('user_guild_settings', pad(guildId)),
+  /** A key of Phoenix's meta table: me, guild_order, experiments, my_members, selected, ... */
+  meta: (key) => db.get('meta', key),
+  /** A persisted domain: profiles, threads, scheduled_events, collectibles, connections, user_affinities, ... */
+  domain: (name) => db.get('meta', 'domain.' + name),
+};
+
 // ready: at READY, or at the first gateway event if plugins started after Phoenix had handled it
 let readyResolve; const ready = new Promise((r) => { readyResolve = r; });
 add(async, 1, 'READY', () => readyResolve());
+// Phoenix applies READY on its own path on some builds: the first gateway event means it is connected
 onStore(() => readyResolve());
 
 // Plugin settings: define({key: {type: 'switch'|'text'|'number'|'button', title, description?,
@@ -239,7 +315,7 @@ const api = (id) => ({ id,
   dispatch: (n, data) => onStore(() => dispatchNow(n, data)),
   fetch: fetchImpl, storage: storageFor(id), events: [...names],
   // Live Phoenix stores via Phoenix's own serializers, read on its store thread (Promises).
-  stores: { me: () => onStore(meNow),
+  stores: { ...db, ...typed, me: meAny,
     raw: (ser, off) => onStore(() => parseOrNull(P.storeJson(ser, off))),
     /** fn({me, raw}) on the store thread, with synchronous readers. */
     read: (fn) => onStore(() => fn({ me: meNow, raw: (ser, off) => parseOrNull(P.storeJson(ser, off)) })) },
