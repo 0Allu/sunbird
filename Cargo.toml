@@ -33,6 +33,7 @@ rquickjs        = { features = [ "parallel" ], version = "0.14" }
 seq-macro       = "0.3"
 serde           = { features = [ "derive" ], version = "1" }
 serde_json      = { features = [ "raw_value" ], version = "1" }
+zip             = { default-features = false, version = "9" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

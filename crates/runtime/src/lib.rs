@@ -59,6 +59,12 @@ struct State {
 
 static STATE: OnceLock<State> = OnceLock::new();
 
+/// A plugin bundle, an esbuild IIFE that receives the `plumage` API.
+pub struct Plugin {
+   pub name:   String,
+   pub source: String,
+}
+
 /// What [`start`] found and loaded.
 pub struct Started {
    pub target:  String,
@@ -67,8 +73,11 @@ pub struct Started {
 }
 
 /// Starts plumage against the first loaded library that matches a known build
-/// ID, falling back to the first one named in [`LIBRARIES`].
-pub fn start(home: PathBuf) -> Result<Started, Error> {
+/// ID.
+///
+/// Falls back to the first library named in [`LIBRARIES`]. `bundled` plugins
+/// load first, and a file in `home/plugins` with the same name replaces one.
+pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    // SAFETY: the target is the host app's own library, which stays mapped for
    // the life of the process, and scans run before the host's threads touch its
    // data.
@@ -99,7 +108,7 @@ pub fn start(home: PathBuf) -> Result<Started, Error> {
    STATE.set(state).map_err(|_| Error::AlreadyStarted)?;
    let state = STATE.get().expect("STATE was set above");
 
-   let plugins = js::load_plugins(state)?;
+   let plugins = js::load_plugins(state, bundled)?;
    Ok(Started {
       target: state.image.path.clone(),
       build: state.build.map(|build| build.label),

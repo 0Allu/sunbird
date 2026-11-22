@@ -1,6 +1,9 @@
 use std::{
    cell::RefCell,
-   collections::HashMap,
+   collections::{
+      BTreeMap,
+      HashMap,
+   },
    fs,
    io::ErrorKind,
    path::PathBuf,
@@ -27,6 +30,7 @@ use rquickjs::{
 
 use crate::{
    Error,
+   Plugin,
    STATE,
    State,
    gateway,
@@ -358,38 +362,41 @@ fn storage<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
    Ok(storage)
 }
 
-/// Evaluates every `*.js` bundle in the plugins directory, in file name order.
+/// Evaluates `bundled` plus every `*.js` file in the plugins directory, in name
+/// order.
 #[expect(
    clippy::significant_drop_tightening,
    reason = "plugins load under one engine lock so no gateway event sees a half-loaded set"
 )]
-pub fn load_plugins(state: &State) -> Result<Vec<String>, Error> {
+pub fn load_plugins(state: &State, bundled: Vec<Plugin>) -> Result<Vec<String>, Error> {
    let dir = state.plugins_dir();
-   let mut paths: Vec<_> = match fs::read_dir(&dir) {
-      Ok(entries) => {
-         entries
-            .map(|entry| entry.map(|entry| entry.path()))
-            .collect::<Result<_, _>>()
-            .map_err(io_error(&dir))?
-      },
+   let mut plugins: BTreeMap<String, String> = bundled
+      .into_iter()
+      .map(|plugin| (plugin.name, plugin.source))
+      .collect();
+   let paths = match fs::read_dir(&dir) {
+      Ok(entries) => entries.collect::<Result<Vec<_>, _>>().map_err(io_error(&dir))?,
       Err(err) if err.kind() == ErrorKind::NotFound => Vec::new(),
       Err(err) => return Err(io_error(&dir)(err)),
    };
-   paths.retain(|path| path.extension().is_some_and(|ext| ext == "js"));
-   paths.sort();
+   for path in paths.iter().map(fs::DirEntry::path) {
+      let Some(name) = path
+         .file_stem()
+         .and_then(|stem| stem.to_str())
+         .filter(|_| path.extension().is_some_and(|ext| ext == "js"))
+      else {
+         continue;
+      };
+      let source = fs::read_to_string(&path).map_err(io_error(&path))?;
+      plugins.insert(name.to_owned(), source);
+   }
 
    let engine = state
       .js
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner);
    let mut loaded = Vec::new();
-   for path in paths {
-      let name = path
-         .file_stem()
-         .and_then(|stem| stem.to_str())
-         .unwrap_or("plugin")
-         .to_owned();
-      let source = fs::read_to_string(&path).map_err(io_error(&path))?;
+   for (name, source) in plugins {
       let outcome = engine.context.with(|ctx| {
          let run = || -> rquickjs::Result<()> {
             let plumage = api(&ctx, &name)?;

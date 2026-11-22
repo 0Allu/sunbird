@@ -41,6 +41,10 @@ pub use registry::{
 /// Libraries that carry the gateway registry, Phoenix's and the stand-in's.
 pub const LIBRARIES: &[&str] = &["liblibdiscord_wasm_host.so", "libstand_in.so"];
 
+/// Name of the plugin bundle the patcher stores next to the loader in the APK's
+/// native library directory, a JSON object of plugin name to source.
+pub const PLUGIN_BUNDLE: &str = "libplm.plugins.so";
+
 /// Offset of the handler pointer in a gateway registry entry `{name ptr, name
 /// len, handler}`.
 pub const GATEWAY_HANDLER_FIELD: usize = 2 * size_of::<usize>();
