@@ -21,6 +21,7 @@ use crate::{
    patches::{
       Before,
       Draft,
+      FORCE_VALUE,
       Handler,
       Patches,
       Place,
@@ -36,7 +37,6 @@ use crate::{
 /// From the `suggestions` scroll to the list of rows: stack, view, the second
 /// view, then four more views down.
 const ROWS_PATH: [usize; 7] = [0, 0, 1, 0, 0, 0, 0];
-const FORCE_VALUE: Prop = Prop::named("forceValue");
 const SEQ: Key = Prop::named("seq").key();
 const START: Key = Prop::named("start").key();
 const END: Key = Prop::named("end").key();

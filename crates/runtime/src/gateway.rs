@@ -310,6 +310,8 @@ unsafe extern "C" fn detour(
       ctx,
       rest: event.rest,
    }));
+   #[cfg(target_os = "android")]
+   let original_data = data;
    let before = run_js(state, |engine| engine.before(id, name, data)).unwrap_or(Before::Keep);
    let (result, data) = match &before {
       Before::Drop => {
@@ -328,6 +330,10 @@ unsafe extern "C" fn detour(
          (call(&replaced), json.as_str())
       },
    };
+   #[cfg(target_os = "android")]
+   if let (Before::Replace(json), "MESSAGE_CREATE" | "MESSAGE_UPDATE") = (&before, name) {
+      remember_original(original_data, json);
+   }
    run_js(state, |engine| engine.after(id, name, data, result.is_ok()));
    HANDLING.set(None);
    result
@@ -345,6 +351,30 @@ fn promote(name: &str, data: &str) -> Option<String> {
       log::warn!("{name} kept its user flags, the staff flag is off");
    }
    promoted
+}
+
+#[cfg(target_os = "android")]
+#[derive(serde::Deserialize)]
+struct Posted<'a> {
+   #[serde(borrow)]
+   content: Option<std::borrow::Cow<'a, str>>,
+}
+
+/// Hands the patches a message's text from before and after the plugin
+/// hooks, when they changed it.
+#[cfg(target_os = "android")]
+fn remember_original(before: &str, after: &str) {
+   let (Ok(before), Ok(after)) = (
+      serde_json::from_str::<Posted<'_>>(before),
+      serde_json::from_str::<Posted<'_>>(after),
+   ) else {
+      return;
+   };
+   if let (Some(original), Some(shown)) = (before.content, after.content)
+      && original != shown
+   {
+      crate::patches::remember_original(shown.into_owned(), original.into_owned());
+   }
 }
 
 /// READY with its `user` swapped for one with the staff flag. The other

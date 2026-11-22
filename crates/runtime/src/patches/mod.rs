@@ -18,6 +18,7 @@ use std::{
    collections::{
       HashMap,
       HashSet,
+      VecDeque,
    },
    fmt,
    sync::{
@@ -82,6 +83,7 @@ use crate::{
 /// Plugin node ids count up from here, clear of Rust's and the settings page's.
 const FIRST_ID: i32 = 0x5800_0000;
 const DISMISS: Key = Prop::named("dismiss").key();
+const FORCE_VALUE: Prop = Prop::named("forceValue");
 const ROW_LONG_PRESS: Key = Prop::named("rowLongPress").key();
 const RESULTS_CAP: usize = 4096;
 
@@ -268,6 +270,62 @@ static PATCHES: LazyLock<Mutex<Patches>> = LazyLock::new(|| {
 /// decode a batch.
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static WORKER: OnceLock<Sender<Job>> = OnceLock::new();
+/// Your messages' text as Discord has it, by the text plugin hooks turned it
+/// into. Phoenix fills the edit box from the hooked text, and saving it would
+/// post what the plugins added.
+static ORIGINALS: Mutex<VecDeque<(String, String)>> = Mutex::new(VecDeque::new());
+static GUARDING: AtomicBool = AtomicBool::new(false);
+const ORIGINALS_CAP: usize = 256;
+
+/// Remembers that a plugin hook turned your message `original` into `shown`.
+pub fn remember_original(shown: String, original: String) {
+   let mut originals = ORIGINALS.lock().unwrap_or_else(PoisonError::into_inner);
+   originals.retain(|(known, _)| *known != shown);
+   if originals.len() == ORIGINALS_CAP {
+      originals.pop_front();
+   }
+   originals.push_back((shown, original));
+   drop(originals);
+   GUARDING.store(true, Ordering::Release);
+}
+
+/// Swaps hooked text Rust puts in an input back to what Discord has. Returns
+/// whether it swapped any.
+fn restore_originals(ops: &mut [Op]) -> bool {
+   let originals = ORIGINALS.lock().unwrap_or_else(PoisonError::into_inner);
+   let original = |text: &str| {
+      originals
+         .iter()
+         .find(|(shown, _)| shown == text)
+         .map(|(_, original)| original.clone())
+   };
+   let mut restored = false;
+   for op in ops {
+      let (Op::Update { props, .. } | Op::Create { props, .. }) = op else {
+         continue;
+      };
+      for (key, value) in props.iter_mut() {
+         let text = match value {
+            Value::Str(text) if *key == Prop::VALUE => text,
+            Value::Obj(fields) if *key == FORCE_VALUE => {
+               let Some((_, Value::Str(text))) = fields
+                  .iter_mut()
+                  .find(|(field, _)| *field == Prop::TEXT.key())
+               else {
+                  continue;
+               };
+               text
+            },
+            _ => continue,
+         };
+         if let Some(original) = original(text) {
+            *text = original;
+            restored = true;
+         }
+      }
+   }
+   restored
+}
 
 fn patches() -> MutexGuard<'static, Patches> {
    PATCHES.lock().unwrap_or_else(PoisonError::into_inner)
@@ -285,19 +343,24 @@ struct PatchSink;
 
 impl Sink for PatchSink {
    fn ops(&self, batch: &[u8]) -> Action {
-      if !ACTIVE.load(Ordering::Acquire) {
+      let active = ACTIVE.load(Ordering::Acquire);
+      if !active && !GUARDING.load(Ordering::Acquire) {
          return Action::Pass;
       }
-      let ops = match decode(batch) {
+      let mut ops = match decode(batch) {
          Ok(ops) => ops,
          Err(err) => {
             log::warn!("patches: undecodable batch: {err}");
             return Action::Pass;
          },
       };
-      patches()
-         .rewrite(ops)
-         .map_or(Action::Pass, |ops| Action::Replace(encode(&ops)))
+      let restored = restore_originals(&mut ops);
+      let rewritten = if active {
+         patches().rewrite(ops, restored)
+      } else {
+         restored.then_some(ops)
+      };
+      rewritten.map_or(Action::Pass, |ops| Action::Replace(encode(&ops)))
    }
 
    fn dispatch(&self, frame: &[u8]) -> Action {
@@ -567,7 +630,7 @@ pub fn forget(plugin: &str) {
 impl Patches {
    /// Mirrors `ops` and splices plugin nodes in. `None` leaves the batch as
    /// it was.
-   fn rewrite(&mut self, ops: Vec<Op>) -> Option<Vec<Op>> {
+   fn rewrite(&mut self, ops: Vec<Op>, restored: bool) -> Option<Vec<Op>> {
       let mut mine = Vec::new();
       let mut touched = HashSet::new();
       let mut extra_deletes;
@@ -636,7 +699,12 @@ impl Patches {
       let rewrites_children = ops.iter().any(|op| {
          matches!(op, Op::Children { id, .. } | Op::ChildEdits { id, .. } if slot_parents.contains(id))
       });
-      if touched.is_empty() && extra_deletes.is_empty() && extra.is_empty() && !rewrites_children {
+      if touched.is_empty()
+         && extra_deletes.is_empty()
+         && extra.is_empty()
+         && !rewrites_children
+         && !restored
+      {
          return None;
       }
 
