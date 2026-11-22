@@ -1,0 +1,20 @@
+[package]
+name              = "plumage-runtime"
+description       = "QuickJS plugin runtime that drives plumage's gateway hooks"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+log          = { workspace = true }
+plumage-hook = { workspace = true }
+plumage-sigs = { workspace = true }
+rquickjs     = { workspace = true }
+thiserror    = { workspace = true }
+
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+# rquickjs-sys ships pregenerated bindings for desktop triples only.
+rquickjs = { features = [ "bindgen" ], workspace = true }
+
+[lints]
+workspace = true
