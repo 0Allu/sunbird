@@ -26,7 +26,7 @@ one APK and signs it, all in the browser, so Android can install it with a singl
 - `dex.js`: patches `PhoenixLaunch.i`.
 - `axml.js`: removes `requiredSplitTypes`/`splitTypes` from the manifest and sets
   `com.android.vending.splits.required` to false. Optionally renames the package; the site
-  does this by default ("Next to Discord"). It changes `package`, the provider authorities,
+  does this by default ("Next to Discord", with an editable package name). It changes `package`, the provider authorities,
   `com.discord.*` permissions and task affinities to `com.discord.phoenix` (a name Phoenix's
   native lib already knows) and sets the label to "Discord Phoenix". Class names stay
   unchanged. `arsc.js` renames the resource table package to match, so `getIdentifier()`
@@ -45,7 +45,7 @@ browser), which means anyone can produce an APK that installs over this one.
 The APKs come from `tracker.vendetta.rocks`, which redirects to Google's CDN. The CDN sends
 no CORS headers, so the page downloads through `web/worker/proxy.js`, a Cloudflare Worker
 deployed at `https://phoenix-apk-proxy.mantikafasi.workers.dev`. It only forwards
-`/tracker/index` and `/tracker/download/<vc>/<split>`. Redeploy it with
+`/tracker/index` and `/tracker/download/<vc>/<split>`, and caches them at the edge: splits for a year (they never change per versionCode, and browsers get `immutable` too), the index and 404s for 5 minutes. Responses carry `X-Cache: HIT|MISS`. Redeploy it with
 `npx wrangler deploy web/worker/proxy.js --name phoenix-apk-proxy --compatibility-date 2026-11-01`.
 The URL is set in `web/config.js`, or can be overridden with `?proxy=`. The tracker only
 mirrors some density splits (for 356207, only hdpi and xxhdpi), so the page falls back to

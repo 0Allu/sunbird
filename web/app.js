@@ -75,7 +75,7 @@ function splitNames() {
 async function patchAndOffer(vc, base, abi, configs) {
   const s = step('Patch and sign');
   s.progress(0.5, 'working…');
-  const packageName = $('pkg').value, side = packageName !== 'com.discord';
+  const packageName = chosenPackage(), side = packageName !== 'com.discord';
   const parts = await buildPatchedApk({ base, abi, configs, identity: await identity(), packageName, label: side ? 'Discord Phoenix' : null, log });
   const blob = new Blob(parts, { type: 'application/vnd.android.package-archive' });
   s.done(mb(blob.size));
@@ -106,7 +106,24 @@ async function downloadDensity(vc) {
   throw new Error('this build has no density split on the tracker');
 }
 
+// --- package name: "Replace" keeps com.discord, "Next to" uses the editable name ---------
+const PKG_RE = /^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+$/;
+const chosenPackage = () => ($('mode').value === 'replace' ? 'com.discord' : $('pkg').value.trim());
+function checkPackage() {
+  const p = $('pkg').value.trim();
+  const bad = $('mode').value === 'side' && (!PKG_RE.test(p) || p === 'com.discord' || p.length > 127);
+  $('pkg').setAttribute('aria-invalid', bad);
+  return !bad;
+}
+$('mode').onchange = () => { $('pkg-row').hidden = $('mode').value === 'replace'; checkPackage(); };
+$('pkg').oninput = checkPackage;
+
 $('go').onclick = async () => {
+  if (!checkPackage()) {
+    $('err').textContent = 'Package name must look like com.example.app (letters, digits, _; at least two parts) and differ from com.discord.';
+    $('err').hidden = false; $('pkg').focus();
+    return;
+  }
   const vc = +$('ver').value;
   $('go').disabled = true; $('err').hidden = true; $('result').hidden = true;
   $('steps').textContent = ''; $('log').textContent = ''; $('progress').hidden = false;
