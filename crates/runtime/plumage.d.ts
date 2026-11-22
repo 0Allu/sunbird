@@ -890,6 +890,18 @@ declare namespace Plumage {
     keys(): string[];
   }
 
+  interface SwitchSpec {
+    title: string;
+    description?: string;
+    default: boolean;
+  }
+
+  interface Settings {
+    /// Shows one switch per key on the plugin's page in Settings. Each property of the result reads
+    /// the user's current choice, so read it when needed instead of caching it.
+    define<S extends Record<string, SwitchSpec>>(schema: S): { readonly [K in keyof S]: boolean };
+  }
+
   interface Api {
     readonly gateway: Gateway;
     /// Observes a hook point after the client handled it.
@@ -900,6 +912,7 @@ declare namespace Plumage {
     dispatch<P>(sig: Sig<P>, payload: Partial<P>): boolean;
     readonly log: Log;
     readonly storage: Storage;
+    readonly settings: Settings;
   }
 }
 

@@ -1,4 +1,5 @@
 use std::{
+   borrow::Cow,
    cell::RefCell,
    collections::{
       BTreeMap,
@@ -27,6 +28,7 @@ use rquickjs::{
    Runtime,
    Value,
    function::Rest,
+   object::Accessor,
 };
 
 use crate::{
@@ -35,6 +37,7 @@ use crate::{
    PluginInfo,
    STATE,
    State,
+   Switch,
    gateway,
    io_error,
 };
@@ -51,10 +54,22 @@ struct Loaded {
    error:   Option<String>,
 }
 
-/// Which plugins the user turned off, kept in `home/plugins.json`.
+/// Which plugins the user turned off and how they set each plugin's
+/// switches, kept in `home/plugins.json`.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
-struct Choices {
+struct Choices<'a> {
+   #[serde(default)]
    disabled: BTreeSet<String>,
+   #[serde(default)]
+   switches: Cow<'a, BTreeMap<String, BTreeMap<String, bool>>>,
+}
+
+/// One switch a plugin defined with `plumage.settings.define`.
+struct Definition {
+   key:         String,
+   title:       String,
+   description: Option<String>,
+   default:     bool,
 }
 
 pub enum Before {
@@ -70,6 +85,9 @@ struct Registry<'js> {
    gateway: Object<'js>,
    handles: Vec<(EventId, Object<'js>)>,
    hooks:   RefCell<HashMap<EventId, Vec<Hook<'js>>>>,
+   defined: RefCell<BTreeMap<String, Vec<Definition>>>,
+   /// Kept across unloads, so a reloaded plugin sees what the user chose.
+   chosen:  RefCell<BTreeMap<String, BTreeMap<String, bool>>>,
 }
 
 // SAFETY: every field is bound to 'js, and Changed swaps exactly that lifetime.
@@ -118,17 +136,55 @@ impl Engine {
    }
 
    pub fn plugins(&self) -> Vec<PluginInfo> {
-      self
-         .plugins
-         .iter()
-         .map(|(name, loaded)| {
-            PluginInfo {
-               name:    name.clone(),
-               enabled: loaded.enabled,
-               error:   loaded.error.clone(),
-            }
-         })
-         .collect()
+      self.context.with(|ctx| {
+         let registry = ctx.userdata::<Registry<'_>>();
+         let defined = registry.as_ref().map(|registry| registry.defined.borrow());
+         let chosen = registry.as_ref().map(|registry| registry.chosen.borrow());
+         self
+            .plugins
+            .iter()
+            .map(|(name, loaded)| {
+               let switches = defined
+                  .as_ref()
+                  .and_then(|defined| defined.get(name))
+                  .into_iter()
+                  .flatten()
+                  .map(|definition| {
+                     let on = chosen
+                        .as_ref()
+                        .and_then(|chosen| chosen.get(name)?.get(&definition.key).copied())
+                        .unwrap_or(definition.default);
+                     Switch {
+                        key: definition.key.clone(),
+                        title: definition.title.clone(),
+                        description: definition.description.clone(),
+                        on,
+                     }
+                  })
+                  .collect();
+               PluginInfo {
+                  name: name.clone(),
+                  enabled: loaded.enabled,
+                  error: loaded.error.clone(),
+                  switches,
+               }
+            })
+            .collect()
+      })
+   }
+
+   pub fn set_switch(&self, plugin: &str, key: &str, on: bool) {
+      self.context.with(|ctx| {
+         if let Some(registry) = ctx.userdata::<Registry<'_>>() {
+            registry
+               .chosen
+               .borrow_mut()
+               .entry(plugin.to_owned())
+               .or_default()
+               .insert(key.to_owned(), on);
+         }
+      });
+      self.save_choices();
    }
 
    /// Evaluates `name` with a fresh `plumage` object, recording any error.
@@ -163,6 +219,7 @@ impl Engine {
          let Some(registry) = ctx.userdata::<Registry<'_>>() else {
             return;
          };
+         registry.defined.borrow_mut().remove(name);
          let mut hooks = registry.hooks.borrow_mut();
          for (event, list) in hooks.iter_mut() {
             list.retain(|hook| hook.plugin != name);
@@ -199,18 +256,25 @@ impl Engine {
    }
 
    fn save_choices(&self) {
-      let choices = Choices {
-         disabled: self
-            .plugins
-            .iter()
-            .filter(|(_, loaded)| !loaded.enabled)
-            .map(|(name, _)| name.clone())
-            .collect(),
-      };
+      let disabled = self
+         .plugins
+         .iter()
+         .filter(|(_, loaded)| !loaded.enabled)
+         .map(|(name, _)| name.clone())
+         .collect();
+      let json = self.context.with(|ctx| {
+         let registry = ctx.userdata::<Registry<'_>>();
+         let chosen = registry.as_ref().map(|registry| registry.chosen.borrow());
+         let empty = BTreeMap::new();
+         serde_json::to_vec(&Choices {
+            disabled,
+            switches: Cow::Borrowed(chosen.as_deref().unwrap_or(&empty)),
+         })
+      });
       let path = state().choices_path();
       let write = || -> std::io::Result<()> {
          fs::create_dir_all(path.parent().expect("the choices path has a parent"))?;
-         fs::write(&path, serde_json::to_vec(&choices)?)
+         fs::write(&path, json?)
       };
       if let Err(err) = write() {
          log::error!("{}: {err}", path.display());
@@ -307,6 +371,8 @@ fn registry<'js>(ctx: &Ctx<'js>, events: &GatewayRegistry) -> rquickjs::Result<R
       gateway,
       handles,
       hooks: RefCell::default(),
+      defined: RefCell::default(),
+      chosen: RefCell::default(),
    })
 }
 
@@ -434,7 +500,59 @@ fn api<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
    }
    api.set("log", log)?;
    api.set("storage", storage(ctx, plugin)?)?;
+   let settings = Object::new(ctx.clone())?;
+   let name = plugin.to_owned();
+   settings.set(
+      "define",
+      Function::new(ctx.clone(), move |ctx: Ctx<'js>, schema: Object<'js>| {
+         define(&ctx, &name, &schema)
+      })?,
+   )?;
+   api.set("settings", settings)?;
    Ok(api)
+}
+
+/// Records `schema` as the plugin's switches and returns an object with one
+/// getter per key that reads the user's current choice.
+fn define<'js>(
+   ctx: &Ctx<'js>,
+   plugin: &str,
+   schema: &Object<'js>,
+) -> rquickjs::Result<Object<'js>> {
+   let mut definitions = Vec::new();
+   for entry in schema.props::<String, Object<'js>>() {
+      let (key, spec) = entry?;
+      definitions.push(Definition {
+         title: spec.get("title")?,
+         description: spec.get("description")?,
+         default: spec.get("default")?,
+         key,
+      });
+   }
+
+   let values = Object::new(ctx.clone())?;
+   for definition in &definitions {
+      let (plugin, key, default) = (
+         plugin.to_owned(),
+         definition.key.clone(),
+         definition.default,
+      );
+      let read = move |ctx: Ctx<'js>| {
+         ctx.userdata::<Registry<'js>>()
+            .and_then(|registry| registry.chosen.borrow().get(&plugin)?.get(&key).copied())
+            .unwrap_or(default)
+      };
+      values.prop(
+         definition.key.as_str(),
+         Accessor::new_get(read).enumerable(),
+      )?;
+   }
+   ctx.userdata::<Registry<'js>>()
+      .ok_or_else(|| Exception::throw_internal(ctx, "no registry"))?
+      .defined
+      .borrow_mut()
+      .insert(plugin.to_owned(), definitions);
+   Ok(values)
 }
 
 /// A JSON object per plugin, loaded once and rewritten on every change.
@@ -546,11 +664,20 @@ pub fn load_plugins(state: &State, bundled: Vec<Plugin>) -> Result<Vec<String>, 
       .js
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner);
+   engine.context.with(|ctx| {
+      if let Some(registry) = ctx.userdata::<Registry<'_>>() {
+         *registry.chosen.borrow_mut() = choices.switches.into_owned();
+      }
+   });
    engine.plugins = sources
       .into_iter()
       .map(|(name, source)| {
          let enabled = !choices.disabled.contains(&name);
-         (name, Loaded { source, enabled, error: None })
+         (name, Loaded {
+            source,
+            enabled,
+            error: None,
+         })
       })
       .collect();
    let enabled = engine
@@ -564,6 +691,11 @@ pub fn load_plugins(state: &State, bundled: Vec<Plugin>) -> Result<Vec<String>, 
    }
    Ok(enabled
       .into_iter()
-      .filter(|name| engine.plugins.get(name).is_some_and(|loaded| loaded.error.is_none()))
+      .filter(|name| {
+         engine
+            .plugins
+            .get(name)
+            .is_some_and(|loaded| loaded.error.is_none())
+      })
       .collect())
 }

@@ -72,10 +72,18 @@ struct Handling {
 /// Points every registry entry at [`detour`]. Phoenix looks handlers up in the
 /// registry on each dispatch, so a pointer swap catches every event without
 /// patching code, and events no plugin listens to cost one atomic load.
-pub fn swap(image: &Image<'static>, registry: GatewayRegistry) -> Result<&'static GatewayRegistry, Error> {
+pub fn swap(
+   image: &Image<'static>,
+   registry: GatewayRegistry,
+) -> Result<&'static GatewayRegistry, Error> {
    let writes = registry
       .iter()
-      .map(|(_, entry)| (entry.slot + GATEWAY_HANDLER_FIELD, detour as *const () as usize))
+      .map(|(_, entry)| {
+         (
+            entry.slot + GATEWAY_HANDLER_FIELD,
+            detour as *const () as usize,
+         )
+      })
       .collect::<Vec<(usize, usize)>>();
    let originals = registry
       .iter()
@@ -86,7 +94,11 @@ pub fn swap(image: &Image<'static>, registry: GatewayRegistry) -> Result<&'stati
    let hooked = registry.iter().map(|_| AtomicBool::new(false)).collect();
 
    GATEWAY
-      .set(Gateway { registry, originals, hooked })
+      .set(Gateway {
+         registry,
+         originals,
+         hooked,
+      })
       .map_err(|_| Error::AlreadyStarted)?;
    let gateway = GATEWAY.get().expect("GATEWAY was set above");
 
@@ -98,8 +110,8 @@ pub fn swap(image: &Image<'static>, registry: GatewayRegistry) -> Result<&'stati
       if found != entry.handler {
          return Err(
             plumage_sigs::Error::Conflict {
-               sig:      entry.name.clone(),
-               anchor:   "registry swap".into(),
+               sig: entry.name.clone(),
+               anchor: "registry swap".into(),
                expected: entry.handler,
                found,
             }
@@ -115,9 +127,15 @@ pub fn swap(image: &Image<'static>, registry: GatewayRegistry) -> Result<&'stati
 /// host's startup path. Table anchors read the pointers [`swap`] already
 /// replaced and stop matching, so only code anchors count here.
 pub fn verify(state: &State) {
-   let gateway = GATEWAY.get().expect("start swaps the registry before verifying");
+   let gateway = GATEWAY
+      .get()
+      .expect("start swaps the registry before verifying");
    for rule in state.build.map_or(&[][..], |build| build.gateway) {
-      let Some(entry) = gateway.registry.id(&rule.sig.name).map(|id| gateway.registry.entry(id)) else {
+      let Some(entry) = gateway
+         .registry
+         .id(&rule.sig.name)
+         .map(|id| gateway.registry.entry(id))
+      else {
          log::warn!("{}: no such event in the registry", rule.sig.name);
          continue;
       };
@@ -148,12 +166,20 @@ pub fn verify(state: &State) {
 /// Runs `data` through Phoenix's own handler for `event`, skipping the
 /// plugins. Returns whether the handler accepted it.
 pub fn dispatch(event: EventId, data: &str) -> Option<bool> {
-   let gateway = GATEWAY.get().expect("start swaps the registry before plugins load");
+   let gateway = GATEWAY
+      .get()
+      .expect("start swaps the registry before plugins load");
    let handling = HANDLING.get()?;
    let name = &gateway.registry.entry(event).name;
    let synthetic = GatewayEvent {
-      name: RawStr { ptr: name.as_ptr(), len: name.len() },
-      data: RawStr { ptr: data.as_ptr(), len: data.len() },
+      name: RawStr {
+         ptr: name.as_ptr(),
+         len: name.len(),
+      },
+      data: RawStr {
+         ptr: data.as_ptr(),
+         len: data.len(),
+      },
       rest: handling.rest,
    };
 
@@ -166,7 +192,9 @@ pub fn dispatch(event: EventId, data: &str) -> Option<bool> {
 
 /// Routes `event` through the plugins.
 pub fn install(event: EventId) {
-   let gateway = GATEWAY.get().expect("start swaps the registry before plugins load");
+   let gateway = GATEWAY
+      .get()
+      .expect("start swaps the registry before plugins load");
    if !gateway.hooked[event.index()].swap(true, Ordering::AcqRel) {
       log::info!("hooked {}", gateway.registry.entry(event).name);
    }
@@ -174,7 +202,9 @@ pub fn install(event: EventId) {
 
 /// Sends `event` straight to Phoenix again once no plugin listens to it.
 pub fn uninstall(event: EventId) {
-   let gateway = GATEWAY.get().expect("start swaps the registry before plugins load");
+   let gateway = GATEWAY
+      .get()
+      .expect("start swaps the registry before plugins load");
    if gateway.hooked[event.index()].swap(false, Ordering::AcqRel) {
       log::info!("unhooked {}", gateway.registry.entry(event).name);
    }
@@ -187,7 +217,9 @@ unsafe extern "C" fn detour(
 ) -> HandlerResult {
    #[cfg(target_os = "android")]
    crate::bridge::attach();
-   let gateway = GATEWAY.get().expect("slots point here only after GATEWAY is set");
+   let gateway = GATEWAY
+      .get()
+      .expect("slots point here only after GATEWAY is set");
    // SAFETY: the host passes a live event for the duration of the call.
    let event = unsafe { &*event };
    // SAFETY: name and data are borrowed strings that outlive the call.
@@ -205,7 +237,11 @@ unsafe extern "C" fn detour(
    let (true, Some(state), Some(data), false) = (listened, STATE.get(), data, IN_JS.get()) else {
       return call(event);
    };
-   HANDLING.set(Some(Handling { store, ctx, rest: event.rest }));
+   HANDLING.set(Some(Handling {
+      store,
+      ctx,
+      rest: event.rest,
+   }));
    let before = run_js(state, |engine| engine.before(id, name, data)).unwrap_or(Before::Keep);
    let (result, data) = match &before {
       Before::Drop => {

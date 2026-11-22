@@ -54,11 +54,11 @@ const LOGOUT_ROW: &str = "settings.row.logout";
 const ICON_PLUGIN: &str = "res://ic_mana_puzzle_piece_plus";
 const ICON_RELOAD: &str = "res://ic_mana_puzzle_piece_retry";
 /// Ids Phoenix's captured page layout uses for the parts plumage fills in.
-const PAGE_HEADER_SPACER: u32 = 0x4e1;
-const PAGE_CONTENT: u32 = 0x4e4;
+const PAGE_HEADER_SPACER: u32 = 0x4E1;
+const PAGE_CONTENT: u32 = 0x4E4;
 const PAGE_HEADER: u32 = 0x562;
 const PAGE_BACK: u32 = 0x565;
-const PAGE_TITLE: u32 = 0x56a;
+const PAGE_TITLE: u32 = 0x56A;
 
 const RADII: [Prop; 5] = [
    Prop::RADIUS,
@@ -76,6 +76,8 @@ enum Press {
    OpenPlugin(usize),
    Toggle(usize),
    Reload(usize),
+   /// A plugin's switch, by its index in [`PluginInfo::switches`].
+   Switch(usize, usize),
    Back,
 }
 
@@ -164,16 +166,16 @@ struct Page {
 
 /// The open Settings screen and what plumage added to it.
 struct Screen {
-   list:        i32,
+   list:       i32,
    /// Rust's own rows in the list and pages on the navigator, kept current
    /// from its batches.
-   rust_rows:   Option<Vec<i32>>,
-   search:      Option<i32>,
-   navigator:   Option<i32>,
-   rust_pages:  Option<Vec<i32>>,
-   header:      Option<Props>,
-   entry:       Option<Entry>,
-   stack:       Vec<Page>,
+   rust_rows:  Option<Vec<i32>>,
+   search:     Option<i32>,
+   navigator:  Option<i32>,
+   rust_pages: Option<Vec<i32>>,
+   header:     Option<Props>,
+   entry:      Option<Entry>,
+   stack:      Vec<Page>,
 }
 
 struct Settings {
@@ -224,11 +226,19 @@ pub fn start() {
       for job in receiver {
          // Runtime calls take the engine lock, so they run before the
          // settings lock is taken.
-         if let Job::Press(Press::Toggle(index) | Press::Reload(index)) = job {
+         if let Job::Press(
+            press @ (Press::Toggle(index) | Press::Reload(index) | Press::Switch(index, _)),
+         ) = job
+         {
             let plugin = settings().plugins.get(index).cloned();
-            match (plugin, job) {
-               (Some(plugin), Job::Press(Press::Toggle(_))) => {
+            match (plugin, press) {
+               (Some(plugin), Press::Toggle(_)) => {
                   crate::set_enabled(&plugin.name, !plugin.enabled);
+               },
+               (Some(plugin), Press::Switch(_, at)) => {
+                  if let Some(switch) = plugin.switches.get(at) {
+                     crate::set_switch(&plugin.name, &switch.key, !switch.on);
+                  }
                },
                (Some(plugin), _) => crate::reload(&plugin.name),
                (None, _) => {},
@@ -282,7 +292,12 @@ fn filter_dispatch(frame: &[u8]) -> Action {
          return Action::Pass;
       };
       for item in &items {
-         let DispatchEvent::View { node, event, payload } = &item.event else {
+         let DispatchEvent::View {
+            node,
+            event,
+            payload,
+         } = &item.event
+         else {
             continue;
          };
          let job = if *event == Prop::NAVIGATE
@@ -290,7 +305,9 @@ fn filter_dispatch(frame: &[u8]) -> Action {
             && Some(*node) == screen.navigator
          {
             let index = obj_i32(payload, Prop::INDEX).and_then(|index| usize::try_from(index).ok());
-            Some(Job::NavigateTo(index.unwrap_or_else(|| state.page_index().saturating_sub(1))))
+            Some(Job::NavigateTo(
+               index.unwrap_or_else(|| state.page_index().saturating_sub(1)),
+            ))
          } else if let Some(press) = state.handlers.get(node) {
             (*event == Prop::PRESS).then_some(Job::Press(*press))
          } else {
@@ -321,9 +338,11 @@ fn obj_i32(payload: &Value, key: Prop) -> Option<i32> {
    let Value::Obj(fields) = payload else {
       return None;
    };
-   fields.iter().find_map(|(field, value)| match value {
-      Value::I32(found) if *field == key => Some(*found),
-      _ => None,
+   fields.iter().find_map(|(field, value)| {
+      match value {
+         Value::I32(found) if *field == key => Some(*found),
+         _ => None,
+      }
    })
 }
 
@@ -352,7 +371,10 @@ impl Settings {
          props: tree.props.clone(),
       });
       if !kids.is_empty() {
-         ops.push(Op::Children { id: tree.id, ids: kids });
+         ops.push(Op::Children {
+            id:  tree.id,
+            ids: kids,
+         });
       }
       tree.id
    }
@@ -372,27 +394,27 @@ impl Settings {
       };
       let mut ids = screen.rust_pages.clone().unwrap_or_default();
       ids.extend(screen.stack.iter().map(|page| page.root));
-      vec![
-         Op::Children { id: navigator, ids },
-         Op::Update {
-            id:    navigator,
-            props: vec![(
-               Prop::INDEX,
-               Value::I32(i32::try_from(self.page_index()).unwrap_or(i32::MAX)),
-            )],
-         },
-      ]
+      vec![Op::Children { id: navigator, ids }, Op::Update {
+         id:    navigator,
+         props: vec![(
+            Prop::INDEX,
+            Value::I32(i32::try_from(self.page_index()).unwrap_or(i32::MAX)),
+         )],
+      }]
    }
 
    fn run(&mut self, job: Job) -> Vec<Op> {
       match job {
          Job::Press(Press::OpenMain) => self.open_page(PageKind::Main),
          Job::Press(Press::OpenPlugin(index)) => self.open_page(PageKind::Plugin(index)),
-         Job::Press(Press::Toggle(_) | Press::Reload(_)) => self.rerender_all(),
+         Job::Press(Press::Toggle(_) | Press::Reload(_) | Press::Switch(..)) => self.rerender_all(),
          Job::Press(Press::Back) => self.close_top(),
          Job::NavigateTo(index) => {
             let mut ops = Vec::new();
-            while self.screen.as_ref().is_some_and(|screen| !screen.stack.is_empty())
+            while self
+               .screen
+               .as_ref()
+               .is_some_and(|screen| !screen.stack.is_empty())
                && self.page_index() > index
             {
                ops.extend(self.close_top());
@@ -424,21 +446,31 @@ impl Settings {
    }
 
    fn rerender_all(&mut self) -> Vec<Op> {
-      let kinds = self
-         .screen
-         .as_ref()
-         .map_or_default(|screen| screen.stack.iter().map(|page| page.kind).collect::<Vec<PageKind>>());
+      let kinds = self.screen.as_ref().map_or_default(|screen| {
+         screen
+            .stack
+            .iter()
+            .map(|page| page.kind)
+            .collect::<Vec<PageKind>>()
+      });
       let mut ops = Vec::new();
       for (position, kind) in kinds.into_iter().enumerate() {
          let (_, mut sections) = self.render(kind);
          let (roots, ids) = self.build_sections(&mut sections, &mut ops);
-         let Some(page) = self.screen.as_mut().and_then(|screen| screen.stack.get_mut(position)) else {
+         let Some(page) = self
+            .screen
+            .as_mut()
+            .and_then(|screen| screen.stack.get_mut(position))
+         else {
             continue;
          };
          let old = std::mem::replace(&mut page.sections, ids.clone());
          page.ids.retain(|id| !old.contains(id));
          page.ids.extend(ids);
-         ops.push(Op::Children { id: page.content, ids: roots });
+         ops.push(Op::Children {
+            id:  page.content,
+            ids: roots,
+         });
          ops.push(Op::Delete { ids: old.clone() });
          self.forget(&old);
       }
@@ -499,7 +531,13 @@ impl Settings {
       let sections = content.kids.iter().flat_map(Tree::ids).collect();
       let content = content.id;
       if let Some(screen) = &mut self.screen {
-         screen.stack.push(Page { root, ids, kind, content, sections });
+         screen.stack.push(Page {
+            root,
+            ids,
+            kind,
+            content,
+            sections,
+         });
       }
       ops.extend(self.navigator_ops());
       ops
@@ -520,7 +558,13 @@ impl Settings {
       let mut section = section("", vec![row]);
       let mut ops = Vec::new();
       let root = self.build(&mut section, None, &mut ops);
-      (Entry { root, ids: section.ids() }, ops)
+      (
+         Entry {
+            root,
+            ids: section.ids(),
+         },
+         ops,
+      )
    }
 
    fn rewrite(&mut self, ops: Vec<Op>) -> Option<Vec<Op>> {
@@ -559,10 +603,7 @@ impl Settings {
          let (list, navigator) = (screen.list, screen.navigator);
          match op {
             Op::Children { id, ids } if id == list => {
-               let search = ids
-                  .first()
-                  .copied()
-                  .filter(|first| stacks.contains(first));
+               let search = ids.first().copied().filter(|first| stacks.contains(first));
                self.list_changed(ids, search, &mut out);
                changed = true;
             },
@@ -573,17 +614,24 @@ impl Settings {
                changed = true;
             },
             Op::Children { id, ids } if Some(id) == navigator => {
-               let original = Op::Children { id, ids: ids.clone() };
+               let original = Op::Children {
+                  id,
+                  ids: ids.clone(),
+               };
                changed |= self.navigator_changed(original, ids, &mut out);
             },
-            Op::ChildEdits { id, edits } if Some(id) == navigator && screen.rust_pages.is_some() => {
+            Op::ChildEdits { id, edits }
+               if Some(id) == navigator && screen.rust_pages.is_some() =>
+            {
                let ids = apply_edits(screen.rust_pages.as_deref().unwrap_or_default(), &edits);
                changed |= self.navigator_changed(Op::ChildEdits { id, edits }, ids, &mut out);
             },
             Op::Delete { mut ids }
-               if ids.contains(&list) || navigator.is_some_and(|navigator| ids.contains(&navigator)) =>
+               if ids.contains(&list)
+                  || navigator.is_some_and(|navigator| ids.contains(&navigator)) =>
             {
-               // Java's delete does not recurse, so plumage's nodes are listed here.
+               // Java's delete does not recurse, so plumage's nodes are listed
+               // here.
                let screen = self.screen.take().expect("checked above");
                let ours = screen
                   .entry
@@ -605,9 +653,10 @@ impl Settings {
 
    fn find_screen(&mut self, creates: &HashMap<i32, (&str, &Props)>, parents: &HashMap<i32, i32>) {
       for (id, (_, props)) in creates {
-         let is_logout = props
-            .iter()
-            .any(|(key, value)| *key == Prop::ACCESSIBILITY_ID && matches!(value, Value::Str(found) if found == LOGOUT_ROW));
+         let is_logout = props.iter().any(|(key, value)| {
+            *key == Prop::ACCESSIBILITY_ID
+               && matches!(value, Value::Str(found) if found == LOGOUT_ROW)
+         });
          if !is_logout {
             continue;
          }
@@ -619,15 +668,19 @@ impl Settings {
          else {
             continue;
          };
-         if self.screen.as_ref().is_some_and(|screen| screen.list == list) {
+         if self
+            .screen
+            .as_ref()
+            .is_some_and(|screen| screen.list == list)
+         {
             continue;
          }
 
          let presented = |node: &i32| {
             creates.get(node).is_some_and(|(_, props)| {
-               props.iter().any(|(key, _)| {
-                  *key == Prop::PRESENTATION || *key == Prop::UIKIT_PUSH
-               })
+               props
+                  .iter()
+                  .any(|(key, _)| *key == Prop::PRESENTATION || *key == Prop::UIKIT_PUSH)
             })
          };
          let mut navigator = None;
@@ -661,7 +714,11 @@ impl Settings {
    }
 
    fn list_changed(&mut self, ids: Vec<i32>, search: Option<i32>, out: &mut Vec<Op>) {
-      if self.screen.as_ref().is_some_and(|screen| screen.entry.is_none()) {
+      if self
+         .screen
+         .as_ref()
+         .is_some_and(|screen| screen.entry.is_none())
+      {
          let (entry, ops) = self.entry_ops();
          out.extend(ops);
          if let Some(screen) = &mut self.screen {
@@ -680,7 +737,10 @@ impl Settings {
          with_entry.insert(at, entry.root);
       }
       screen.rust_rows = Some(ids);
-      out.push(Op::Children { id: screen.list, ids: with_entry });
+      out.push(Op::Children {
+         id:  screen.list,
+         ids: with_entry,
+      });
    }
 
    /// Records Rust's pages on the navigator. While plumage has pages open,
@@ -698,7 +758,10 @@ impl Settings {
       let mut all = ids.clone();
       all.extend(screen.stack.iter().map(|page| page.root));
       screen.rust_pages = Some(ids);
-      out.push(Op::Children { id: navigator, ids: all });
+      out.push(Op::Children {
+         id:  navigator,
+         ids: all,
+      });
       true
    }
 }
@@ -747,7 +810,10 @@ fn button_row(title: &str, icon: &str, press: Option<Press>, chevron: bool) -> T
    let mut root = Tree::from_template(&templates().button_row);
    root.props.retain(|(key, _)| !is_radius(*key));
    root.set(Prop::ACCESSIBILITY_LABEL, Some(text(title)));
-   root.set(Prop::ACCESSIBILITY_ID, Some(text(&format!("plumage-{title}"))));
+   root.set(
+      Prop::ACCESSIBILITY_ID,
+      Some(text(&format!("plumage-{title}"))),
+   );
    if let Some(row) = root.kids.first_mut() {
       if let Some(icon_node) = row.kids.get_mut(0) {
          icon_node.set(Prop::URI, Some(text(icon)));
@@ -773,7 +839,10 @@ fn value_row(label: &str, value: &str) -> Tree {
    root.props.retain(|(key, _)| !is_radius(*key));
    root.set(Prop::ON, None);
    root.set(Prop::ROLE, None);
-   root.set(Prop::ACCESSIBILITY_LABEL, Some(text(&format!("{label}, {value}"))));
+   root.set(
+      Prop::ACCESSIBILITY_LABEL,
+      Some(text(&format!("{label}, {value}"))),
+   );
    if let Some(row) = root.kids.first_mut() {
       if let Some(label_node) = row.kids.get_mut(0) {
          label_node.set(Prop::TEXT, Some(text(label)));
@@ -793,20 +862,33 @@ fn value_row(label: &str, value: &str) -> Tree {
 
 /// `root > row > [icon, column > [title, subtitle], wrap > track > knob]`.
 /// Pressing the row runs `press`, pressing the switch runs `toggle`.
-fn switch_row(title: &str, subtitle: Option<&str>, on: bool, press: Press, toggle: Press) -> Tree {
+fn switch_row(
+   icon: Option<&str>,
+   title: &str,
+   subtitle: Option<&str>,
+   on: bool,
+   press: Press,
+   toggle: Press,
+) -> Tree {
    let layouts = templates();
    let mut root = Tree::from_template(&layouts.switch_row);
    root.props.retain(|(key, _)| !is_radius(*key));
-   let label = subtitle.map_or_else(|| title.to_owned(), |subtitle| format!("{title}, {subtitle}"));
+   let label = subtitle.map_or_else(
+      || title.to_owned(),
+      |subtitle| format!("{title}, {subtitle}"),
+   );
    root.set(Prop::ACCESSIBILITY_LABEL, Some(text(&label)));
    root.set(Prop::ACCESSIBILITY_CHECKED, Some(Value::Bool(on)));
-   root.set(Prop::ACCESSIBILITY_ID, Some(text(&format!("plumage-{title}"))));
+   root.set(
+      Prop::ACCESSIBILITY_ID,
+      Some(text(&format!("plumage-{title}"))),
+   );
    root.press = Some(press);
    let Some(row) = root.kids.first_mut() else {
       return root;
    };
-   if let Some(icon) = row.kids.get_mut(0) {
-      icon.set(Prop::URI, Some(text(ICON_PLUGIN)));
+   if let Some(icon_node) = row.kids.get_mut(0) {
+      icon_node.set(Prop::URI, icon.map(text));
    }
    if let Some(column) = row.kids.get_mut(1) {
       if let Some(title_node) = column.kids.get_mut(0) {
@@ -830,6 +912,9 @@ fn switch_row(title: &str, subtitle: Option<&str>, on: bool, press: Press, toggl
          }
       }
    }
+   if icon.is_none() {
+      row.kids.remove(0);
+   }
    root
 }
 
@@ -841,8 +926,12 @@ fn main_sections(plugins: &[PluginInfo]) -> Vec<Tree> {
          .iter()
          .enumerate()
          .map(|(index, plugin)| {
-            let subtitle = plugin.error.as_deref().map(|error| format!("Failed: {error}"));
+            let subtitle = plugin
+               .error
+               .as_deref()
+               .map(|error| format!("Failed: {error}"));
             switch_row(
+               Some(ICON_PLUGIN),
                &plugin.name,
                subtitle.as_deref(),
                plugin.enabled,
@@ -864,21 +953,51 @@ fn main_sections(plugins: &[PluginInfo]) -> Vec<Tree> {
 }
 
 fn plugin_sections(index: usize, plugin: &PluginInfo) -> Vec<Tree> {
-   let subtitle = plugin.error.as_deref().map(|error| format!("Failed: {error}"));
+   let subtitle = plugin
+      .error
+      .as_deref()
+      .map(|error| format!("Failed: {error}"));
    let status = match (&plugin.error, plugin.enabled) {
       (Some(_), _) => "failed",
       (None, true) => "running",
       (None, false) => "off",
    };
-   vec![
-      section("", vec![switch_row(
-         "Enabled",
-         subtitle.as_deref(),
-         plugin.enabled,
-         Press::Toggle(index),
-         Press::Toggle(index),
-      )]),
-      section("", vec![button_row("Reload", ICON_RELOAD, Some(Press::Reload(index)), false)]),
-      section("Info", vec![value_row("Name", &plugin.name), value_row("Status", status)]),
-   ]
+   let switches = plugin
+      .switches
+      .iter()
+      .enumerate()
+      .map(|(at, switch)| {
+         let press = Press::Switch(index, at);
+         switch_row(
+            None,
+            &switch.title,
+            switch.description.as_deref(),
+            switch.on,
+            press,
+            press,
+         )
+      })
+      .collect::<Vec<Tree>>();
+   let mut sections = vec![section("", vec![switch_row(
+      Some(ICON_PLUGIN),
+      "Enabled",
+      subtitle.as_deref(),
+      plugin.enabled,
+      Press::Toggle(index),
+      Press::Toggle(index),
+   )])];
+   if !switches.is_empty() {
+      sections.push(section("Settings", switches));
+   }
+   sections.push(section("", vec![button_row(
+      "Reload",
+      ICON_RELOAD,
+      Some(Press::Reload(index)),
+      false,
+   )]));
+   sections.push(section("Info", vec![
+      value_row("Name", &plugin.name),
+      value_row("Status", status),
+   ]));
+   sections
 }

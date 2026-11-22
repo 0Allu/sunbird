@@ -49,10 +49,10 @@ pub enum Error {
 }
 
 struct State {
-   image:    Image<'static>,
-   build:    Option<&'static Build>,
-   home:     PathBuf,
-   js:       Mutex<js::Engine>,
+   image: Image<'static>,
+   build: Option<&'static Build>,
+   home:  PathBuf,
+   js:    Mutex<js::Engine>,
 }
 
 static STATE: OnceLock<State> = OnceLock::new();
@@ -66,13 +66,29 @@ pub struct Plugin {
 /// A plugin as the settings page shows it.
 #[derive(Clone, Debug)]
 pub struct PluginInfo {
-   pub name:    String,
-   pub enabled: bool,
-   pub error:   Option<String>,
+   pub name:     String,
+   pub enabled:  bool,
+   pub error:    Option<String>,
+   pub switches: Vec<Switch>,
+}
+
+/// A plugin setting as the user currently has it.
+#[derive(Clone, Debug)]
+pub struct Switch {
+   pub key:         String,
+   pub title:       String,
+   pub description: Option<String>,
+   pub on:          bool,
 }
 
 fn engine() -> Option<std::sync::MutexGuard<'static, js::Engine>> {
-   Some(STATE.get()?.js.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+   Some(
+      STATE
+         .get()?
+         .js
+         .lock()
+         .unwrap_or_else(std::sync::PoisonError::into_inner),
+   )
 }
 
 /// Every plugin found at start, enabled or not.
@@ -85,6 +101,13 @@ pub fn plugins() -> Vec<PluginInfo> {
 pub fn set_enabled(name: &str, enabled: bool) {
    if let Some(mut engine) = engine() {
       engine.set_enabled(name, enabled);
+   }
+}
+
+/// Sets one of a plugin's switches and remembers it across restarts.
+pub fn set_switch(plugin: &str, key: &str, on: bool) {
+   if let Some(engine) = engine() {
+      engine.set_switch(plugin, key, on);
    }
 }
 
