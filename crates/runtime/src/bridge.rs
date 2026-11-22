@@ -26,6 +26,7 @@ use std::{
       Mutex,
       OnceLock,
       PoisonError,
+      RwLock,
       atomic::{
          AtomicBool,
          AtomicPtr,
@@ -77,6 +78,7 @@ pub enum Action {
 }
 
 /// Receives every UI-op batch Rust sends and every view event Java dispatches.
+/// Sinks run in install order, each on what the one before it left.
 pub trait Sink: Send + Sync {
    /// `batch` is a version byte followed by ops.
    fn ops(&self, batch: &[u8]) -> Action;
@@ -94,7 +96,8 @@ enum Method {
 
 type DispatchFn = unsafe extern "system" fn(*mut JNIEnv, jclass, jlong, jbyteArray) -> jboolean;
 
-static SINK: OnceLock<Box<dyn Sink>> = OnceLock::new();
+static SINKS: RwLock<Vec<Box<dyn Sink>>> = RwLock::new(Vec::new());
+static WATCHING: AtomicBool = AtomicBool::new(false);
 static PATCH_LOCK: Mutex<()> = Mutex::new(());
 static METHODS: Mutex<Vec<(usize, Method)>> = Mutex::new(Vec::new());
 static UI_LOCK: Mutex<()> = Mutex::new(());
@@ -104,19 +107,33 @@ static NATIVES_BOUND: AtomicBool = AtomicBool::new(false);
 static ORIGINAL_DISPATCH: OnceLock<DispatchFn> = OnceLock::new();
 
 pub fn install(sink: Box<dyn Sink>) {
-   if SINK.set(sink).is_err() {
-      log::warn!("bridge: a sink is already installed, the new one is ignored");
-   }
+   SINKS
+      .write()
+      .unwrap_or_else(PoisonError::into_inner)
+      .push(sink);
+   WATCHING.store(true, Ordering::Release);
 }
 
-fn consult(ask: impl FnOnce(&dyn Sink) -> Action) -> Action {
-   let Some(sink) = SINK.get() else {
-      return Action::Pass;
-   };
-   catch_unwind(AssertUnwindSafe(|| ask(sink.as_ref()))).unwrap_or_else(|_| {
-      log::warn!("bridge: the sink panicked, the frame went through unmodified");
-      Action::Pass
-   })
+/// Runs `bytes` through every sink. A sink that panics leaves the bytes as the
+/// sink before it left them.
+fn consult(bytes: &[u8], ask: impl Fn(&dyn Sink, &[u8]) -> Action) -> Action {
+   let sinks = SINKS.read().unwrap_or_else(PoisonError::into_inner);
+   let mut replaced: Option<Vec<u8>> = None;
+   for sink in sinks.iter() {
+      let current = replaced.as_deref().unwrap_or(bytes);
+      let action = catch_unwind(AssertUnwindSafe(|| ask(sink.as_ref(), current)))
+         .unwrap_or_else(|_| {
+            log::warn!("bridge: a sink panicked, the frame went on unmodified");
+            Action::Pass
+         });
+      match action {
+         Action::Pass => {},
+         Action::Drop => return Action::Drop,
+         Action::Replace(bytes) => replaced = Some(bytes),
+      }
+   }
+   drop(sinks);
+   replaced.map_or(Action::Pass, Action::Replace)
 }
 
 /// Patches ART's shared JNI table once. Cheap after the first call, and does
@@ -298,7 +315,7 @@ unsafe extern "system" fn call_void_method_a(
    method: jmethodID,
    args: *const jvalue,
 ) {
-   let watch = SINK.get().is_some();
+   let watch = WATCHING.load(Ordering::Acquire);
    // SAFETY: ART calls this with the current thread's env and the caller's
    // arguments. `applyOps([BI)V` gets a byte array and an int, forwarded
    // unchanged or swapped for a replacement of the same shape.
@@ -317,7 +334,7 @@ unsafe extern "system" fn call_void_method_a(
       }
 
       let batch = read_bytes(env, (*args).l, Some((*args.add(1)).i));
-      match consult(|sink| sink.ops(&batch)) {
+      match consult(&batch, |sink, batch| sink.ops(batch)) {
          Action::Drop => {},
          Action::Pass => original(env, obj, method, args),
          Action::Replace(replaced) => {
@@ -340,7 +357,7 @@ unsafe extern "system" fn call_object_method_a(
    method: jmethodID,
    args: *const jvalue,
 ) -> jobject {
-   let watch = SINK.get().is_some();
+   let watch = WATCHING.load(Ordering::Acquire);
    // SAFETY: ART calls this with the current thread's env and the caller's
    // arguments. `invoke([B)[B` gets one byte array, forwarded unchanged or
    // swapped for a replacement.
@@ -368,7 +385,7 @@ unsafe extern "system" fn call_object_method_a(
          return original(env, obj, method, args);
       }
       let frame = read_bytes(env, request, None);
-      let action = consult(|sink| sink.ops(&frame[4..]));
+      let action = consult(&frame[4..], |sink, batch| sink.ops(batch));
       let _guard = UI_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
       match action {
          Action::Drop => ptr::null_mut(),
@@ -422,8 +439,10 @@ unsafe extern "system" fn native_dispatch(
          Action::Pass => None,
          Action::Replace(rest) => Some(rest),
       };
-      if SINK.get().is_some() {
-         match consult(|sink| sink.dispatch(replaced.as_deref().unwrap_or(&payload))) {
+      if WATCHING.load(Ordering::Acquire) {
+         match consult(replaced.as_deref().unwrap_or(&payload), |sink, frame| {
+            sink.dispatch(frame)
+         }) {
             Action::Drop => return JNI_TRUE,
             Action::Pass => {},
             Action::Replace(rest) => replaced = Some(rest),
