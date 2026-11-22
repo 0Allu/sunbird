@@ -1,4 +1,9 @@
-const { gateway, storage } = plumage;
+const { gateway } = plumage;
+
+const settings = plumage.settings.define({
+  keepDeleted: { title: "Keep deleted messages", description: "Show deleted messages struck out", default: true },
+  keepEdits: { title: "Keep edit history", description: "Show earlier versions under edited messages", default: true },
+});
 
 interface Seen {
   channelId: string;
@@ -10,8 +15,6 @@ interface Seen {
 
 const limit = 8192;
 const seen = new Map<string, Seen>();
-
-const enabled = (key: "keepDeleted" | "keepEdits") => storage.get<boolean>(key) ?? true;
 
 const remember = (message: { id: string; channel_id: string; guild_id?: string; content: string }) => {
   let entry = seen.get(message.id);
@@ -43,7 +46,7 @@ plumage.hook(gateway.messageUpdate, {
     const old = seen.get(message.id);
     if (old && old.content !== message.content) old.history.unshift(subtext(old.content, " (edited)"));
     const entry = remember(message);
-    if (!entry.history.length || !enabled("keepEdits")) return;
+    if (!entry.history.length || !settings.keepEdits) return;
     message.content = (message.content ? `${message.content}\n` : "") + entry.history.join("\n");
   },
 });
@@ -70,13 +73,13 @@ const markDeleted = (id: string) => {
 
 plumage.hook(gateway.messageDelete, {
   before(deleted) {
-    if (enabled("keepDeleted") && markDeleted(deleted.id)) return false;
+    if (settings.keepDeleted && markDeleted(deleted.id)) return false;
   },
 });
 
 plumage.hook(gateway.messageDeleteBulk, {
   before(deleted) {
-    if (!enabled("keepDeleted")) return;
+    if (!settings.keepDeleted) return;
     deleted.ids = deleted.ids.filter((id) => !markDeleted(id));
     if (!deleted.ids.length) return false;
   },
