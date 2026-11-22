@@ -162,11 +162,11 @@ pub struct Located {
    pub agreeing: usize,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, flub::Error)]
 pub enum Error {
    #[error("{sig}: no anchor matched")]
    NotFound { sig: String },
-   #[error("{sig}: `{anchor}` matched {} places ({})", hits.len(), hex_list(hits))]
+   #[error("{sig}: `{anchor}` matched {} places ({})", .hits.len(), hex_list(.hits))]
    Ambiguous {
       sig:    String,
       anchor: String,

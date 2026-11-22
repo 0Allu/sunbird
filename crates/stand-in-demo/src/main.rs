@@ -23,11 +23,11 @@ use std::{
    process::Command,
 };
 
-use eyre::{
+use misstep::{
    OptionExt,
-   WrapErr,
+   ResultExt,
    bail,
-   eyre,
+   report,
 };
 
 type Receive = unsafe extern "C" fn(*const u8, usize) -> bool;
@@ -37,9 +37,9 @@ const FRAMES: &[&str] = &[
    r#"{"t":"MESSAGE_CREATE","d":{"id":"2","channel_id":"general","content":"second message","author":{"id":"8","username":"nelly"},"timestamp":"2026-11-22T00:00:01Z"}}"#,
 ];
 
-fn main() -> eyre::Result<()> {
-   color_eyre::install()?;
-   let args: Vec<String> = env::args().skip(1).collect();
+fn main() -> misstep::Result<()> {
+   misstep::install_panic_hook();
+   let args = env::args().skip(1).collect::<Vec<String>>();
    match args.as_slice() {
       [] => build_and_run(),
       [run, stand_in, loader, home] if run == "run" => {
@@ -49,7 +49,7 @@ fn main() -> eyre::Result<()> {
    }
 }
 
-fn build_and_run() -> eyre::Result<()> {
+fn build_and_run() -> misstep::Result<()> {
    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
       .join("../..")
       .canonicalize()?;
@@ -62,7 +62,7 @@ fn build_and_run() -> eyre::Result<()> {
          .current_dir(&root)
          .args(["build", "--release", "-p", package])
          .status()
-         .wrap_err("running cargo")?;
+         .context("running cargo")?;
       if !status.success() {
          bail!("cargo build -p {package} failed with {status}");
       }
@@ -72,7 +72,7 @@ fn build_and_run() -> eyre::Result<()> {
    let home = target.join("plumage-home");
    match fs::remove_dir_all(&home) {
       Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
-         return Err(err).wrap_err_with(|| format!("clearing {}", home.display()));
+         return Err(report!(err).context(format!("clearing {}", home.display())));
       },
       _ => {},
    }
@@ -88,7 +88,7 @@ fn build_and_run() -> eyre::Result<()> {
       ])
       .arg(format!("--outfile={}", bundle.display()))
       .status()
-      .wrap_err("running esbuild, enter the devshell with `nix develop`")?;
+      .context("running esbuild, enter the devshell with `nix develop`")?;
    if !status.success() {
       bail!("esbuild failed with {status}");
    }
@@ -101,7 +101,7 @@ fn build_and_run() -> eyre::Result<()> {
    )
 }
 
-fn scenario(stand_in: &Path, loader: &Path, home: &Path) -> eyre::Result<()> {
+fn scenario(stand_in: &Path, loader: &Path, home: &Path) -> misstep::Result<()> {
    // SAFETY: no other threads exist yet.
    unsafe { env::set_var("PLUMAGE_HOME", home) };
 
@@ -113,7 +113,7 @@ fn scenario(stand_in: &Path, loader: &Path, home: &Path) -> eyre::Result<()> {
       std::mem::transmute::<*mut c_void, Receive>(
          (!symbol.is_null())
             .then_some(symbol)
-            .ok_or_eyre("stand_in_gateway_receive is missing")?,
+            .context("stand_in_gateway_receive is missing")?,
       )
    };
 
@@ -131,17 +131,17 @@ fn scenario(stand_in: &Path, loader: &Path, home: &Path) -> eyre::Result<()> {
    Ok(())
 }
 
-fn open(path: &Path) -> eyre::Result<*mut c_void> {
+fn open(path: &Path) -> misstep::Result<*mut c_void> {
    let path: PathBuf = path
       .canonicalize()
-      .wrap_err_with(|| format!("{}", path.display()))?;
+      .with_context(|| format!("{}", path.display()))?;
    let name = CString::new(path.as_os_str().as_encoded_bytes())?;
    // SAFETY: plain FFI call with a NUL-terminated path.
    let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
    if handle.is_null() {
       // SAFETY: dlerror returns a NUL-terminated message after a failed dlopen.
       let message = unsafe { CStr::from_ptr(libc::dlerror()) }.to_string_lossy();
-      return Err(eyre!("dlopen {}: {message}", path.display()));
+      return Err(report!("dlopen {}: {message}", path.display()));
    }
    Ok(handle)
 }

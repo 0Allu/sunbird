@@ -6,8 +6,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
-color-eyre   = { workspace = true }
-eyre         = { workspace = true }
+misstep      = { workspace = true }
 object       = { workspace = true }
 plumage-sigs = { workspace = true }
 

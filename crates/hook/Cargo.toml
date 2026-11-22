@@ -6,9 +6,9 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
-libc      = { workspace = true }
-memchr    = { workspace = true }
-thiserror = { workspace = true }
+flub   = { workspace = true }
+libc   = { workspace = true }
+memchr = { workspace = true }
 
 [target.'cfg(not(all(target_os = "android", any(target_arch = "aarch64", target_arch = "arm"))))'.dependencies]
 dobby-rs = { workspace = true }

@@ -43,7 +43,7 @@ pub use pattern::Pattern;
 ))]
 pub use shadowhook::ShadowHook as Inline;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, flub::Error)]
 pub enum Error {
    #[error("{backend} failed to initialize: {message}")]
    Init {

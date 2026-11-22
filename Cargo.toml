@@ -19,12 +19,12 @@ version = "0.1.0"
 android_logger  = { default-features = false, version = "0.15" }
 bindgen         = "0.73"
 cc              = "1"
-color-eyre      = { default-features = false, version = "0.6" }
 dobby-rs        = "0.1"
-eyre            = "0.6"
+flub            = "0.1"
 libc            = "0.2"
 log             = "0.4"
 memchr          = "2"
+misstep         = { features = [ "panic-hook", "pretty" ], version = "0.4.1" }
 object          = { default-features = false, features = [ "elf", "read_core", "std" ], version = "0.41" }
 plumage-hook    = { path = "crates/hook" }
 plumage-runtime = { path = "crates/runtime" }
@@ -32,7 +32,6 @@ plumage-sigs    = { path = "crates/sigs" }
 rquickjs        = { features = [ "parallel" ], version = "0.14" }
 serde           = { features = [ "derive" ], version = "1" }
 serde_json      = { features = [ "raw_value" ], version = "1" }
-thiserror       = "2"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

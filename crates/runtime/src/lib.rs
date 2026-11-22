@@ -26,7 +26,7 @@ use plumage_sigs::{
 mod gateway;
 mod js;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, flub::Error)]
 pub enum Error {
    #[error("no loaded library matches a known build or one of {LIBRARIES:?}")]
    NoTarget,

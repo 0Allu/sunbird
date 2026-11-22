@@ -13,11 +13,11 @@ use std::{
    fs,
 };
 
-use eyre::{
+use misstep::{
    OptionExt,
-   WrapErr,
+   ResultExt,
    bail,
-   eyre,
+   report,
 };
 use object::{
    Endianness,
@@ -40,14 +40,14 @@ use plumage_sigs::{
    Sig,
 };
 
-fn main() -> eyre::Result<()> {
-   color_eyre::install()?;
+fn main() -> misstep::Result<()> {
+   misstep::install_panic_hook();
    let path = env::args()
       .nth(1)
-      .ok_or_eyre("usage: sigscan <library.so>")?;
-   let data = fs::read(&path).wrap_err_with(|| format!("reading {path}"))?;
+      .context("usage: sigscan <library.so>")?;
+   let data = fs::read(&path).with_context(|| format!("reading {path}"))?;
    let image = load(&path, &data)?;
-   let build_id = image.build_id.ok_or_eyre("no NT_GNU_BUILD_ID note")?;
+   let build_id = image.build_id.context("no NT_GNU_BUILD_ID note")?;
    let known = Build::find(build_id);
    println!("{} build {build_id}", image.file_name());
    println!(
@@ -144,9 +144,9 @@ fn report<A: plumage_sigs::Abi>(kind: &str, sig: &Sig<'_, A>, image: &Image<'_>)
 /// relocations from `.rela.dyn`, plain or Android APS2-packed. RELR and REL
 /// store the addend in place, which with a zero load base is already the final
 /// value.
-fn load<'a>(path: &str, data: &'a [u8]) -> eyre::Result<Image<'a>> {
-   let header = FileHeader64::<Endianness>::parse(data).map_err(|err| eyre!("{path}: {err}"))?;
-   let endian = header.endian().map_err(|err| eyre!("{err}"))?;
+fn load<'a>(path: &str, data: &'a [u8]) -> misstep::Result<Image<'a>> {
+   let header = FileHeader64::<Endianness>::parse(data).map_err(|err| report!("{path}: {err}"))?;
+   let endian = header.endian().map_err(|err| report!("{err}"))?;
    let relative = match header.e_machine(endian) {
       elf::EM_X86_64 => elf::R_X86_64_RELATIVE.0,
       elf::EM_AARCH64 => elf::R_AARCH64_RELATIVE.0,
@@ -161,11 +161,11 @@ fn load<'a>(path: &str, data: &'a [u8]) -> eyre::Result<Image<'a>> {
    };
    for segment in header
       .program_headers(endian, data)
-      .map_err(|err| eyre!("{err}"))?
+      .map_err(|err| report!("{err}"))?
    {
       let bytes = segment
          .data(endian, data)
-         .map_err(|()| eyre!("segment outside the file"))?;
+         .map_err(|()| report!("segment outside the file"))?;
       let flags = segment.p_flags(endian);
       match segment.p_type(endian) {
          elf::PT_LOAD => {
@@ -188,9 +188,9 @@ fn load<'a>(path: &str, data: &'a [u8]) -> eyre::Result<Image<'a>> {
 
    let sections = header
       .sections(endian, data)
-      .map_err(|err| eyre!("{err}"))?;
+      .map_err(|err| report!("{err}"))?;
    for section in sections.iter() {
-      let contents = || section.data(endian, data).map_err(|err| eyre!("{err}"));
+      let contents = || section.data(endian, data).map_err(|err| report!("{err}"));
       let relocs = match section.sh_type(endian) {
          elf::SHT_RELA => plain_rela(contents()?, relative),
          elf::SHT_ANDROID_RELA => aps2(contents()?, relative)?,
@@ -201,7 +201,7 @@ fn load<'a>(path: &str, data: &'a [u8]) -> eyre::Result<Image<'a>> {
             .segments
             .iter_mut()
             .find(|segment| segment.contains(offset))
-            .ok_or_else(|| eyre!("relocation at {offset:#x} outside every segment"))?;
+            .ok_or_else(|| report!("relocation at {offset:#x} outside every segment"))?;
          let at = offset - segment.addr;
          segment.bytes.to_mut()[at..at + 8].copy_from_slice(&addend.to_le_bytes());
       }
@@ -224,7 +224,7 @@ fn plain_rela(bytes: &[u8], relative: u32) -> Vec<(usize, u64)> {
 
 /// Android's packed relocation format: `APS2` then SLEB128 groups of offset
 /// deltas, info and addend deltas, each optionally shared across the group.
-fn aps2(bytes: &[u8], relative: u32) -> eyre::Result<Vec<(usize, u64)>> {
+fn aps2(bytes: &[u8], relative: u32) -> misstep::Result<Vec<(usize, u64)>> {
    const BY_INFO: i64 = 1;
    const BY_OFFSET_DELTA: i64 = 2;
    const BY_ADDEND: i64 = 4;
@@ -232,11 +232,11 @@ fn aps2(bytes: &[u8], relative: u32) -> eyre::Result<Vec<(usize, u64)>> {
 
    let mut stream = bytes
       .strip_prefix(b"APS2")
-      .ok_or_eyre("packed relocations without APS2")?;
-   let mut next = || -> eyre::Result<i64> {
+      .context("packed relocations without APS2")?;
+   let mut next = || -> misstep::Result<i64> {
       let (mut value, mut shift) = (0i64, 0);
       loop {
-         let (&byte, rest) = stream.split_first().ok_or_eyre("truncated APS2 stream")?;
+         let (&byte, rest) = stream.split_first().context("truncated APS2 stream")?;
          stream = rest;
          value |= i64::from(byte & 0x7F) << shift;
          shift += 7;
