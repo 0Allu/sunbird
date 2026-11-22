@@ -39,7 +39,7 @@
   };
 
   // ---- targets: where contributions go, found from an anchor node -----------------------------
-  // place(anchorId, aid) -> {parent, before, ctx} | null; our nodes go into `parent`, before `before` (or last)
+  // place(anchorId, aid) -> {parent, before, ctx} | null; our nodes go into `parent`, before `before` (or last; 'start': first)
   const MSG = /^message\.(?:content|avatar|author|timestamp):(\d+)$/;
   let lastLongPress = null, profileUser = null;
   const TARGETS = {
@@ -197,7 +197,7 @@
     const list = (kids.get(p) || []).slice();
     for (const s of slotsAt(p)) {
       if (!s.roots.length) continue;
-      const i = s.before == null ? -1 : list.indexOf(s.before);
+      const i = s.before === 'start' ? 0 : s.before == null ? -1 : list.indexOf(s.before);
       list.splice(i < 0 ? list.length : i, 0, ...s.roots);
     }
     return list;
@@ -229,6 +229,71 @@
   };
   const live = new Set(); // ids of our nodes that are on screen
 
+
+  // ---- our commands in the "/" suggestions above the message box ---------------------------------
+  // suggestions (scroll) > stack > view > [suggestion-surface, view > view > view > scroll > rows].
+  // Our matches go first in Rust's list while it shows one. ponytail: when nothing of Discord's
+  // matches, Rust closes the popup and ours goes with it; a popup of our own needs Rust's worklet
+  // sizing (it stayed 0 high without), so it is left out.
+  const SUG_ROWS = [0, 0, 1, 0, 0, 0, 0];
+  let sugScroll, sug = { key: '', slot: null };
+  const down = (x, path) => { for (const i of path) { x = (kids.get(x) || [])[i]; if (x === undefined) return; } return x; };
+  const f = (v) => ({ t: 'f64', v }), r4 = (...v) => ({ t: 'rect', v }), T = { t: 'true' };
+  const V = (type, props, ks = []) => ({ type, props: Object.entries(props).map(([k, v]) => ({ k, v })), kids: ks });
+  const txt = (size, weight, lh, color, extra = {}) => V('text', { text: str(''), color: col(color), fontSize: f(size), fontWeight: { t: 'i32', v: weight }, lineHeight: f(lh), lineHeightExact: T, maxLines: { t: 'i32', v: 1 }, ...extra });
+  // fallback (dark theme) until a row of Rust's has been seen
+  tpl.sugRow = V('view', { direction: str('row'), padding: r4(16, 8, 16, 8), width: str('fill'), height: f(48), align: str('center'), role: str('button'), on: { t: 'arr', v: [str('press')] } }, [
+    V('image', { uri: str(''), margin: r4(0, 0, 16, 0), width: f(32), height: f(32), radius: f(16) }),
+    V('view', { direction: str('column'), height: str('fill'), minWidth: f(0), flex: f(1), justify: str('end'), align: str('stretch') }, [txt(16, 600, 20, 4294704123, { height: f(20) }), txt(12, 500, 16, 4293914609, { height: f(16) })]),
+    txt(14, 500, 18, 4288059294, { padding: r4(16, 0, 0, 0), minWidth: f(0), maxWidth: str('40%'), shrink: T })]);
+  const snapSuggest = (id, creates) => {
+    if (parent.get(id) !== down(sugScroll, SUG_ROWS)) return;
+    const o = creates.get(id), row = o && o.type === 'view' && snap(id, creates);
+    if (row && row.kids.length === 3 && row.kids[1].kids.length === 2) { setProp(row.props, 'background'); setProp(row.props, 'accessibilityLabel'); tpl.sugRow = row; }
+  };
+  const composerNode = () => [...composerText.keys()].at(-1);
+  const pluginName = (id) => (__phx_plugins.list().find((p) => p.id === id) || { name: id }).name;
+  const sugRow = (c, input) => {
+    const r = clone(tpl.sugRow), [img, mid, right] = r.kids;
+    setProp(r.props, 'accessibilityLabel', str(`/${c.name} ${c.description || ''}`));
+    setProp(r.props, 'accessibilityId', str(`phoenix.command.${c.name}`));
+    setProp(img.props, 'uri', str(c.icon || 'res://ic_mana_puzzle_piece_plus'));
+    setProp(img.props, 'tint', col(4289440946));
+    setProp(img.props, 'pool');
+    setProp(mid.kids[0].props, 'text', str('/ ' + c.name));
+    setProp(mid.kids[1].props, 'text', str(c.description || ''));
+    setProp(right.props, 'text', str(pluginName(c.plugin)));
+    // picking a command puts "/name " in the box, like Discord's own rows
+    const value = `/${c.name} `;
+    r.h = { frame: () => changeText(input, value), press: () => { setInput(input, value); syncSend(); } };
+    return r;
+  };
+  // Brings our rows in line with the box's text; appends the ops to `out`. False when nothing changed.
+  const syncSuggest = (out) => {
+    if (sugScroll === undefined) return false;
+    const input = composerNode(), m = /^\/(\S*)$/.exec(composerText.get(input) ?? '');
+    const rows = down(sugScroll, SUG_ROWS);
+    const list = m && rows !== undefined ? [...commands.values()].filter((c) => c.name.startsWith(m[1].toLowerCase())) : [];
+    const key = list.map((c) => c.name).join() + '|' + rows;
+    if (key === sug.key) return false;
+    sug.key = key;
+    const touched = new Set(), del = [];
+    if (sug.slot) { del.push(...sug.slot.all); touched.add(sug.slot.parent); dropSlot(sug.slot); sug.slot = null; }
+    if (list.length) {
+      const nodes = list.map((c) => sugRow(c, input));
+      for (const n of nodes) build(n, out);
+      const s = { target: 'suggest', parent: rows, before: 'start', ctx: {}, roots: nodes.map((n) => n.id), all: nodes.flatMap(all) };
+      if (!slots.has(rows)) slots.set(rows, []);
+      slots.get(rows).push(s);
+      sug.slot = s;
+      touched.add(rows);
+    }
+    for (const p of touched) if (kids.has(p)) out.push({ op: 'children', id: p, ids: merged(p) });
+    if (del.length) out.push({ op: 'delete', ids: del });
+    return true;
+  };
+  const syncSend = () => { const out = []; if (syncSuggest(out)) send(out); };
+
   // ---- Rust's batches ----------------------------------------------------------------------------
   phoenix.bridge.onOps((u8) => {
     let ops;
@@ -250,6 +315,7 @@
         for (const id of o.ids) {
           for (const s of slotsAt(id)) { extraDelete.push(...s.all); s.all.forEach((x) => live.delete(x)); dropSlot(s); }
           kids.delete(id); parent.delete(id); aidOf.delete(id); sheets.delete(id); composerText.delete(id);
+          if (id === sugScroll) { sugScroll = undefined; if (sug.slot) { extraDelete.push(...sug.slot.all); dropSlot(sug.slot); } sug = { key: '', slot: null }; }
           for (const t in anchors) anchors[t].delete(id);
         }
       } else if (o.op === 'update' && composerText.has(o.id)) {
@@ -260,6 +326,11 @@
     // new anchors: snapshot Phoenix's layouts, open slots for targets that have contributions
     const mine = [], touched = new Set(), named = [...creates.keys()].filter((id) => aidOf.has(id));
     for (const id of named) snapshot(id, aidOf.get(id), creates);
+    for (const id of named) if (aidOf.get(id) === 'suggestions') sugScroll = id;
+    if (sugScroll !== undefined) for (const id of creates.keys()) snapSuggest(id, creates);
+    // the suggestions may have changed: resync while we show rows or the box starts with "/"
+    const extra = [];
+    if (commands.size && sugScroll !== undefined && (sug.slot || (composerText.get(composerNode()) ?? '').startsWith('/'))) syncSuggest(extra);
     for (const id of named) {
       const a = aidOf.get(id);
       if (a === 'composer') composerText.set(id, composerText.get(id) ?? '');
@@ -275,7 +346,7 @@
         if (s) { touched.add(s.parent); s.all.forEach((x) => live.add(x)); }
       }
     }
-    if (!touched.size && !extraDelete.length && ![...ops].some((o) => (o.op === 'children' || o.op === 'childEdits') && slots.has(o.id))) return;
+    if (!touched.size && !extraDelete.length && !extra.length && ![...ops].some((o) => ((o.op === 'children' || o.op === 'childEdits') && slots.has(o.id)))) return;
     const out = mine;
     for (const o of ops) {
       if ((o.op === 'children' || o.op === 'childEdits') && slots.has(o.id)) { out.push({ op: 'children', id: o.id, ids: merged(o.id) }); touched.delete(o.id); }
@@ -283,6 +354,7 @@
       else out.push(o);
     }
     for (const p of touched) out.push({ op: 'children', id: p, ids: merged(p) });
+    out.push(...extra);
     // ponytail: Java applies this batch after we return, outside our lock; a short delay keeps the
     // async texts behind it. Queue them per batch if 100 ms ever proves short.
     if (later.length) setTimeout(flushLater, 100);
@@ -351,7 +423,16 @@
     return out;
   };
   const changeText = (node, value) => UI.encodeViewEvent(node, 'changeText', { t: 'obj', v: [{ k: 'text', v: str(value) }] });
-  const clearComposer = (node) => { composerText.set(node, ''); setTimeout(() => send([{ op: 'update', id: node, props: [{ k: 'value', v: str('') }] }]), 0); };
+  // Sets the box's text (and caret at its end) the way Rust does: `value` is ignored while the
+  // keyboard has edits in flight, forceValue {seq, text, start, end} applies whenever seq changes.
+  // Ours count from 2^40 so they never equal Rust's.
+  let forceSeq = 2 ** 40;
+  const setInput = (node, text) => {
+    composerText.set(node, text);
+    const n = { t: 'i32', v: text.length };
+    send([{ op: 'update', id: node, props: [{ k: 'forceValue', v: { t: 'obj', v: [{ k: 'seq', v: { t: 'i64', v: String(++forceSeq) } }, { k: 'text', v: str(text) }, { k: 'start', v: n }, { k: 'end', v: n }] } }] }]);
+  };
+  const clearComposer = (node) => { composerText.set(node, ''); setTimeout(() => setInput(node, ''), 0); };
   // What to do with a message about to be sent: {cancel} or {text}.
   const onSubmit = (node) => {
     let value = composerText.get(node) ?? '';
@@ -389,10 +470,11 @@
       const raw = u8.subarray(it.off, it.off + it.len);
       if (it.kind !== 'view') { frames.push(raw); continue; }
       if (it.event === 'rowLongPress') { const i = payloadField(it.payload, 'index'); if (i != null) lastLongPress = indexOfRow(it.node, i); }
-      if (it.event === 'changeText' && composerText.has(it.node)) composerText.set(it.node, payloadField(it.payload, 'text') ?? '');
+      if (it.event === 'changeText' && composerText.has(it.node)) { composerText.set(it.node, payloadField(it.payload, 'text') ?? ''); if (commands.size) setTimeout(syncSend, 0); }
       const h = it.node >= FIRST_ID && handlers.get(it.node);
       if (h) {
         changed = true;
+        if (it.event === 'press' && h.frame) frames.push(h.frame());
         if (it.event === 'press' && h.press) {
           setTimeout(h.press, 0);
           const sheet = h.sheet ? sheetOf(it.node) : undefined;

@@ -153,7 +153,8 @@ declare global {
     /** Slash commands typed in the message box. */
     readonly commands: {
       /** execute's returned text is sent instead; nothing returned (or a Promise) sends nothing. */
-      register(o: { name: string; description?: string; execute(args: string, ctx: CommandContext): string | { content: string } | void | Promise<unknown> }): () => void;
+      /** Also listed first in Discord's "/" suggestions while it shows them; picking one fills in "/name ". */
+      register(o: { name: string; description?: string; icon?: Icon; execute(args: string, ctx: CommandContext): string | { content: string } | void | Promise<unknown> }): () => void;
       list(): { name: string; description: string; plugin: string }[];
     };
     /** HTTP through Android's HttpURLConnection. */

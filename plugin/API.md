@@ -85,11 +85,11 @@ is turned off. Icons are Phoenix's drawables, e.g. `res://ic_mana_puzzle_piece_p
 | `ui.addMessageAccessory({render(ctx), placement?})` | A line of text under each message's content (`placement: 'header'`: after its timestamp). `ctx = {messageId, channelId}`; return a string, `{text, color}`, `null` for nothing, or a Promise of those. Runs for every message row, so keep it fast. |
 | `ui.addMessageAction({label, icon?, danger?, visible?(ctx), onPress(ctx)})` | A row in the message long-press menu, in a group above Delete. `ctx = {messageId, channelId, message}`; the menu closes on press. |
 | `ui.addProfileSection({title, render(ctx)})` | A section at the end of a profile's Main tab. `ctx = {userId}` (from the avatar; null for default avatars); `render` returns text or a Promise of it. |
-| `commands.register({name, description?, execute(args, ctx)})` | Runs when you send `/name args` from the message box. Return text to send that instead; return nothing (or a Promise) and nothing is sent. `commands.list()` shows them all. |
+| `commands.register({name, description?, icon?, execute(args, ctx)})` | Runs when you send `/name args` from the message box. Return text to send that instead; return nothing (or a Promise) and nothing is sent. Matching commands are listed first in Discord's `/` suggestions while it shows them; picking one fills in `/name `. `commands.list()` shows them all. |
 | `messages.onSend((text, ctx) => …)` | Before a message from the message box is sent: return a string to change it, `false` to cancel. Synchronous. |
 
-Not there yet: profile tabs, bottom tabs, custom pages outside Settings, our commands in
-Discord's `/` suggestions.
+Not there yet: profile tabs, bottom tabs, custom pages outside Settings, a `/` list of our own when
+none of Discord's commands match what you typed.
 
 ## Plugin
 

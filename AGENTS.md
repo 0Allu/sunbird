@@ -79,6 +79,11 @@ is about how to work on it without repeating past mistakes.
   `sheet` node. Sending = `submit` on `composer` or `press` on `send`; Rust keeps the text from
   `changeText`, so a rewrite is `changeText(new)` + the original event in one batch frame.
   Our ids start at 0x58000000. Text set from a Promise waits ~100 ms so Java has applied the batch.
+  `/` suggestions: `suggestions` (scroll) > stack > view > [`suggestion-surface`, view > view > view >
+  scroll > rows]; our command rows go first in Rust's rows. Rust sizes that popup with worklets
+  (animation drivers): a copy of it without them stays 0 high, so there is no popup of our own.
+  To set the message box text use `forceValue {seq, text, start, end}` (applied when `seq`
+  changes), not `value` (ignored while the keyboard has edits in flight; leaves stale text).
 - **Testing sends:** never post to real channels while testing; load a guard plugin (a
   `phoenix.bridge.onDispatch` listener returning `false` for `submit` and `send` presses) and check `/commands` with `ctx.reply`.
   `uiautomator dump` pops an accessibility toast over the bottom of the phone screen for a few
