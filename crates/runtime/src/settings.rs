@@ -250,6 +250,21 @@ impl Tree {
    }
 }
 
+/// Whether `new` can update `old` in place: the same nodes, handlers and
+/// animations, and no prop dropped (an update can only set props).
+fn same_shape(old: &Tree, new: &Tree) -> bool {
+   old.kind == new.kind
+      && old.press == new.press
+      && old.slot == new.slot
+      && match (&old.animate, &new.animate) {
+         (None, None) => old.props.iter().all(|(key, _)| new.props.iter().any(|(k, _)| k == key)),
+         (Some(a), Some(b)) => std::ptr::eq(a.worklet, b.worklet),
+         _ => false,
+      }
+      && old.kids.len() == new.kids.len()
+      && old.kids.iter().zip(&new.kids).all(|(a, b)| same_shape(a, b))
+}
+
 fn text(value: &str) -> Value {
    Value::Str(value.to_owned())
 }
@@ -296,6 +311,8 @@ struct Page {
    content:  i32,
    sections: Vec<i32>,
    slots:    Vec<(i32, Slot)>,
+   /// The built sections, to update in place when a rerender keeps their shape.
+   trees:    Vec<Tree>,
 }
 
 /// The open Settings screen and what phoenix added to it.
@@ -944,6 +961,23 @@ impl Settings {
             continue;
          }
          let (_, mut sections) = self.render(kind);
+         // Same layout: update the changed nodes and spring the flipped switch,
+         // so the other rows are not rebuilt (and do not flicker).
+         let old = self
+            .screen
+            .as_mut()
+            .and_then(|screen| screen.stack.get_mut(position))
+            .map(|page| std::mem::take(&mut page.trees))
+            .unwrap_or_default();
+         if old.len() == sections.len() && old.iter().zip(&sections).all(|(a, b)| same_shape(a, b)) {
+            for (old, new) in old.iter().zip(&mut sections) {
+               self.patch(old, new, &mut ops);
+            }
+            if let Some(page) = self.screen.as_mut().and_then(|screen| screen.stack.get_mut(position)) {
+               page.trees = sections;
+            }
+            continue;
+         }
          if let Some(press) = flipped {
             for section in &mut sections {
                section.flip(press, false);
@@ -958,6 +992,7 @@ impl Settings {
             continue;
          };
          page.slots = sections.iter().flat_map(Tree::slots).collect();
+         page.trees = sections;
          let old = std::mem::replace(&mut page.sections, ids.clone());
          page.ids.retain(|id| !old.contains(id));
          page.ids.extend(ids);
@@ -969,6 +1004,35 @@ impl Settings {
          self.forget(&old);
       }
       ops
+   }
+
+   /// Gives `new` the ids of `old` (same shape) and sends what changed.
+   fn patch(&mut self, old: &Tree, new: &mut Tree, ops: &mut Vec<Op>) {
+      new.id = old.id;
+      if let Some(animate) = &new.animate {
+         if old.props != new.props
+            && let Some(&(first, _)) = self.slots.owned.get(&old.id)
+         {
+            let commands = animate.worklet.bind(first).spring(&old.props, &new.props, Spring::SWITCH);
+            self.motion.extend(motion::words(&commands));
+         }
+      } else {
+         let changed = new
+            .props
+            .iter()
+            .filter(|(key, value)| !old.props.iter().any(|(k, v)| k == key && v == value))
+            .cloned()
+            .collect::<Props>();
+         if !changed.is_empty() {
+            ops.push(Op::Update {
+               id:    old.id,
+               props: changed,
+            });
+         }
+      }
+      for (old, new) in old.kids.iter().zip(&mut new.kids) {
+         self.patch(old, new, ops);
+      }
    }
 
    fn open_page(&mut self, kind: PageKind) -> Vec<Op> {
@@ -1024,6 +1088,7 @@ impl Settings {
          return Vec::new();
       };
       let sections = content.kids.iter().flat_map(Tree::ids).collect();
+      let trees = std::mem::take(&mut content.kids);
       let content = content.id;
       if let Some(screen) = &mut self.screen {
          screen.stack.push(Page {
@@ -1033,6 +1098,7 @@ impl Settings {
             content,
             sections,
             slots,
+            trees,
          });
       }
       ops.extend(self.navigator_ops());
