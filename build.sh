@@ -4,7 +4,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-SDK=${ANDROID_SDK:-$LOCALAPPDATA/Android/Sdk}
+LAD=${LOCALAPPDATA:-}; command -v cygpath >/dev/null && [ -n "$LAD" ] && LAD=$(cygpath -u "$LAD")
+SDK=${ANDROID_SDK:-$LAD/Android/Sdk}
 NDK=${ANDROID_NDK:-$SDK/ndk/26.0.10792818}
 BT=${BUILD_TOOLS:-$SDK/build-tools/36.0.0}
 CC=$(ls "$NDK"/toolchains/llvm/prebuilt/*/bin/x86_64-linux-android33-clang* | head -1)

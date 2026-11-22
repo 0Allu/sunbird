@@ -13,7 +13,22 @@ only. The payload checks the original bytes first and skips any patch that doesn
 | name   | offset      | function                                                                                  | patch                  |
 |--------|-------------|-------------------------------------------------------------------------------------------|------------------------|
 | access | `0x2eac1c4` | `ops_surfaces::client_access` evaluator for experiments `2026-11-phoenix-app-access` / `2026-11-phoenix-rollout` (with overrides). Returns `Option<bool>`, where 2 = unknown. | `mov al,1; ret` |
-| staff  | `0x1f76640` | `is_staff(state, force)`: true if force, `LIBDISCORD_DEV_ANALYTICS=1`, or a debug flag; otherwise `current_user.flags & 1`. 17 call sites through GOT slot `0x6bc5f30`. | `mov al,1; ret` |
+| staff  | `0x1f76640` | `is_staff(handle, force)`, 17 call sites through GOT slot `0x6bc5f30`. | jump to a C hook (see below) |
+
+### Staff
+
+Staff is checked as `(user.flags | flag_override.unwrap_or(0)) & 1`. `user.flags` is at
+`state+0x84f0`. `flag_override` is an `Option<u32>`, with its tag at `+0x8580` and its
+value at `+0x8588`. The compiler inlined this check in about 30 places and also left 6
+standalone copies. Stubbing only one copy turns on the Staff Settings UI, but other copies
+still refuse. For example, the setter for "Show Dev Tools Widget" goes through
+`0x1f71c0d`, so the toggle kept flipping back.
+
+The fix targets the shared data instead. The hook on `0x1f76640` takes the same store
+read-guard the original function takes. It sets `flag_override = Some(STAFF)` in the
+state and returns true. Every copy, standalone or inlined, reads that field, so they all
+see the account as staff. The hook runs on every call, which happens often, so the flag
+is written again if the state is rebuilt.
 
 The access patch removes the gate where the decision is made, so the `ClientAccessGate`
 screen ("No Access") is never built and the UI tree stays in sync. Two earlier approaches
@@ -54,7 +69,8 @@ Enable the module for `com.discord` in LSPosed. To check that the patches applie
 DevTools: open `discord://app/settings/devtools`
 (`adb shell am start -a android.intent.action.VIEW -d discord://app/settings/devtools com.discord`).
 Experiment Overrides is under **Experiments** in that list. Settings also shows a
-**Staff Settings** section.
+**Staff Settings** section. In that section, **Show Dev Tools Widget** adds a floating
+DevTools bubble.
 
 ## Startup (WSA, x86_64, cached session, 180 guilds)
 
