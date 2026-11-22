@@ -35,6 +35,7 @@ use rquickjs::{
 use serde_json::value::RawValue;
 
 use crate::{
+   Choice,
    Chosen,
    Control,
    Error,
@@ -106,6 +107,10 @@ enum Kind<'js> {
    Switch(bool),
    Text(String),
    Secret(String),
+   Select {
+      options: Vec<Choice>,
+      default: String,
+   },
    Number(f64),
    Button(Function<'js>),
 }
@@ -120,6 +125,18 @@ impl Kind<'_> {
          (Self::Text(default), _) => Control::Text(default.clone()),
          (Self::Secret(_), Some(Chosen::Text(text))) => Control::Secret(text.clone()),
          (Self::Secret(default), _) => Control::Secret(default.clone()),
+         (Self::Select { options, default }, chosen) => {
+            let chosen = match chosen {
+               Some(Chosen::Text(value)) if options.iter().any(|choice| choice.value == *value) => {
+                  value.clone()
+               },
+               _ => default.clone(),
+            };
+            Control::Select {
+               options: options.clone(),
+               chosen,
+            }
+         },
          (Self::Number(_), Some(Chosen::Number(number))) => Control::Number(*number),
          (Self::Number(default), _) => Control::Number(*default),
          (Self::Button(_), _) => Control::Button,
@@ -1611,6 +1628,62 @@ fn redact_secrets(registry: &Registry<'_>) {
    crate::console::redact(secrets);
 }
 
+/// The kind of setting `key` that `spec` describes.
+fn setting_kind<'js>(ctx: &Ctx<'js>, key: &str, spec: &Object<'js>) -> rquickjs::Result<Kind<'js>> {
+   Ok(match spec.get::<_, String>("type")?.as_str() {
+      "switch" => Kind::Switch(spec.get::<_, Option<bool>>("default")?.unwrap_or_default()),
+      "text" => {
+         Kind::Text(
+            spec
+               .get::<_, Option<String>>("default")?
+               .unwrap_or_default(),
+         )
+      },
+      "secret" => {
+         Kind::Secret(
+            spec
+               .get::<_, Option<String>>("default")?
+               .unwrap_or_default(),
+         )
+      },
+      "select" => {
+         let options = spec
+            .get::<_, Vec<Object<'js>>>("options")?
+            .into_iter()
+            .map(|option| {
+               let value: String = option.get("value")?;
+               let label = option.get::<_, Option<String>>("label")?;
+               Ok(Choice {
+                  label: label.unwrap_or_else(|| value.clone()),
+                  value,
+               })
+            })
+            .collect::<rquickjs::Result<Vec<Choice>>>()?;
+         let Some(first) = options.first() else {
+            return Err(Exception::throw_type(
+               ctx,
+               &format!("setting {key}: a select needs at least one option"),
+            ));
+         };
+         let default = spec
+            .get::<_, Option<String>>("default")?
+            .unwrap_or_else(|| first.value.clone());
+         Kind::Select { options, default }
+      },
+      "number" => Kind::Number(spec.get::<_, Option<f64>>("default")?.unwrap_or_default()),
+      "button" => Kind::Button(spec.get("onPress")?),
+      other => {
+         return Err(Exception::throw_type(
+            ctx,
+            &format!(
+               "setting {key}: unknown type {other:?}, expected switch, text, secret, select, \
+                number or button"
+            ),
+         ));
+      },
+   })
+}
+
 /// Records `schema` as the plugin's settings and returns an object with one
 /// getter per non-button key that reads the user's current choice.
 fn define<'js>(
@@ -1621,34 +1694,7 @@ fn define<'js>(
    let mut definitions = Vec::new();
    for entry in schema.props::<String, Object<'js>>() {
       let (key, spec) = entry?;
-      let kind = match spec.get::<_, String>("type")?.as_str() {
-         "switch" => Kind::Switch(spec.get::<_, Option<bool>>("default")?.unwrap_or_default()),
-         "text" => {
-            Kind::Text(
-               spec
-                  .get::<_, Option<String>>("default")?
-                  .unwrap_or_default(),
-            )
-         },
-         "secret" => {
-            Kind::Secret(
-               spec
-                  .get::<_, Option<String>>("default")?
-                  .unwrap_or_default(),
-            )
-         },
-         "number" => Kind::Number(spec.get::<_, Option<f64>>("default")?.unwrap_or_default()),
-         "button" => Kind::Button(spec.get("onPress")?),
-         other => {
-            return Err(Exception::throw_type(
-               ctx,
-               &format!(
-                  "setting {key}: unknown type {other:?}, expected switch, text, secret, number \
-                   or button"
-               ),
-            ));
-         },
-      };
+      let kind = setting_kind(ctx, &key, &spec)?;
       definitions.push(Definition {
          title: spec.get("title")?,
          description: spec.get("description")?,
@@ -1679,6 +1725,7 @@ fn define<'js>(
          match definition.kind.current(picked) {
             Control::Switch(on) => on.into_js(&ctx),
             Control::Text(text) | Control::Secret(text) => text.into_js(&ctx),
+            Control::Select { chosen, .. } => chosen.into_js(&ctx),
             Control::Number(number) => number.into_js(&ctx),
             Control::Button => Ok(Value::new_undefined(ctx.clone())),
          }

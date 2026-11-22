@@ -143,8 +143,19 @@ pub enum Control {
    Text(String),
    /// Text shown masked, and redacted from the plugin's log lines.
    Secret(String),
+   Select {
+      options: Vec<Choice>,
+      chosen:  String,
+   },
    Number(f64),
    Button,
+}
+
+/// One option of a select setting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Choice {
+   pub value: String,
+   pub label: String,
 }
 
 /// A value the user picked for a setting, as `plugins.json` stores it.

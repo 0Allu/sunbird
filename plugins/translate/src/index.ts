@@ -17,17 +17,20 @@ const settings = plumage.settings.define({
     description: "Language code to translate into, like en or de",
     default: "en",
   },
+  service: {
+    type: "select",
+    title: "Service",
+    options: [
+      { value: "google", label: "Google Translate" },
+      { value: "kagi", label: "Kagi, standard quality" },
+      { value: "kagi-best", label: "Kagi, best quality (about 10x the usage)" },
+    ],
+  },
   kagiToken: {
     type: "secret",
     title: "Kagi session token",
-    description: "The token from the Session Link in kagi.com/settings/user_details. Empty uses Google",
+    description: "The token from the Session Link in kagi.com/settings/user_details",
     default: "",
-  },
-  kagiBest: {
-    type: "switch",
-    title: "Kagi best quality",
-    description: "Better translations for about 10 times the Kagi usage of standard",
-    default: false,
   },
 });
 
@@ -58,7 +61,7 @@ const google: Translator = async (text, target) => {
 };
 
 const kagi =
-  (token: string): Translator =>
+  (token: string, best: boolean): Translator =>
   async (text, target) => {
     const response = await plumage.fetch(
       `https://translate.kagi.com/api/translate?token=${encodeURIComponent(token)}`,
@@ -69,7 +72,7 @@ const kagi =
           source_lang: "auto",
           target_lang: target,
           skip_definition: true,
-          model: settings.kagiBest ? "best" : "standard",
+          model: best ? "best" : "standard",
         },
       },
     );
@@ -93,6 +96,21 @@ const kagi =
     return { text: translation, from: detected?.iso ?? "", label: detected?.label ?? "" };
   };
 
+const withToken =
+  (best: boolean): Translator =>
+  (text, target) => {
+    const token = settings.kagiToken.trim();
+    if (token) return kagi(token, best)(text, target);
+    plumage.log.warn("Kagi is selected without a session token, using Google");
+    return google(text, target);
+  };
+
+const translators: Record<typeof settings.service, Translator> = {
+  google,
+  kagi: withToken(false),
+  "kagi-best": withToken(true),
+};
+
 const baseLanguage = (code: string) => code.split("-")[0].toLowerCase();
 
 const subtext = (text: string) =>
@@ -107,8 +125,7 @@ plumage.on(gateway.messageCreate, async (message) => {
   if (!original || !channels.includes(message.channel_id)) return;
 
   const target = settings.target.trim() || "en";
-  const token = settings.kagiToken.trim();
-  const translate = token ? kagi(token) : google;
+  const translate = translators[settings.service];
 
   let translation: Translation;
   try {

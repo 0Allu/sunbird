@@ -70,6 +70,7 @@ const FIRST_ID: i32 = 0x5000_0000;
 const SLOT_END: i32 = 1 << 16;
 const LOGOUT_ROW: &str = "settings.row.logout";
 const ICON_PLUGIN: &str = "res://ic_mana_puzzle_piece_plus";
+const ICON_CHECK: &str = "res://ic_mana_checkmark_large";
 const ICON_RELOAD: &str = "res://ic_mana_puzzle_piece_retry";
 const ICON_UNINSTALL: &str = "res://ic_mana_puzzle_piece_minus";
 const ICON_CONSOLE: &str = "res://ic_mana_angle_brackets";
@@ -100,6 +101,8 @@ enum Press {
    Uninstall(usize),
    /// A plugin's switch or button, by its index in [`PluginInfo::settings`].
    Setting(usize, usize),
+   /// Option `option` of a plugin's select setting.
+   Choose(usize, usize, usize),
    Back,
 }
 
@@ -392,7 +395,7 @@ fn act(job: &Job) {
                      };
                      Chosen::Number(number)
                   },
-                  Control::Switch(_) | Control::Button => return,
+                  Control::Switch(_) | Control::Select { .. } | Control::Button => return,
                };
                crate::set_setting(&plugin.name, &setting.key, value);
             },
@@ -431,6 +434,21 @@ fn act(job: &Job) {
             },
             Some((key, Control::Button)) => crate::press(&plugin.name, key),
             _ => {},
+         }
+      },
+      Job::Press(Press::Choose(index, at, option)) => {
+         let Some(plugin) = plugin(index) else {
+            return;
+         };
+         if let Some(setting) = plugin.settings.get(at)
+            && let Control::Select { options, .. } = &setting.control
+            && let Some(choice) = options.get(option)
+         {
+            crate::set_setting(
+               &plugin.name,
+               &setting.key,
+               Chosen::Text(choice.value.clone()),
+            );
          }
       },
       Job::Press(_) | Job::NavigateTo(_) | Job::Draft(..) => {},
@@ -687,7 +705,7 @@ impl Settings {
          Job::Press(Press::OpenMain) => self.open_page(PageKind::Main),
          Job::Press(Press::OpenConsole) => self.open_page(PageKind::Console),
          Job::Press(Press::OpenPlugin(index)) => self.open_page(PageKind::Plugin(index)),
-         Job::Press(press @ (Press::Toggle(_) | Press::Setting(..))) => {
+         Job::Press(press @ (Press::Toggle(_) | Press::Setting(..) | Press::Choose(..))) => {
             self.rerender_all(Some(press))
          },
          Job::Submit(Field::Install | Field::Setting(..)) | Job::Press(Press::Reload(_)) => {
@@ -1141,6 +1159,24 @@ fn button_row(title: &str, icon: &str, press: Option<Press>, chevron: bool) -> T
    root
 }
 
+/// A button row without an icon, with a checkmark in the chevron's place when
+/// `selected`.
+fn select_row(label: &str, selected: bool, press: Press) -> Tree {
+   let mut root = button_row(label, ICON_PLUGIN, Some(press), selected);
+   if let Some(row) = root.kids.first_mut() {
+      row.kids.remove(0);
+      if let Some(check) = row
+         .kids
+         .get_mut(1)
+         .and_then(|wrap| wrap.kids.first_mut())
+      {
+         check.set(Prop::URI, Some(text(ICON_CHECK)));
+      }
+   }
+   root.set(Prop::ACCESSIBILITY_CHECKED, Some(Value::Bool(selected)));
+   root
+}
+
 /// `root > row > [label, value wrap > value, chevron]`
 fn value_row(label: &str, value: &str) -> Tree {
    let mut root = Tree::from_template(&templates().value_row);
@@ -1414,6 +1450,19 @@ fn plugin_sections(index: usize, plugin: &PluginInfo) -> Vec<Tree> {
          Control::Text(current) => fields.push(field(current, InputKind::Text)),
          Control::Secret(current) => fields.push(field(current, InputKind::Secret)),
          Control::Number(number) => fields.push(field(&number.to_string(), InputKind::Number)),
+         Control::Select { options, chosen } => {
+            let rows = (0..)
+               .zip(options)
+               .map(|(option, choice)| {
+                  select_row(
+                     &choice.label,
+                     choice.value == *chosen,
+                     Press::Choose(index, at, option),
+                  )
+               })
+               .collect();
+            fields.push(section(&setting.title, rows));
+         },
       }
    }
    let mut sections = vec![section("", vec![switch_row(

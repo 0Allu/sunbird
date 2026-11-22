@@ -900,13 +900,21 @@ declare namespace Plumage {
     | (SpecBase & { type: "text"; default?: string })
     /// Text shown masked, and replaced with `[redacted]` in the plugin's log lines.
     | (SpecBase & { type: "secret"; default?: string })
+    /// One of a fixed list, shown as rows with a checkmark. Defaults to the first option.
+    | (SpecBase & {
+        type: "select";
+        options: readonly { value: string; label?: string }[];
+        default?: string;
+      })
     | (SpecBase & { type: "number"; default?: number })
     | (SpecBase & { type: "button"; onPress(): void });
 
   /// The value a setting reads as. Buttons have none.
   type SettingValue<S> = S extends { type: "switch" }
     ? boolean
-    : S extends { type: "text" | "secret" }
+    : S extends { type: "select"; options: readonly { value: infer V }[] }
+      ? V
+      : S extends { type: "text" | "secret" }
       ? string
       : S extends { type: "number" }
         ? number
