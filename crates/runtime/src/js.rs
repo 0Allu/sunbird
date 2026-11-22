@@ -1134,25 +1134,27 @@ fn outcome_of(target: Target, value: Option<&Value<'_>>) -> Outcome {
          return Some(Rendered {
             text:  text.to_string().ok()?,
             color: None,
+            tint:  None,
          });
       }
       if let Some(object) = value.as_object() {
+         let argb = |key: &str| {
+            object.get::<_, Option<f64>>(key).ok().flatten().map(|color| {
+               #[expect(clippy::cast_possible_truncation, reason = "colors are 32-bit ARGB")]
+               let color = color as i64;
+               color
+            })
+         };
          return Some(Rendered {
-            text:  object.get::<_, Option<String>>("text").ok().flatten()?,
-            color: object
-               .get::<_, Option<f64>>("color")
-               .ok()
-               .flatten()
-               .map(|color| {
-                  #[expect(clippy::cast_possible_truncation, reason = "colors are 32-bit ARGB")]
-                  let color = color as i64;
-                  color
-               }),
+            text:  object.get::<_, Option<String>>("text").ok().flatten().unwrap_or_default(),
+            color: argb("color"),
+            tint:  argb("tint"),
          });
       }
       Some(Rendered {
          text:  value.as_number()?.to_string(),
          color: None,
+         tint:  None,
       })
    });
    Outcome::Text(rendered)
@@ -1169,7 +1171,9 @@ fn remover<'js>(
    if let Some(id) = update {
       function.set(
          "update",
-         Function::new(ctx.clone(), move || patches::update(id))?,
+         Function::new(ctx.clone(), move |message: rquickjs::function::Opt<String>| {
+            patches::update(id, message.0.map(Place::Message));
+         })?,
       )?;
    }
    Ok(function)

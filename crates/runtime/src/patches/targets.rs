@@ -242,6 +242,10 @@ impl Templates {
                   let Some(Outcome::Text(Some(rendered))) = outcome(contribution) else {
                      return None;
                   };
+                  // A tint alone draws no line.
+                  if rendered.text.is_empty() {
+                     return None;
+                  }
                   let mut node = text(&self.accessory_props(), &rendered);
                   if target == Target::Content {
                      node.set(Prop::MARGIN, Some(Value::Rect([0.0, 2.0, 0.0, 0.0])));
@@ -265,6 +269,7 @@ impl Templates {
                   let mut head = text(&section.kids[0].props, &Rendered {
                      text:  contribution.label.clone(),
                      color: None,
+                     tint:  None,
                   });
                   head.set(
                      Prop::ACCESSIBILITY_LABEL,

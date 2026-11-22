@@ -1,5 +1,5 @@
 // @description Keeps deleted messages and edit history
-// @version 0.1.0
+// @version 0.2.0
 // @author amaanq
 
 const { gateway } = phoenix;
@@ -8,7 +8,7 @@ const settings = phoenix.settings.define({
   keepDeleted: {
     type: "switch",
     title: "Keep deleted messages",
-    description: "Show deleted messages struck out",
+    description: "Keep deleted messages, in red",
     default: true,
   },
   keepEdits: {
@@ -49,16 +49,22 @@ const settings = phoenix.settings.define({
   },
 });
 
+interface Change {
+  /// The text before an edit, or the attachments an edit removed.
+  text: string;
+  removed: boolean;
+  at: number;
+}
+
 interface Seen {
-  channelId: string;
-  guildId?: string;
   content: string;
   attachments: Phoenix.Attachment[];
-  history: string[];
-  deleted: boolean;
+  changes: Change[];
+  deletedAt?: number;
 }
 
 const EPHEMERAL = 64;
+const RED = 0xfff23f43;
 const limit = 8192;
 const seen = new Map<string, Seen>();
 
@@ -74,31 +80,45 @@ const ignored = (message: Phoenix.GatewayMessage) =>
 const remember = (message: Phoenix.GatewayMessage) => {
   let entry = seen.get(message.id);
   if (!entry) {
-    entry = {
-      channelId: message.channel_id,
-      content: message.content,
-      attachments: [],
-      history: [],
-      deleted: false,
-    };
+    entry = { content: message.content, attachments: [], changes: [] };
     seen.set(message.id, entry);
     if (seen.size > limit) seen.delete(seen.keys().next().value!);
   }
-  entry.channelId = message.channel_id;
-  entry.guildId = message.guild_id ?? entry.guildId;
   entry.content = message.content;
   entry.attachments = message.attachments ?? entry.attachments;
   return entry;
 };
 
-const unix = (timestamp: string | null | undefined) =>
-  Math.floor((timestamp ? Date.parse(timestamp) : Date.now()) / 1000);
+const pad = (n: number) => String(n).padStart(2, "0");
+const clock = (at: number) => {
+  const date = new Date(at);
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
 
-const subtext = (text: string, suffix: string) =>
-  text
-    .split("\n")
-    .map((line) => `-# ${line}`)
-    .join("\n") + suffix;
+// Earlier versions under the message, oldest first, in the accessory's muted style.
+const history = phoenix.ui.addMessageAccessory({
+  priority: 1,
+  render({ messageId }) {
+    const entry = seen.get(messageId);
+    if (!settings.keepEdits || !entry?.changes.length) return null;
+    const text = entry.changes
+      .map((change) =>
+        change.removed
+          ? `Removed ${change.text} · ${clock(change.at)}`
+          : `${change.text || "(empty)"} · edited ${clock(change.at)}`,
+      )
+      .join("\n");
+    // Red with the rest of a deleted message.
+    return entry.deletedAt === undefined ? text : { text, color: RED };
+  },
+});
+
+const deleted = phoenix.ui.addMessageAccessory({
+  render({ messageId }) {
+    const at = seen.get(messageId)?.deletedAt;
+    return at === undefined ? null : { text: `Deleted · ${clock(at)}`, color: RED, tint: RED };
+  },
+});
 
 phoenix.hook(gateway.messageCreate, {
   before(message) {
@@ -117,55 +137,44 @@ phoenix.hook(gateway.messageUpdate, {
     if (!message.id || !message.channel_id || typeof message.content !== "string") return;
     if (ignored(message)) return;
     const old = seen.get(message.id);
-    const when = unix(message.edited_timestamp);
-    if (old && old.content !== message.content) {
-      old.history.unshift(subtext(old.content, ` (edited <t:${when}:R>)`));
-    }
+    const at = message.edited_timestamp ? Date.parse(message.edited_timestamp) : Date.now();
     const removed = old?.attachments.filter(
       (attachment) => !message.attachments?.some((kept) => kept.id === attachment.id),
     ) ?? [];
-    const entry = remember(message);
+    const changes = old?.changes ?? [];
+    if (old && old.content !== message.content) changes.push({ text: old.content, removed: false, at });
     if (removed.length && settings.keepAttachments) {
       message.attachments = [...(message.attachments ?? []), ...removed];
-      entry.attachments = message.attachments;
-      const names = removed.map((attachment) => attachment.filename).join(", ");
-      entry.history.unshift(`-# removed ${names} <t:${when}:R>`);
+      changes.push({ text: removed.map((attachment) => attachment.filename).join(", "), removed: true, at });
     }
-    if (!entry.history.length || !settings.keepEdits) return;
-    message.content = (message.content ? `${message.content}\n` : "") + entry.history.join("\n");
+    remember(message).changes = changes;
+    if (old) history.update?.(message.id);
   },
 });
 
-// Messages from before the app started have no saved text, so their deletes
-// pass through.
+// Messages from before the app started are unknown, so their deletes pass
+// through. Known ones stay, marked.
 const markDeleted = (id: string) => {
   const entry = seen.get(id);
   if (!entry) return false;
-  if (entry.deleted) return true;
-  entry.deleted = true;
-  const lines = entry.content.split("\n").map((line) => `- ${line}`);
-  let content = entry.content ? `\`\`\`diff\n${lines.join("\n")}\n\`\`\`\n` : "";
-  if (entry.history.length) content += `${entry.history.join("\n")}\n`;
-  content += `-# (deleted <t:${unix(undefined)}:R>)`;
-  phoenix.dispatch(gateway.messageUpdate, {
-    id,
-    channel_id: entry.channelId,
-    ...(entry.guildId ? { guild_id: entry.guildId } : {}),
-    content,
-  });
+  if (entry.deletedAt === undefined) {
+    entry.deletedAt = Date.now();
+    deleted.update?.(id);
+    if (entry.changes.length) history.update?.(id);
+  }
   return true;
 };
 
 phoenix.hook(gateway.messageDelete, {
-  before(deleted) {
-    if (settings.keepDeleted && markDeleted(deleted.id)) return false;
+  before(message) {
+    if (settings.keepDeleted && markDeleted(message.id)) return false;
   },
 });
 
 phoenix.hook(gateway.messageDeleteBulk, {
-  before(deleted) {
+  before(bulk) {
     if (!settings.keepDeleted) return;
-    deleted.ids = deleted.ids.filter((id) => !markDeleted(id));
-    if (!deleted.ids.length) return false;
+    bulk.ids = bulk.ids.filter((id) => !markDeleted(id));
+    if (!bulk.ids.length) return false;
   },
 });

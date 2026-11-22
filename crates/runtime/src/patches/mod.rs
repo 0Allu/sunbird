@@ -138,6 +138,9 @@ pub enum Place {
 pub struct Rendered {
    pub text:  String,
    pub color: Option<i64>,
+   /// Under a message's content: the color of its author and text (32-bit
+   /// ARGB).
+   pub tint:  Option<i64>,
 }
 
 /// A plugin's answer for one place: the text it renders, or whether its row
@@ -258,6 +261,11 @@ struct Patches {
    suggestions:   commands::Suggestions,
    /// Sends plugins already saw, let through once when Rust gets them back.
    resent:        Vec<Vec<u8>>,
+   /// Message text color plugins asked for, by message id.
+   tints:         HashMap<String, i64>,
+   /// Phoenix's author and content text nodes: their message and props as
+   /// Phoenix set them.
+   texts:         HashMap<i32, (String, Props)>,
 }
 
 static PATCHES: LazyLock<Mutex<Patches>> = LazyLock::new(|| {
@@ -540,9 +548,16 @@ pub fn remove(id: ContributionId) {
    queue(Job::Refresh(target));
 }
 
-/// Draws `id` again, asking its plugin anew.
-pub fn update(id: ContributionId) {
+/// Draws `id` again, asking its plugin anew: everywhere, or only at `place`,
+/// where the old result stays up until the new one is in.
+pub fn update(id: ContributionId, place: Option<Place>) {
    let mut state = patches();
+   if let Some(place) = place {
+      if state.pending.insert((id, place.clone())) {
+         queue(Job::Evaluate(id, place));
+      }
+      return;
+   }
    let Some(target) = state
       .contributions
       .iter()
@@ -637,6 +652,25 @@ impl Patches {
       {
          let (created, deleted) = self.mirror.apply(&ops);
          extra_deletes = self.drop_deleted(&deleted);
+         for id in &deleted {
+            self.texts.remove(id);
+         }
+         for (id, (kind, props)) in &created {
+            if **kind == ViewKind::Text
+               && let Some(message) = self.text_message(*id)
+            {
+               self.texts.insert(*id, (message, (*props).clone()));
+            }
+         }
+         for op in &ops {
+            if let Op::Update { id, props } = op
+               && let Some((_, stored)) = self.texts.get_mut(id)
+            {
+               for (key, value) in props {
+                  set_prop(stored, *key, Some(value.clone()));
+               }
+            }
+         }
 
          let mut named = created
             .keys()
@@ -699,11 +733,16 @@ impl Patches {
       let rewrites_children = ops.iter().any(|op| {
          matches!(op, Op::Children { id, .. } | Op::ChildEdits { id, .. } if slot_parents.contains(id))
       });
+      let recolors = !self.tints.is_empty()
+         && ops.iter().any(|op| {
+            matches!(op, Op::Create { id, .. } | Op::Update { id, .. } if self.tint_of(*id).is_some())
+         });
       if touched.is_empty()
          && extra_deletes.is_empty()
          && extra.is_empty()
          && !rewrites_children
          && !restored
+         && !recolors
       {
          return None;
       }
@@ -721,6 +760,19 @@ impl Patches {
             Op::Delete { mut ids } if !extra_deletes.is_empty() => {
                ids.append(&mut extra_deletes);
                out.push(Op::Delete { ids });
+            },
+            Op::Create { id, kind, props } if let Some(color) = self.tint_of(id) => {
+               out.push(Op::Create {
+                  id,
+                  kind,
+                  props: recolored(&props, color, true),
+               });
+            },
+            Op::Update { id, props } if let Some(color) = self.tint_of(id) => {
+               out.push(Op::Update {
+                  id,
+                  props: recolored(&props, color, false),
+               });
             },
             op => out.push(op),
          }
@@ -939,6 +991,7 @@ impl Patches {
             queue(Job::Evaluate(contribution.id, place.clone()));
          }
       }
+      let ids = contributions.iter().map(|contribution| contribution.id).collect::<Vec<_>>();
       let drafts = self
          .templates
          .draw(target, &contributions, &place, &|contribution| {
@@ -951,6 +1004,63 @@ impl Patches {
       }
       self.slots[index].roots = roots;
       self.slots[index].all = all;
+      // The content's tint, once no answer for it is outstanding.
+      if target == Target::Content
+         && !ids.iter().any(|id| self.pending.contains(&(*id, place.clone())))
+      {
+         let tint = ids.iter().find_map(|id| {
+            match self.results.get(&(*id, place.clone())) {
+               Some(Outcome::Text(Some(rendered))) => rendered.tint,
+               _ => None,
+            }
+         });
+         if let Place::Message(message) = place {
+            self.set_tint(message, tint, out);
+         }
+      }
+   }
+
+   /// Colors the author and text of `message`, or gives them back Phoenix's
+   /// colors.
+   fn set_tint(&mut self, message: String, tint: Option<i64>, out: &mut Vec<Op>) {
+      let old = match tint {
+         Some(color) => self.tints.insert(message.clone(), color),
+         None => self.tints.remove(&message),
+      };
+      if old == tint {
+         return;
+      }
+      for (id, (owner, props)) in &self.texts {
+         if *owner != message {
+            continue;
+         }
+         let props = match tint {
+            Some(color) => recolored(props, color, true),
+            None => {
+               props
+                  .iter()
+                  .filter(|(key, _)| *key == Prop::COLOR || *key == SPANS)
+                  .cloned()
+                  .collect()
+            },
+         };
+         out.push(Op::Update { id: *id, props });
+      }
+   }
+
+   /// The message whose author or content text `id` is.
+   fn text_message(&self, id: i32) -> Option<String> {
+      let own = self.mirror.accessibility_id(id).and_then(|aid| aid.strip_prefix("message.author:"));
+      let parent = self
+         .mirror
+         .parent(id)
+         .and_then(|parent| self.mirror.accessibility_id(parent))
+         .and_then(|aid| aid.strip_prefix("message.content:"));
+      own.or(parent).map(str::to_owned)
+   }
+
+   fn tint_of(&self, id: i32) -> Option<i64> {
+      self.texts.get(&id).and_then(|(message, _)| self.tints.get(message)).copied()
    }
 
    fn emit(
@@ -1053,10 +1163,11 @@ impl Patches {
       if self.results.len() >= RESULTS_CAP {
          self.results.clear();
       }
-      let visible = !matches!(outcome, Outcome::Text(None) | Outcome::Shown(false));
+      let shows = |outcome: &Outcome| !matches!(outcome, Outcome::Text(None) | Outcome::Shown(false));
+      let visible = shows(&outcome);
       let place = key.1.clone();
-      self.results.insert(key, outcome);
-      if !visible {
+      let was = self.results.insert(key, outcome);
+      if !visible && !was.as_ref().is_some_and(shows) {
          return Vec::new();
       }
       let mut out = Vec::new();
@@ -1092,6 +1203,36 @@ impl Patches {
       }
       out
    }
+}
+
+const SPANS: Prop = Prop::named("spans");
+
+/// `props` with their text and every span in `color`. An update (`all` off)
+/// only recolors what it sets.
+fn recolored(props: &Props, color: i64, all: bool) -> Props {
+   let mut props = props.clone();
+   let key = Prop::COLOR.key();
+   for (prop, value) in &mut props {
+      if *prop != SPANS {
+         continue;
+      }
+      let Value::Arr(spans) = value else {
+         continue;
+      };
+      for span in spans {
+         let Value::Obj(entries) = span else {
+            continue;
+         };
+         match entries.iter_mut().find(|(field, _)| *field == key) {
+            Some((_, old)) => *old = Value::I64(color),
+            None => entries.push((key, Value::I64(color))),
+         }
+      }
+   }
+   if all || props.iter().any(|(prop, _)| *prop == Prop::COLOR) {
+      set_prop(&mut props, Prop::COLOR, Some(Value::I64(color)));
+   }
+   props
 }
 
 /// The user whose avatar a profile batch shows before its pages node.

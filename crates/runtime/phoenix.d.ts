@@ -1006,13 +1006,20 @@ declare namespace Phoenix {
     userId?: string;
   }
 
-  /// Text a `render` returns: plain, colored (32-bit ARGB), or nothing.
-  type Rendered = string | { text: string; color?: number } | null | undefined | false;
+  /// Text a `render` returns: plain, colored (32-bit ARGB), or nothing. Under a message's content,
+  /// `tint` also colors the message's author and text (32-bit ARGB); `text` may then be empty.
+  type Rendered =
+    | string
+    | { text?: string; color?: number; tint?: number }
+    | null
+    | undefined
+    | false;
 
-  /// Undoes a registration. `update` draws it again, asking the plugin anew.
+  /// Undoes a registration. `update` draws it again, asking the plugin anew; for a message
+  /// accessory, `update(messageId)` redraws only that message.
   interface Remover {
     (): void;
-    update?(): void;
+    update?(messageId?: string): void;
   }
 
   /// A drawable in Phoenix's resources, like `res://ic_mana_puzzle_piece_plus`.
