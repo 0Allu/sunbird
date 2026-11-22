@@ -1,0 +1,12 @@
+{
+  "name": "phoenix-plugin-example",
+  "private": true,
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=iife --target=es2020 --outfile=dist/example.js",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^5.6.0"
+  }
+}

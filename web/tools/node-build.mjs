@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { basename } from 'node:path';
 import { ABIS, abiOf, buildPatchedApk } from '../lib/apk.js';
+import { PLUGINS } from '../lib/plugins.js';
 import { BOOTSTRAP_URL, bundleScripts, GADGET_URLS, gunzip } from '../lib/frida.js';
 import { readZip } from '../lib/zip.js';
 
@@ -23,7 +24,9 @@ console.log(`ABI: ${abiName}`);
 const scripts = (opt.script ?? fileURLToPath(new URL('../plugins/frida-example.js', import.meta.url))).split(',').filter(Boolean);
 const frida = opt.plugins?.split(',').includes('frida') ? { gadget: await gunzip(read(new URL('../' + GADGET_URLS[abiName], import.meta.url))),
   script: bundleScripts(scripts.map((f) => ({ name: basename(f), code: readFileSync(f, 'utf8') })), readFileSync(new URL('../' + BOOTSTRAP_URL, import.meta.url), 'utf8')) } : null;
+const enabled = opt.plugins ? opt.plugins.split(',') : [];
+const pluginSources = Object.fromEntries(PLUGINS.filter((p) => p.js && enabled.includes(p.id)).map((p) => [p.id, readFileSync(new URL('../' + p.js, import.meta.url), 'utf8')]));
 const parts = await buildPatchedApk({ base: read(base), abi: abiSplit, configs: configs.map(read), identity, packageName: opt.package, label: opt.label,
-  plugins: opt.plugins ? opt.plugins.split(',') : [], pluginLib: opt.plugins ? new Uint8Array(readFileSync(new URL('../' + ABIS[abiName].pluginLib, import.meta.url))) : null, frida, log: (s) => console.log(s) });
+  plugins: enabled, pluginSources, pluginLib: opt.plugins ? new Uint8Array(readFileSync(new URL('../' + ABIS[abiName].pluginLib, import.meta.url))) : null, frida, log: (s) => console.log(s) });
 writeFileSync(out, Buffer.concat(parts.map((p) => Buffer.from(p.buffer, p.byteOffset, p.byteLength))));
 console.log(`wrote ${out} in ${Date.now() - t} ms`);

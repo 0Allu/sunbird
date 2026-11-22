@@ -10,3 +10,4 @@ upload.apk
 node_modules/
 target/
 !web/plugins/*.so
+plugins/example/dist/

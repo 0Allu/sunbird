@@ -1,0 +1,13 @@
+[package]
+name = "loader"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "plg" # libplg.so
+crate-type = ["cdylib"]
+
+[dependencies]
+sigs = { path = "../sigs" }
+hook = { path = "../hook" }
+runtime = { path = "../runtime" }

@@ -1,0 +1,2 @@
+Trimmed copy of rquickjs-sys 0.14.0 (MIT, quickjs-ng inside).
+Only change: src/bindings/{x86_64,aarch64}-linux-android.rs copied from the matching *-unknown-linux-gnu.rs.

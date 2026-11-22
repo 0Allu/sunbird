@@ -70,11 +70,19 @@ Phoenix reaches READY in 3.1 s, chat loads, and drawables render. The whole page
 ### Plugins
 
 Optional, ticked on the page. The patcher renames the host lib's `DT_NEEDED` `liblog.so` to
-`libplg.so` (`plugin/plugin.c`, prebuilt in `web/plugins/`, rebuild with `plugin/build.sh`) and
-writes the offsets it found in this build into libplg's config block.
+`libplg.so`, the plugin host (prebuilt in `web/plugins/`, rebuild with `plugin/build.sh`):
 
-- **MessageLogger** (`plugin/msglog.c`): swaps the gateway registry's MESSAGE_* handlers. Deleted
-  messages stay, marked "(deleted)"; edits keep the earlier text above the new one.
+| crate (`plugin/`) | what |
+|---|---|
+| `loader` | the cdylib. Its `.init_array` constructor checks the config block, hooks the registry, reads the plugin bundle out of the APK (`lib/<abi>/libplg.js.so`) and starts the runtime. |
+| `sigs` | the typed config block the patcher fills: host lib build ID (a different build runs without plugins), gateway registry anchor, store serializer offsets. |
+| `hook` | gateway registry hooks (handler swap, no inline hooks), the JNI bridge (ART table filters + `nativeDispatch`), module/dynsym helpers and an IDA-pattern scanner. |
+| `runtime` | rquickjs (QuickJS-ng). The `phoenix` API is typed in `runtime/phoenix.d.ts`; `plugins/example` is a TypeScript plugin bundled with esbuild. |
+
+JS plugins live in `files/phoenix-js/`; ones shipped in the APK are copied there and replace older copies.
+
+- **MessageLogger** (`web/plugins/message-logger.js`): a JS plugin. Deleted messages stay, marked
+  "(deleted)"; edits keep the earlier text under the new one.
 - **Frida (JS plugins)**: chains frida-gadget 17.27.4 (`libfrg.so`, wxWindows Library Licence)
   in as libplg's dependency, in script mode, so the app starts without a PC. The bootstrap
   (`frida/bootstrap.js`, built into `web/plugins/frida-bootstrap.js` by `frida/build.sh`) runs
