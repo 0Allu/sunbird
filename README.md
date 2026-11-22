@@ -25,7 +25,13 @@ one APK and signs it, all in the browser, so Android can install it with a singl
   hand-encoded staff hook. Its output is byte-identical to the Python/clang build.
 - `dex.js`: patches `PhoenixLaunch.i`.
 - `axml.js`: removes `requiredSplitTypes`/`splitTypes` from the manifest and sets
-  `com.android.vending.splits.required` to false.
+  `com.android.vending.splits.required` to false. Optionally renames the package; the site
+  does this by default ("Next to Discord"). It changes `package`, the provider authorities,
+  `com.discord.*` permissions and task affinities to `com.discord.phoenix` (a name Phoenix's
+  native lib already knows) and sets the label to "Discord Phoenix". Class names stay
+  unchanged. `arsc.js` renames the resource table package to match, so `getIdentifier()`
+  still works. Tested next to the stock `com.discord` on Android 16: it installs and boots
+  Phoenix.
 - `arsc.js`: merges the density and language splits' `resources.arsc` into base's.
 - `zip.js`: copies unchanged entries without recompressing them and aligns stored entries
   (`.so` to 16 KiB).

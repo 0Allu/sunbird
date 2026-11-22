@@ -9,7 +9,7 @@ const TYPE_SPARSE = 0x01, TYPE_OFFSET16 = 0x02;
 const view = (u8) => new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
 
 // --- string pools as arrays of raw encoded entries ------------------------------------
-function parsePool(u8) {
+export function parsePool(u8) {
   const v = view(u8);
   const count = v.getUint32(8, true), styles = v.getUint32(12, true), flags = v.getUint32(16, true);
   const sStart = v.getUint32(20, true), stStart = v.getUint32(24, true);
@@ -34,7 +34,7 @@ function parsePool(u8) {
   return { flags, utf8, raws, styles, styleOffs, styleData };
 }
 
-function decodeRaw(raw, utf8) {
+export function decodeRaw(raw, utf8) {
   let q = 0, n;
   if (utf8) {
     q += raw[q] & 0x80 ? 2 : 1;
@@ -47,7 +47,21 @@ function decodeRaw(raw, utf8) {
   return new TextDecoder('utf-16le').decode(raw.subarray(q, q + 2 * n));
 }
 
-function buildPool(p) {
+/** Encode a string as a raw string-pool entry. */
+export function encodeRaw(str, utf8) {
+  if (utf8) {
+    const b = new TextEncoder().encode(str), n16 = str.length;
+    const len = (n) => (n > 0x7f ? [0x80 | (n >> 8), n & 0xff] : [n]);
+    return Uint8Array.from([...len(n16), ...len(b.length), ...b, 0]);
+  }
+  const n = str.length, head = n > 0x7fff ? [0x8000 | (n >> 16), n & 0xffff] : [n];
+  const out = new Uint8Array(2 * head.length + 2 * n + 2), v = view(out);
+  head.forEach((h, i) => v.setUint16(2 * i, h, true));
+  for (let i = 0; i < n; i++) v.setUint16(2 * head.length + 2 * i, str.charCodeAt(i), true);
+  return out;
+}
+
+export function buildPool(p) {
   const n = p.raws.length;
   const dataLen = p.raws.reduce((s, r) => s + r.length, 0);
   const pad = (4 - (dataLen % 4)) % 4;
@@ -119,8 +133,8 @@ function remapType(chunk, keyMap, strBase) {
   return c;
 }
 
-/** Merge split resources.arsc files into base's. Returns new bytes. */
-export function mergeArsc(baseU8, splitU8s) {
+/** Merge split resources.arsc files into base's (optionally renaming the package). Returns new bytes. */
+export function mergeArsc(baseU8, splitU8s, packageName = null) {
   const base = parseTable(baseU8);
   const gp = parsePool(base.pool);
   const kp = parsePool(base.pkg.keys);
@@ -168,6 +182,10 @@ export function mergeArsc(baseU8, splitU8s) {
 
   const newKeys = buildPool(kp), newPool = buildPool(gp);
   const hdr = base.pkg.header.slice(), hv = view(hdr);
+  if (packageName) { // char16_t name[128] at offset 12; getIdentifier() looks packages up by this name
+    if (packageName.length > 127) throw new Error('package name too long');
+    for (let i = 0; i < 128; i++) hv.setUint16(12 + 2 * i, i < packageName.length ? packageName.charCodeAt(i) : 0, true);
+  }
   hv.setUint32(268, hdr.length, true);
   hv.setUint32(276, hdr.length + base.pkg.types.length, true);
   const pkgSize = hdr.length + base.pkg.types.length + newKeys.length + chunks.reduce((s, c) => s + c.length, 0);

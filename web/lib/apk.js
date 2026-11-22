@@ -14,10 +14,13 @@ const SKIP = (n) => V1_SIG.test(n) || n === 'stamp-cert-sha256';
  * @param {Uint8Array} base      base.apk
  * @param {Uint8Array} abi       config.arm64_v8a.apk
  * @param {Uint8Array[]} configs other config splits (density, language)
- * @param identity               from sign.newIdentity()
+ * @param identity               {pkcs8, spki, cert} (web/signing-key.json)
+ * @param packageName            install under another package (next to the original); default com.discord
+ * @param label                  launcher name, e.g. when renamed
  * @returns {Promise<Uint8Array[]>} parts of the signed APK (new Blob(parts))
  */
-export async function buildPatchedApk({ base, abi, configs = [], identity, log = () => {} }) {
+export async function buildPatchedApk({ base, abi, configs = [], identity, packageName = 'com.discord', label = null, log = () => {} }) {
+  if (!/^[a-zA-Z][\w]*(\.[a-zA-Z][\w]*)+$/.test(packageName)) throw new Error(`invalid package name: ${packageName}`);
   const baseEntries = readZip(base).filter((e) => !SKIP(e.name));
   const abiEntries = readZip(abi);
   const cfgEntries = configs.map(readZip);
@@ -27,13 +30,14 @@ export async function buildPatchedApk({ base, abi, configs = [], identity, log =
 
   for (const e of baseEntries) {
     if (e.name === 'AndroidManifest.xml') {
-      const m = patchManifest(await entryData(e));
-      log(`manifest: removed ${m.removed} split attribute(s), splits.required=false: ${m.flipped}`);
+      const m = patchManifest(await entryData(e), { packageName, label });
+      log(`manifest: removed ${m.removed} split attribute(s), splits.required=false: ${m.flipped}` +
+        (m.renamed ? `, ${m.renamed} value(s) renamed to ${packageName}${label ? ` / "${label}"` : ''}` : ''));
       out.push(storedEntry(e.name, m.data));
     } else if (e.name === 'resources.arsc') {
       const splits = [];
       for (const z of cfgEntries) { const a = z.find((x) => x.name === 'resources.arsc'); if (a) splits.push(await entryData(a)); }
-      out.push(storedEntry(e.name, mergeArsc(await entryData(e), splits)));
+      out.push(storedEntry(e.name, mergeArsc(await entryData(e), splits, packageName === 'com.discord' ? null : packageName)));
       log(`resources: merged ${splits.length} config split table(s)`);
     } else if (!dexDone && /^classes\d*\.dex$/.test(e.name)) {
       const patched = await patchDex(await entryData(e));

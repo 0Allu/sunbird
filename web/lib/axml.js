@@ -1,81 +1,111 @@
-// Binary AndroidManifest.xml edit so the merged APK installs on its own:
-//  - drop android:requiredSplitTypes / android:splitTypes / android:isSplitRequired
-//  - set meta-data com.android.vending.splits.required to false (Play Core missing-splits check)
+// Binary AndroidManifest.xml edits.
+// Always: drop requiredSplitTypes / splitTypes / isSplitRequired so the merged APK installs on its own,
+//         and set meta-data com.android.vending.splits.required to false (Play Core missing-splits check).
+// Optional rename ({packageName, label}): change `package`, provider authorities, com.discord.*
+//         permissions and task affinities so it installs next to the original; class names stay as is.
+import { buildPool, decodeRaw, encodeRaw, parsePool } from './arsc.js';
 
+const ORIGINAL = 'com.discord';
 const DROP_ATTRS = new Set([0x0101064e, 0x0101064f, 0x01010591]); // requiredSplitTypes, splitTypes, isSplitRequired
-const ATTR_NAME = 0x01010003, ATTR_VALUE = 0x01010024;
+const A = { name: 0x01010003, value: 0x01010024, label: 0x01010001, authorities: 0x01010018, taskAffinity: 0x01010012 };
+const TYPE_STRING = 0x03, TYPE_REFERENCE = 0x01;
 
-function readPool(u8, v, p) {
-  const count = v.getUint32(p + 8, true), flags = v.getUint32(p + 16, true), strStart = v.getUint32(p + 20, true);
-  const utf8 = !!(flags & 0x100);
-  const dec = new TextDecoder(utf8 ? 'utf-8' : 'utf-16le');
-  return (i) => {
-    if (i === 0xffffffff || i >= count) return null;
-    let q = p + strStart + v.getUint32(p + 28 + 4 * i, true);
-    if (utf8) {
-      if (u8[q] & 0x80) q += 2; else q += 1; // utf-16 length
-      let n = u8[q++]; if (n & 0x80) n = ((n & 0x7f) << 8) | u8[q++];
-      return dec.decode(u8.subarray(q, q + n));
-    }
-    let n = v.getUint16(q, true); q += 2;
-    if (n & 0x8000) { n = ((n & 0x7fff) << 16) | v.getUint16(q, true); q += 2; }
-    return dec.decode(u8.subarray(q, q + 2 * n));
-  };
-}
-
-export function patchManifest(src) {
+export function patchManifest(src, { packageName = ORIGINAL, label = null } = {}) {
   const u8 = new Uint8Array(src);
   const v = new DataView(u8.buffer);
   if (v.getUint16(0, true) !== 0x0003) throw new Error('not a binary XML manifest');
-  let str = null, resIds = [];
-  const out = [u8.subarray(0, 8)];
-  let removed = 0, flipped = false;
-  for (let p = v.getUint16(2, true); p < u8.length; ) {
+  const renaming = packageName !== ORIGINAL;
+  const re = (s) => (s === ORIGINAL ? packageName : s.startsWith(ORIGINAL + '.') ? packageName + s.slice(ORIGINAL.length) : s);
+
+  // pass 1: walk chunks, collect drops and string edits
+  const chunks = [];
+  let pool = null, poolIdx = -1, resIds = [], appLabelRef = null;
+  for (let p = v.getUint16(2, true); p < u8.length; p += v.getUint32(p + 4, true)) chunks.push(p);
+  const str = (i) => (i === 0xffffffff ? null : decodeRaw(pool.raws[i], pool.utf8));
+  const newStrings = new Map(); // string -> index
+  const strIndex = (s) => {
+    if (!newStrings.has(s)) newStrings.set(s, pool.raws.length + newStrings.size);
+    return newStrings.get(s);
+  };
+  const edits = new Map(); // attr offset -> string index
+  const drops = new Set(); // attr offsets
+  const bools = new Set(); // attr offsets set to false
+  const stats = { removed: 0, flipped: false, renamed: 0 };
+
+  for (const [ci, p] of chunks.entries()) {
     const type = v.getUint16(p, true), size = v.getUint32(p + 4, true);
-    let chunk = u8.subarray(p, p + size);
-    if (type === 0x0001) str = readPool(u8, v, p);
+    if (type === 0x0001) { pool = parsePool(u8.subarray(p, p + size)); poolIdx = ci; }
     else if (type === 0x0180) resIds = Array.from({ length: (size - 8) / 4 }, (_, i) => v.getUint32(p + 8 + 4 * i, true));
     else if (type === 0x0102) {
       const aStart = p + 16 + v.getUint16(p + 24, true), aSize = v.getUint16(p + 26, true), aCount = v.getUint16(p + 28, true);
       const attrs = Array.from({ length: aCount }, (_, i) => aStart + i * aSize);
       const resOf = (a) => resIds[v.getUint32(a + 4, true)];
-      const keep = attrs.filter((a) => !DROP_ATTRS.has(resOf(a)));
+      const valStr = (a) => (v.getUint8(a + 15) === TYPE_STRING ? str(v.getUint32(a + 16, true)) : null);
       const tag = str(v.getUint32(p + 20, true));
-      if (tag === 'meta-data' && attrs.some((a) => resOf(a) === ATTR_NAME && str(v.getUint32(a + 8, true)) === 'com.android.vending.splits.required')) {
-        const val = attrs.find((a) => resOf(a) === ATTR_VALUE);
-        chunk = chunk.slice();
-        const cv = new DataView(chunk.buffer);
-        const o = val - p;
-        cv.setUint32(o + 8, 0xffffffff, true); // rawValue: none
-        cv.setUint8(o + 15, 0x12); // TYPE_INT_BOOLEAN
-        cv.setUint32(o + 16, 0, true); // false
-        flipped = true;
-      } else if (keep.length !== attrs.length) {
-        removed += attrs.length - keep.length;
-        const head = u8.slice(p, aStart);
-        const hv = new DataView(head.buffer);
-        const tail = u8.subarray(aStart + aCount * aSize, p + size);
-        const n = head.length + keep.length * aSize + tail.length;
-        hv.setUint32(4, n, true);
-        hv.setUint16(28, keep.length, true);
-        // id/class/style attribute indices are 1-based positions; recompute (0 = none)
-        for (const off of [30, 32, 34]) {
-          const idx = hv.getUint16(off, true);
-          if (idx) hv.setUint16(off, keep.indexOf(attrs[idx - 1]) + 1, true);
+      for (const a of attrs) if (DROP_ATTRS.has(resOf(a))) drops.add(a);
+      if (tag === 'meta-data' && attrs.some((a) => resOf(a) === A.name && valStr(a) === 'com.android.vending.splits.required')) {
+        const val = attrs.find((a) => resOf(a) === A.value);
+        if (val !== undefined) { bools.add(val); stats.flipped = true; }
+      }
+      if (!renaming && !label) continue;
+      for (const a of attrs) {
+        const res = resOf(a), s = valStr(a);
+        const set = (ns) => { if (ns !== s) { edits.set(a, strIndex(ns)); stats.renamed++; } };
+        if (renaming && tag === 'manifest' && str(v.getUint32(a + 4, true)) === 'package' && s) set(packageName);
+        else if (renaming && res === A.authorities && s) set(s.split(';').map(re).join(';'));
+        else if (renaming && (tag === 'permission' || tag === 'uses-permission') && res === A.name && s) set(re(s));
+        else if (renaming && res === A.taskAffinity && s) set(re(s));
+        else if (label && res === A.label) {
+          const isRef = v.getUint8(a + 15) === TYPE_REFERENCE, ref = v.getUint32(a + 16, true);
+          if (tag === 'application' && isRef) appLabelRef = ref;
+          if (isRef && (tag === 'application' || ref === appLabelRef)) { edits.set(a, strIndex(label)); stats.renamed++; }
         }
-        chunk = new Uint8Array(n);
-        chunk.set(head, 0);
-        keep.forEach((a, i) => chunk.set(u8.subarray(a, a + aSize), head.length + i * aSize));
-        chunk.set(tail, head.length + keep.length * aSize);
       }
     }
+  }
+  if (!pool) throw new Error('manifest has no string pool');
+
+  // pass 2: emit
+  for (const s of newStrings.keys()) pool.raws.push(encodeRaw(s, pool.utf8));
+  const out = [u8.subarray(0, v.getUint16(2, true))];
+  for (const [ci, p] of chunks.entries()) {
+    const size = v.getUint32(p + 4, true);
+    if (ci === poolIdx) { out.push(newStrings.size ? buildPool(pool) : u8.subarray(p, p + size)); continue; }
+    if (v.getUint16(p, true) !== 0x0102) { out.push(u8.subarray(p, p + size)); continue; }
+    const aStart = p + 16 + v.getUint16(p + 24, true), aSize = v.getUint16(p + 26, true), aCount = v.getUint16(p + 28, true);
+    const attrs = Array.from({ length: aCount }, (_, i) => aStart + i * aSize);
+    if (!attrs.some((a) => drops.has(a) || edits.has(a) || bools.has(a))) { out.push(u8.subarray(p, p + size)); continue; }
+    const keep = attrs.filter((a) => !drops.has(a));
+    stats.removed += attrs.length - keep.length;
+    const head = u8.slice(p, aStart), hv = new DataView(head.buffer);
+    const tail = u8.subarray(aStart + aCount * aSize, p + size);
+    const n = head.length + keep.length * aSize + tail.length;
+    hv.setUint32(4, n, true);
+    hv.setUint16(28, keep.length, true);
+    for (const off of [30, 32, 34]) { // 1-based id/class/style attribute positions
+      const idx = hv.getUint16(off, true);
+      if (idx) hv.setUint16(off, keep.indexOf(attrs[idx - 1]) + 1, true);
+    }
+    const chunk = new Uint8Array(n), cv = new DataView(chunk.buffer);
+    chunk.set(head, 0);
+    keep.forEach((a, i) => {
+      const o = head.length + i * aSize;
+      chunk.set(u8.subarray(a, a + aSize), o);
+      if (edits.has(a)) {
+        const si = edits.get(a);
+        cv.setUint32(o + 8, si, true); cv.setUint16(o + 12, 8, true); cv.setUint8(o + 14, 0);
+        cv.setUint8(o + 15, TYPE_STRING); cv.setUint32(o + 16, si, true);
+      } else if (bools.has(a)) {
+        cv.setUint32(o + 8, 0xffffffff, true); cv.setUint8(o + 15, 0x12); cv.setUint32(o + 16, 0, true);
+      }
+    });
+    chunk.set(tail, head.length + keep.length * aSize);
     out.push(chunk);
-    p += size;
   }
   const total = out.reduce((s, c) => s + c.length, 0);
   const res = new Uint8Array(total);
   let o = 0;
   for (const c of out) { res.set(c, o); o += c.length; }
   new DataView(res.buffer).setUint32(4, total, true);
-  return { data: res, removed, flipped };
+  return { data: res, ...stats };
 }

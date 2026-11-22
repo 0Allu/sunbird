@@ -75,12 +75,14 @@ function splitNames() {
 async function patchAndOffer(vc, base, abi, configs) {
   const s = step('Patch and sign');
   s.progress(0.5, 'working…');
-  const parts = await buildPatchedApk({ base, abi, configs, identity: await identity(), log });
+  const packageName = $('pkg').value, side = packageName !== 'com.discord';
+  const parts = await buildPatchedApk({ base, abi, configs, identity: await identity(), packageName, label: side ? 'Discord Phoenix' : null, log });
   const blob = new Blob(parts, { type: 'application/vnd.android.package-archive' });
   s.done(mb(blob.size));
+  $('note-side').hidden = !side; $('note-replace').hidden = side;
   const a = $('dl');
   a.href = URL.createObjectURL(blob);
-  a.download = `discord-${vc}-phoenix-unlock.apk`;
+  a.download = `discord-${vc}-phoenix-unlock${side ? '-side' : ''}.apk`;
   $('result').hidden = false;
   a.scrollIntoView({ behavior: 'smooth' });
 }

@@ -49,6 +49,10 @@
     <div class="row"><label for="ver">Discord build</label><select id="ver"></select></div>
     <div class="row"><label for="dpi">Screen density</label><select id="dpi"></select></div>
     <div class="row"><label for="lang">Language</label><select id="lang"></select></div>
+    <div class="row"><label for="pkg">Install</label><select id="pkg">
+      <option value="com.discord.phoenix" selected>Next to Discord</option>
+      <option value="com.discord">Replace Discord</option>
+    </select></div>
     <div class="row"><label>CPU</label><span>arm64 (64-bit phones)</span></div>
   </section>
 
@@ -68,7 +72,7 @@
 
   <section class="card" id="result" hidden>
     <a class="btn" id="dl" download>Download patched APK</a>
-    <p class="note">1. Uninstall Discord first if it came from the Play Store; Android won't update an app signed with a different key.<br>
+    <p class="note"><span id="note-side">1. It installs as <b>Discord Phoenix</b>, next to your normal Discord, and you sign in once.</span><span id="note-replace" hidden>1. Uninstall Discord first if it came from the Play Store; Android won't update an app signed with a different key.</span><br>
     2. Open the downloaded file and allow your browser to install apps if asked.<br>
     3. Later builds: just patch again. Every build is signed with the same key, so it installs as an update and you stay logged in.</p>
   </section>
