@@ -27,6 +27,8 @@ pub use plumage_hook::{
 };
 
 mod builds;
+#[cfg(feature = "file")]
+pub mod file;
 mod registry;
 
 pub use builds::BUILDS;

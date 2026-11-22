@@ -7,8 +7,7 @@ version.workspace = true
 
 [dependencies]
 misstep      = { workspace = true }
-object       = { workspace = true }
-plumage-sigs = { workspace = true }
+plumage-sigs = { features = [ "file" ], workspace = true }
 
 [lints]
 workspace = true

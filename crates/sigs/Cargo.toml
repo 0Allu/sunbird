@@ -5,8 +5,13 @@ edition.workspace = true
 license.workspace = true
 version.workspace = true
 
+[features]
+# ELF files from disk, for sigscan and the patcher. The loader leaves it off.
+file = [ "dep:object" ]
+
 [dependencies]
 flub         = { workspace = true }
+object       = { optional = true, workspace = true }
 plumage-hook = { workspace = true }
 
 [lints]

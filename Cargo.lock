@@ -327,6 +327,7 @@ name = "plumage-sigs"
 version = "0.1.0"
 dependencies = [
  "flub",
+ "object",
  "plumage-hook",
 ]
 
@@ -533,7 +534,6 @@ name = "sigscan"
 version = "0.1.0"
 dependencies = [
  "misstep",
- "object",
  "plumage-sigs",
 ]
 
