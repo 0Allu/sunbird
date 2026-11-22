@@ -32,6 +32,7 @@ use rquickjs::{
    object::Accessor,
 };
 
+#[cfg(target_os = "android")] use crate::fetch;
 use crate::{
    Chosen,
    Control,
@@ -46,9 +47,9 @@ use crate::{
 };
 
 pub struct Engine {
-   _runtime: Runtime,
-   context:  Context,
-   plugins:  BTreeMap<String, Loaded>,
+   runtime: Runtime,
+   context: Context,
+   plugins: BTreeMap<String, Loaded>,
 }
 
 struct Loaded {
@@ -118,6 +119,9 @@ struct Registry<'js> {
    defined: RefCell<BTreeMap<String, Vec<Definition<'js>>>>,
    /// Kept across unloads, so a reloaded plugin sees what the user chose.
    chosen:  RefCell<ChosenMap>,
+   /// Each pending `plumage.fetch`'s resolve and reject, by id.
+   #[cfg(target_os = "android")]
+   fetches: RefCell<HashMap<u64, (Function<'js>, Function<'js>)>>,
 }
 
 // SAFETY: every field is bound to 'js, and Changed swaps exactly that lifetime.
@@ -159,7 +163,7 @@ impl Engine {
          Ok::<_, Error>(())
       })?;
       Ok(Self {
-         _runtime: runtime,
+         runtime,
          context,
          plugins: BTreeMap::new(),
       })
@@ -239,6 +243,7 @@ impl Engine {
             log::error!("[{plugin}] {key}: {err}");
          }
       });
+      drain(&self.runtime);
    }
 
    /// Evaluates `name` with a fresh `plumage` object, recording any error.
@@ -254,6 +259,7 @@ impl Engine {
          };
          run().catch(&ctx).map_err(js_error)
       });
+      drain(&self.runtime);
       match outcome {
          Ok(()) => {
             log::info!("loaded plugin {name}");
@@ -373,9 +379,13 @@ impl Engine {
    }
 
    /// The result as JSON when it has a JSON form, else as `String(result)`.
+   /// The prompt sees a `plumage` object of its own, named "console".
    pub fn evaluate(&self, code: &str) -> Result<String, Error> {
-      self.context.with(|ctx| {
+      let result = self.context.with(|ctx| {
          let run = || -> rquickjs::Result<String> {
+            if !ctx.globals().contains_key("plumage")? {
+               ctx.globals().set("plumage", api(&ctx, "console")?)?;
+            }
             let result = ctx.eval::<Value<'_>, _>(code)?;
             if let Some(text) = result.as_string() {
                return text.to_string();
@@ -390,13 +400,15 @@ impl Engine {
             }
          };
          run().catch(&ctx).map_err(js_error)
-      })
+      });
+      drain(&self.runtime);
+      result
    }
 
    /// Runs the `before` hooks for `event`. Each sees the previous hook's
    /// payload.
    pub fn before(&self, event: EventId, name: &str, json: &str) -> Result<Before, Error> {
-      self.context.with(|ctx| {
+      let result = self.context.with(|ctx| {
          let hooks = registered(&ctx, event, |hook| hook.before.as_ref());
          if hooks.is_empty() {
             return Ok(Before::Keep);
@@ -418,11 +430,13 @@ impl Engine {
          Ok(Before::Replace(
             json.to_string().map_err(|err| Error::Js(err.to_string()))?,
          ))
-      })
+      });
+      drain(&self.runtime);
+      result
    }
 
    pub fn after(&self, event: EventId, name: &str, json: &str, ok: bool) -> Result<(), Error> {
-      self.context.with(|ctx| {
+      let result = self.context.with(|ctx| {
          let hooks = registered(&ctx, event, |hook| hook.after.as_ref());
          if hooks.is_empty() {
             return Ok(());
@@ -434,8 +448,69 @@ impl Engine {
             }
          }
          Ok(())
-      })
+      });
+      drain(&self.runtime);
+      result
    }
+
+   /// Resolves fetch `id` with `result` and runs what awaited it.
+   #[cfg(target_os = "android")]
+   pub fn settle(&self, id: u64, result: Result<fetch::Response, fetch::FetchError>) {
+      self.context.with(|ctx| {
+         let Some((resolve, reject)) = ctx
+            .userdata::<Registry<'_>>()
+            .and_then(|registry| registry.fetches.borrow_mut().remove(&id))
+         else {
+            return;
+         };
+         let outcome = match result {
+            Ok(response) => {
+               response_object(&ctx, &response).and_then(|object| resolve.call::<_, ()>((object,)))
+            },
+            Err(err) => {
+               Exception::from_message(ctx.clone(), &err.to_string())
+                  .and_then(|exception| reject.call::<_, ()>((exception,)))
+            },
+         };
+         if let Err(err) = outcome.catch(&ctx) {
+            log::error!("fetch {id}: {err}");
+         }
+      });
+      drain(&self.runtime);
+   }
+}
+
+/// Runs promise reactions until none are left. `QuickJS` queues them, and
+/// nothing else runs the queue.
+fn drain(runtime: &Runtime) {
+   loop {
+      match runtime.execute_pending_job() {
+         Ok(true) => {},
+         Ok(false) => break,
+         Err(err) => log::error!("a promise job threw: {err}"),
+      }
+   }
+}
+
+/// `{status, ok, text(), json()}`, a subset of the web's `Response`.
+#[cfg(target_os = "android")]
+fn response_object<'js>(
+   ctx: &Ctx<'js>,
+   response: &fetch::Response,
+) -> rquickjs::Result<Object<'js>> {
+   let object = Object::new(ctx.clone())?;
+   object.set("status", response.status)?;
+   object.set("ok", (200..300).contains(&response.status))?;
+   let text = String::from_utf8_lossy(&response.body).into_owned();
+   let json_text = text.clone();
+   object.set("text", Function::new(ctx.clone(), move || text.clone())?)?;
+   object.set(
+      "json",
+      Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
+         ctx.json_parse(json_text.clone())
+      })?,
+   )?;
+   Ok(object)
 }
 
 /// Snapshot of one phase's callbacks, so a callback that registers a hook does
@@ -485,6 +560,8 @@ fn registry<'js>(ctx: &Ctx<'js>, events: &GatewayRegistry) -> rquickjs::Result<R
       hooks: RefCell::default(),
       defined: RefCell::default(),
       chosen: RefCell::default(),
+      #[cfg(target_os = "android")]
+      fetches: RefCell::default(),
    })
 }
 
@@ -621,7 +698,63 @@ fn api<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
       })?,
    )?;
    api.set("settings", settings)?;
+   #[cfg(target_os = "android")]
+   api.set(
+      "fetch",
+      Function::new(
+         ctx.clone(),
+         |ctx: Ctx<'js>, url: String, init: rquickjs::function::Opt<Object<'js>>| {
+            start_fetch(&ctx, url, init.0)
+         },
+      )?,
+   )?;
    Ok(api)
+}
+
+/// Sends the request on its own thread, so neither the gateway nor the UI
+/// waits on the network, and returns a promise that settles when it answers.
+#[cfg(target_os = "android")]
+fn start_fetch<'js>(
+   ctx: &Ctx<'js>,
+   url: String,
+   init: Option<Object<'js>>,
+) -> rquickjs::Result<rquickjs::Promise<'js>> {
+   static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+   let mut request = fetch::Request {
+      url,
+      method: "GET".to_owned(),
+      headers: Vec::new(),
+      body: None,
+   };
+   if let Some(init) = init {
+      if let Some(method) = init.get::<_, Option<String>>("method")? {
+         request.method = method.to_ascii_uppercase();
+      }
+      if let Some(headers) = init.get::<_, Option<Object<'js>>>("headers")? {
+         request.headers = headers
+            .props::<String, String>()
+            .collect::<rquickjs::Result<_>>()?;
+      }
+      request.body = init
+         .get::<_, Option<String>>("body")?
+         .map(String::into_bytes);
+   }
+
+   let (promise, resolve, reject) = ctx.promise()?;
+   let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+   ctx.userdata::<Registry<'js>>()
+      .ok_or_else(|| Exception::throw_internal(ctx, "no registry"))?
+      .fetches
+      .borrow_mut()
+      .insert(id, (resolve, reject));
+   std::thread::spawn(move || {
+      let result = fetch::send(&request);
+      if let Some(engine) = crate::engine() {
+         engine.settle(id, result);
+      }
+   });
+   Ok(promise)
 }
 
 /// Records `schema` as the plugin's settings and returns an object with one

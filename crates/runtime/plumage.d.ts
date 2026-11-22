@@ -932,6 +932,21 @@ declare namespace Plumage {
     readonly log: Log;
     readonly storage: Storage;
     readonly settings: Settings;
+    /// HTTP through Android's own stack, off the gateway and UI threads. Bodies over 8 MiB fail.
+    fetch(url: string, init?: FetchInit): Promise<FetchResponse>;
+  }
+
+  interface FetchInit {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+  }
+
+  interface FetchResponse {
+    readonly status: number;
+    readonly ok: boolean;
+    text(): string;
+    json<T = unknown>(): T;
   }
 }
 
