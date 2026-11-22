@@ -1,0 +1,5 @@
+*.apk
+/target
+/result
+node_modules
+/plugins/*/dist
