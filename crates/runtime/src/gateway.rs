@@ -1,38 +1,32 @@
 use std::{
    cell::Cell,
-   collections::HashMap,
    ffi::c_void,
    panic::{
       self,
       AssertUnwindSafe,
    },
-   ptr::{
-      self,
-      NonNull,
-   },
    slice,
    str,
-   sync::atomic::{
-      AtomicPtr,
-      Ordering,
+   sync::{
+      OnceLock,
+      atomic::{
+         AtomicBool,
+         Ordering,
+      },
    },
-   thread,
 };
 
-use plumage_hook::{
-   Hook,
-   Inline,
-};
+use plumage_hook::Image;
 use plumage_sigs::{
    Abi,
-   Build,
    EventId,
+   GATEWAY_HANDLER_FIELD,
    GatewayEvent,
    GatewayHandler,
+   GatewayRegistry,
    HandlerResult,
    RawStr,
 };
-use seq_macro::seq;
 
 use crate::{
    Error,
@@ -43,39 +37,15 @@ use crate::{
 
 type HandlerFn = <GatewayHandler as Abi>::Fn;
 
-struct Slot {
-   detour:   HandlerFn,
-   original: AtomicPtr<c_void>,
+/// The registry's original handlers, in [`GatewayRegistry::iter`] order, and
+/// which events a plugin listens to.
+struct Gateway {
+   registry:  GatewayRegistry,
+   originals: Vec<HandlerFn>,
+   hooked:    Vec<AtomicBool>,
 }
 
-impl Slot {
-   const fn new(detour: HandlerFn) -> Self {
-      Self {
-         detour,
-         original: AtomicPtr::new(ptr::null_mut()),
-      }
-   }
-
-   /// Waits out the window between `Inline::attach` returning and the
-   /// trampoline being stored, since the hook is live as soon as it attaches.
-   fn original(&self) -> HandlerFn {
-      loop {
-         let original = self.original.load(Ordering::Acquire);
-         if !original.is_null() {
-            // SAFETY: the backend returned a trampoline with the handler's ABI.
-            break unsafe { std::mem::transmute::<*mut c_void, HandlerFn>(original) };
-         }
-         thread::yield_now();
-      }
-   }
-}
-
-/// Phoenix routes several events through one handler (`MESSAGE_DELETE` and
-/// `MESSAGE_DELETE_BULK`), so every hooked handler needs a detour that knows
-/// its own original.
-static SLOTS: [Slot; 32] = seq!(N in 0..32 {
-   [#(Slot::new(detour::<N>),)*]
-});
+static GATEWAY: OnceLock<Gateway> = OnceLock::new();
 
 thread_local! {
    #[allow(
@@ -85,101 +55,111 @@ thread_local! {
    static IN_JS: Cell<bool> = const { Cell::new(false) };
 }
 
-#[derive(Default)]
-pub struct Installed {
-   by_event: HashMap<EventId, usize>,
-   by_addr:  HashMap<usize, usize>,
-   hooks:    Vec<Inline>,
+/// Points every registry entry at [`detour`]. Phoenix looks handlers up in the
+/// registry on each dispatch, so a pointer swap catches every event without
+/// patching code, and events no plugin listens to cost one atomic load.
+pub fn swap(image: &Image<'static>, registry: GatewayRegistry) -> Result<&'static GatewayRegistry, Error> {
+   let writes = registry
+      .iter()
+      .map(|(_, entry)| (entry.slot + GATEWAY_HANDLER_FIELD, detour as *const () as usize))
+      .collect::<Vec<(usize, usize)>>();
+   let originals = registry
+      .iter()
+      // SAFETY: the registry walk only accepts entries whose handler starts a
+      // function, and every registry handler has this ABI.
+      .map(|(_, entry)| unsafe { std::mem::transmute::<usize, HandlerFn>(entry.handler) })
+      .collect();
+   let hooked = registry.iter().map(|_| AtomicBool::new(false)).collect();
+
+   GATEWAY
+      .set(Gateway { registry, originals, hooked })
+      .map_err(|_| Error::AlreadyStarted)?;
+   let gateway = GATEWAY.get().expect("GATEWAY was set above");
+
+   // SAFETY: the slots are the handler fields of registry entries in `image`,
+   // and the host has not started dispatching while its constructors are
+   // pending.
+   let previous = unsafe { image.swap_words(&writes) }?;
+   for ((_, entry), found) in gateway.registry.iter().zip(previous) {
+      if found != entry.handler {
+         return Err(
+            plumage_sigs::Error::Conflict {
+               sig:      entry.name.clone(),
+               anchor:   "registry swap".into(),
+               expected: entry.handler,
+               found,
+            }
+            .into(),
+         );
+      }
+   }
+   Ok(&gateway.registry)
 }
 
-/// Hooks the handler for `event` unless it is already hooked.
-#[expect(
-   clippy::significant_drop_tightening,
-   reason = "the lock spans resolve and attach so two plugins cannot hook one handler twice"
-)]
-pub fn install(state: &State, event: EventId) -> Result<(), Error> {
-   let mut installed = state
-      .gateway
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner);
-   if installed.by_event.contains_key(&event) {
-      return Ok(());
-   }
+/// Checks the build table's rules against the registry walk. Code patterns
+/// scan all of `.text`, about 0.4 s each on Phoenix, so this runs off the
+/// host's startup path. Table anchors read the pointers [`swap`] already
+/// replaced and stop matching, so only code anchors count here.
+pub fn verify(state: &State) {
+   let gateway = GATEWAY.get().expect("start swaps the registry before verifying");
+   for rule in state.build.map_or(&[][..], |build| build.gateway) {
+      let Some(entry) = gateway.registry.id(&rule.sig.name).map(|id| gateway.registry.entry(id)) else {
+         log::warn!("{}: no such event in the registry", rule.sig.name);
+         continue;
+      };
 
-   let entry = state.registry.entry(event);
-   let name = &entry.name;
-   let sig = Build::gateway_sig(state.build, name);
-   let located = sig.resolve(&state.image)?;
-   let anchor = &sig.anchors[located.anchor];
-   if located.addr != entry.handler {
-      return Err(
-         plumage_sigs::Error::Conflict {
-            sig:      name.clone(),
-            anchor:   "registry walk".into(),
-            expected: located.addr,
-            found:    entry.handler,
-         }
-         .into(),
-      );
+      match rule.sig.resolve(&state.image) {
+         Ok(located) if located.addr == entry.handler => {
+            log::info!(
+               "{} at {:#x}, {}/{} anchors agree with the registry",
+               entry.name,
+               located.addr,
+               located.agreeing,
+               rule.sig.anchors.len(),
+            );
+         },
+         Ok(located) => {
+            log::error!(
+               "{}: the table rule found {:#x}, the registry holds {:#x}",
+               entry.name,
+               located.addr,
+               entry.handler,
+            );
+         },
+         Err(err) => log::error!("{err}"),
+      }
    }
-   if let Some(&slot) = installed.by_addr.get(&located.addr) {
-      log::info!(
-         "{name} shares the handler at {:#x} with slot {slot}",
-         located.addr
-      );
-      installed.by_event.insert(event, slot);
-      return Ok(());
-   }
-
-   let index = installed.hooks.len();
-   let slot = SLOTS.get(index).ok_or(Error::OutOfSlots(SLOTS.len()))?;
-   let target = NonNull::new(located.addr as *mut c_void).expect("resolved addresses are non-null");
-   let detour = NonNull::new(slot.detour as *mut c_void).expect("function pointers are non-null");
-   // SAFETY: the rule resolved to a gateway handler entry, and every detour has
-   // its ABI.
-   let hook = unsafe { Inline::attach(target, detour) }?;
-   slot
-      .original
-      .store(hook.original().as_ptr(), Ordering::Release);
-   log::info!(
-      "hooked {name} at {:#x} (image offset {:#x}) via `{anchor}`, {}/{} anchors agree",
-      located.addr,
-      located.addr
-         - state
-            .image
-            .segments
-            .first()
-            .map_or(0, |segment| segment.addr),
-      located.agreeing,
-      sig.anchors.len(),
-   );
-   installed.hooks.push(hook);
-   installed.by_addr.insert(located.addr, index);
-   installed.by_event.insert(event, index);
-   Ok(())
 }
 
-unsafe extern "C" fn detour<const SLOT: usize>(
+/// Routes `event` through the plugins.
+pub fn install(event: EventId) {
+   let gateway = GATEWAY.get().expect("start swaps the registry before plugins load");
+   if !gateway.hooked[event.index()].swap(true, Ordering::AcqRel) {
+      log::info!("hooked {}", gateway.registry.entry(event).name);
+   }
+}
+
+unsafe extern "C" fn detour(
    store: *mut c_void,
    event: *const GatewayEvent,
    ctx: *mut c_void,
 ) -> HandlerResult {
-   let original = SLOTS[SLOT].original();
-   // SAFETY: the target passes a live event for the duration of the call.
+   let gateway = GATEWAY.get().expect("slots point here only after GATEWAY is set");
+   // SAFETY: the host passes a live event for the duration of the call.
    let event = unsafe { &*event };
-   // SAFETY: as above, forwarded to the original unchanged or with replaced
-   // data.
+   // SAFETY: name and data are borrowed strings that outlive the call.
+   let (name, data) = unsafe { (text(event.name), text(event.data)) };
+   let Some((id, name)) = name.and_then(|name| Some((gateway.registry.id(name)?, name))) else {
+      log::error!("gateway event without a registry entry, dropped");
+      return HandlerResult::OK;
+   };
+   let original = gateway.originals[id.index()];
+   // SAFETY: forwarded to the registry's own handler unchanged or with
+   // replaced data.
    let call = |event: &GatewayEvent| unsafe { original(store, event, ctx) };
 
-   let (Some(state), false) = (STATE.get(), IN_JS.get()) else {
-      return call(event);
-   };
-   // SAFETY: name and data are borrowed strings that outlive the call.
-   let (Some(name), Some(data)) = (unsafe { text(event.name) }, unsafe { text(event.data) }) else {
-      return call(event);
-   };
-
-   let Some(id) = state.registry.id(name) else {
+   let listened = gateway.hooked[id.index()].load(Ordering::Acquire);
+   let (true, Some(state), Some(data), false) = (listened, STATE.get(), data, IN_JS.get()) else {
       return call(event);
    };
    let before = run_js(state, |engine| engine.before(id, name, data)).unwrap_or(Before::Keep);

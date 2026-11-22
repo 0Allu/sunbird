@@ -2,8 +2,8 @@
 //!
 //! [`start`] picks the target library among the loaded images, boots `QuickJS`
 //! with the `plumage` API, and evaluates every bundle in `<home>/plugins`.
-//! Plugins register gateway hooks, which resolve a [`plumage_sigs::Sig`]
-//! against the target and attach an inline hook.
+//! Every gateway registry entry points at plumage's detour from the start, and
+//! a plugin's hook turns its event on.
 
 use std::{
    path::{
@@ -44,17 +44,13 @@ pub enum Error {
    Sig(#[from] plumage_sigs::Error),
    #[error(transparent)]
    Hook(#[from] plumage_hook::Error),
-   #[error("all {0} gateway detour slots are in use")]
-   OutOfSlots(usize),
 }
 
 struct State {
    image:    Image<'static>,
    build:    Option<&'static Build>,
-   registry: GatewayRegistry,
    home:     PathBuf,
    js:       Mutex<js::Engine>,
-   gateway:  Mutex<gateway::Installed>,
 }
 
 static STATE: OnceLock<State> = OnceLock::new();
@@ -93,20 +89,20 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    }
    .ok_or(Error::NoTarget)?;
    let build = image.build_id.and_then(Build::find);
-   let registry = GatewayRegistry::locate(&image)?;
-   log::info!("gateway registry: {} events", registry.iter().count());
+   let walked = GatewayRegistry::locate(&image)?;
+   log::info!("gateway registry: {} events", walked.iter().count());
 
-   let engine = js::Engine::new(&registry)?;
+   let registry = gateway::swap(&image, walked)?;
+   let engine = js::Engine::new(registry)?;
    let state = State {
       image,
       build,
-      registry,
       home,
       js: Mutex::new(engine),
-      gateway: Mutex::new(gateway::Installed::default()),
    };
    STATE.set(state).map_err(|_| Error::AlreadyStarted)?;
    let state = STATE.get().expect("STATE was set above");
+   std::thread::spawn(|| gateway::verify(state));
 
    let plugins = js::load_plugins(state, bundled)?;
    Ok(Started {

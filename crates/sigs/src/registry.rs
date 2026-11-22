@@ -17,6 +17,14 @@ const MAX_NAME: usize = 64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EventId(usize);
 
+impl EventId {
+   /// Position in [`GatewayRegistry::iter`] order.
+   #[must_use]
+   pub const fn index(self) -> usize {
+      self.0
+   }
+}
+
 #[derive(Clone, Debug)]
 pub struct GatewayEntry {
    pub name:    String,

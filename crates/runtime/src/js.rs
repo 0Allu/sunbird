@@ -226,7 +226,7 @@ fn register<'js>(
       .find(|(_, handle)| handle.as_value() == sig)
       .map(|(event, _)| *event)
       .ok_or_else(|| Exception::throw_type(ctx, "expected a hook point from plumage.gateway"))?;
-   gateway::install(state(), event).map_err(|err| throw(ctx, &err))?;
+   gateway::install(event);
    registry
       .hooks
       .borrow_mut()
