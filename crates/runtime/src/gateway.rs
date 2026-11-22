@@ -197,6 +197,11 @@ pub fn dispatch(event: EventId, data: &str) -> Option<bool> {
    Some(result.is_ok())
 }
 
+/// The live registry entry named `name`, like `MESSAGE_CREATE`.
+pub fn event(name: &str) -> Option<EventId> {
+   GATEWAY.get()?.registry.id(name)
+}
+
 /// Runs `data` through Phoenix's own handler for `event` ahead of the next
 /// event Phoenix handles.
 pub fn enqueue(event: EventId, data: String) {

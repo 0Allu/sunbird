@@ -29,6 +29,7 @@ pub mod console;
 #[cfg(target_os = "android")] mod fetch;
 mod gateway;
 mod js;
+mod local;
 #[cfg(target_os = "android")] mod jvm;
 #[cfg(target_os = "android")] mod settings;
 #[cfg(target_os = "android")] mod store;

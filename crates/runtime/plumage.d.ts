@@ -932,6 +932,7 @@ declare namespace Plumage {
     /// Like `dispatch`, for use outside a gateway hook. The payload reaches the client's handler
     /// just before the next gateway event it handles, usually well under a second later.
     enqueue<P>(sig: Sig<P>, payload: Partial<P>): void;
+    readonly messages: Messages;
     readonly log: Log;
     readonly storage: Storage;
     readonly settings: Settings;
@@ -955,6 +956,22 @@ declare namespace Plumage {
     post(path: string, body?: string | object, init?: FetchInit): Promise<FetchResponse>;
     put(path: string, body?: string | object, init?: FetchInit): Promise<FetchResponse>;
     patch(path: string, body?: string | object, init?: FetchInit): Promise<FetchResponse>;
+  }
+
+  interface LocalOptions {
+    /// Shown as the sender, "Plumage" by default.
+    author?: string;
+    guildId?: string;
+    embeds?: Embed[];
+  }
+
+  /// Messages shown only on this device. Nothing reaches Discord, and they land just before the
+  /// next gateway event Phoenix handles.
+  interface Messages {
+    /// Returns the new message's id.
+    addLocal(channelId: string, content: string, options?: LocalOptions): string;
+    updateLocal(message: Partial<Message> & { id: string; channel_id: string }): boolean;
+    deleteLocal(channelId: string, id: string): boolean;
   }
 
   interface Stores {
