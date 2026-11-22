@@ -1,5 +1,6 @@
 //! Native side of the plugin host: loaded modules, signature scans, the gateway registry hooks
 //! and the JNI bridge. Everything that touches Phoenix or ART goes through here.
+pub mod inline;
 pub mod jni;
 pub mod module;
 pub mod registry;

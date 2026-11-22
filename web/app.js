@@ -85,10 +85,12 @@ async function patchAndOffer(vc, base, abi, configs, abiName) {
   s.progress(0.5, 'working…');
   const packageName = chosenPackage(), side = packageName !== 'com.discord';
   const pluginLib = plugins.length ? new Uint8Array(await (await fetch(ABIS[abiName].pluginLib)).arrayBuffer()) : null;
+  const nothingUrl = plugins.length && ABIS[abiName].shadowhookNothing;
+  const shadowhookNothing = nothingUrl ? new Uint8Array(await (await fetch(nothingUrl)).arrayBuffer()) : null;
   const pluginSources = Object.fromEntries(await Promise.all(PLUGINS.filter((p) => p.js && plugins.includes(p.id))
     .map(async (p) => [p.id, await (await fetch(p.js)).text()])));
   const userScripts = plugins.includes('jsPlugins') ? await jsInput() : [];
-  const parts = await buildPatchedApk({ base, abi, configs, identity: await identity(), packageName, label: side ? 'Discord Phoenix' : null, plugins, pluginLib, pluginSources, userScripts, frida, log });
+  const parts = await buildPatchedApk({ base, abi, configs, identity: await identity(), packageName, label: side ? 'Discord Phoenix' : null, plugins, pluginLib, shadowhookNothing, pluginSources, userScripts, frida, log });
   const blob = new Blob(parts, { type: 'application/vnd.android.package-archive' });
   s.done(mb(blob.size));
   $('note-side').hidden = !side; $('note-replace').hidden = side;

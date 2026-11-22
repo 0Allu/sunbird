@@ -1,0 +1,6 @@
+ShadowHook 2.0.1 (https://github.com/bytedance/android-inline-hook, MIT; xdl MIT, lss BSD-3, bsd/*.h BSD).
+Only the arm64 sources; sh_jni.c is left out (it defines JNI_OnLoad). Built by hook/build.rs for aarch64 only.
+nothing/sh_nothing.c becomes libshadowhook_nothing.so (plugin/build.sh): ShadowHook dlopens it at init to learn the
+linker's soinfo layout, so the patcher ships it next to libplg.so on arm64.
+Patched: the three __attribute__((constructor)) in bytesig.c, sh_errno.c, sh_linker.c get priority 101, so they run
+before libplg's own constructor (which starts plugins that may intercept right away).

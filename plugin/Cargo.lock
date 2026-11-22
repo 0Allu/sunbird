@@ -51,6 +51,7 @@ dependencies = [
 name = "hook"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "jni-sys 0.3.1",
  "memchr",
 ]

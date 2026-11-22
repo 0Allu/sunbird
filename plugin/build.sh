@@ -20,5 +20,7 @@ for t in aarch64:arm64 x86_64:x86_64; do
       "CARGO_TARGET_${T}_LINKER=$(win "$BIN/clang$ext")" "CARGO_TARGET_${T}_RUSTFLAGS=-Clink-arg=--target=${triple}28" \
       cargo ${TOOLCHAIN:-} build --release --target "$triple" -p loader
   cp "target/$triple/release/libplg.so" "../web/plugins/libplg-$abi.so"
+  # ShadowHook dlopens this empty library at init (arm64 only, like ShadowHook itself)
+  [ "$abi" = arm64 ] && "$cc" -shared -Oz -nostdlib -Wl,-soname,libshadowhook_nothing.so -Wl,--build-id=none     -Wl,-z,max-page-size=16384 -o ../web/plugins/libshadowhook_nothing-arm64.so hook/shadowhook/nothing/sh_nothing.c
 done
-ls -l ../web/plugins/libplg-*.so
+ls -l ../web/plugins/libplg-*.so ../web/plugins/libshadowhook_nothing-*.so

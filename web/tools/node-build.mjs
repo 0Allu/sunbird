@@ -29,6 +29,7 @@ const pluginSources = Object.fromEntries(PLUGINS.filter((p) => p.js && enabled.i
 // --plugins jsPlugins: --js files become your own plugins (id = file name)
 const userScripts = (opt.js ?? '').split(',').filter(Boolean).map((f) => ({ id: basename(f).replace(/\.js$/i, '').replace(/[^\w-]+/g, '-'), source: readFileSync(f, 'utf8') }));
 const parts = await buildPatchedApk({ base: read(base), abi: abiSplit, configs: configs.map(read), identity, packageName: opt.package, label: opt.label,
-  plugins: enabled, pluginSources, userScripts, pluginLib: opt.plugins ? new Uint8Array(readFileSync(new URL('../' + ABIS[abiName].pluginLib, import.meta.url))) : null, frida, log: (s) => console.log(s) });
+  plugins: enabled, pluginSources, userScripts,
+  shadowhookNothing: opt.plugins && ABIS[abiName].shadowhookNothing ? new Uint8Array(readFileSync(new URL('../' + ABIS[abiName].shadowhookNothing, import.meta.url))) : null, pluginLib: opt.plugins ? new Uint8Array(readFileSync(new URL('../' + ABIS[abiName].pluginLib, import.meta.url))) : null, frida, log: (s) => console.log(s) });
 writeFileSync(out, Buffer.concat(parts.map((p) => Buffer.from(p.buffer, p.byteOffset, p.byteLength))));
 console.log(`wrote ${out} in ${Date.now() - t} ms`);

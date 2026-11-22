@@ -5,6 +5,7 @@
 //! listeners on whichever thread crosses the JNI bridge, everything else (observe, timers,
 //! fetch callbacks, promise jobs) on the "phoenix-js" thread. One runtime lock serialises them.
 mod fetch;
+mod native;
 
 use hook::registry::{self, Action};
 use hook::{info, log, ERROR};
@@ -57,7 +58,7 @@ thread_local! { static IN_JS: Cell<bool> = const { Cell::new(false) }; }
 /// Runs f inside the context, then drains promise jobs. None when this thread is already inside
 /// JS (a JS call led back into a hook, e.g. phoenix.dispatch -> handler -> JNI bridge): the
 /// runtime lock is not recursive, so the nested hook passes through untouched.
-fn with<R>(f: impl FnOnce(Ctx) -> R) -> Option<R> {
+pub(crate) fn with<R>(f: impl FnOnce(Ctx) -> R) -> Option<R> {
     let js = JS.get()?;
     if IN_JS.with(|c| c.replace(true)) { return None; }
     let r = js.cx.with(|ctx| {
@@ -69,7 +70,7 @@ fn with<R>(f: impl FnOnce(Ctx) -> R) -> Option<R> {
     Some(r)
 }
 
-fn call<'js, R: rquickjs::FromJs<'js>>(ctx: &Ctx<'js>, name: &str, args: impl rquickjs::function::IntoArgs<'js>) -> Option<R> {
+pub(crate) fn call<'js, R: rquickjs::FromJs<'js>>(ctx: &Ctx<'js>, name: &str, args: impl rquickjs::function::IntoArgs<'js>) -> Option<R> {
     let f: Function = ctx.globals().get(name).ok()?;
     f.call(args).catch(ctx).map_err(|e| log(ERROR, &format!("{name}: {e}"))).ok()
 }
@@ -138,6 +139,7 @@ fn install(ctx: &Ctx) -> rquickjs::Result<()> {
     }))?;
     f(&p, "bridgeListen", Function::new(ctx.clone(), |k: usize, d: i32| hook::jni::listen(k, d)))?;
     p.set("events", registry::names())?;
+    native::install(ctx, &p)?;
     ctx.globals().set("__phx", p)?;
     ctx.eval::<(), _>(PRELUDE)?;
     for (name, src) in MODULES {

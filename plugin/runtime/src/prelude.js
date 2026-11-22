@@ -51,6 +51,34 @@ globalThis.__phx_bridge = (k, a, b) => { let cur = k === 2 ? b : a, changed = fa
 const brOn = (k, id, fn) => { fn.__plugin = id; BR[k].push(fn); P.bridgeListen(k, 1);
   return () => { const i = BR[k].indexOf(fn); if (i >= 0) { BR[k].splice(i, 1); P.bridgeListen(k, -1); } }; };
 
+// Inline hooks: ShadowHook calls __phx_intercept(id, x0..x30, sp, pc) on the hooking thread;
+// the callback may change ctx.x[i] (arguments at entry, x0 = result at a ret).
+const N = P.native, ICB = new Map(); let icbId = 0;
+globalThis.__phx_intercept = (id, regs, sp, pc) => {
+  const h = ICB.get(id);
+  if (!h) return;
+  const ctx = { x: regs.slice(), sp, pc };
+  try { h.fn(ctx); } catch (e) { console.error(`[${h.plugin}] intercept:`, e, e && e.stack); return; }
+  return ctx.x.some((v, i) => v !== regs[i]) ? ctx.x : undefined;
+};
+const nativeFor = (id) => ({
+  base: N.base, arch: N.arch, inlineHooks: N.inlineHooks,
+  /** host-lib offset (e.g. from scan) -> address */
+  at: (off) => N.base + BigInt(off),
+  scan: (pattern) => P.scan(pattern), sym: N.sym, moduleBase: N.moduleBase,
+  read: N.read, write: N.write, call: N.call,
+  readU64: (a) => new DataView(N.read(a, 8).buffer).getBigUint64(0, true),
+  readCString: (a, max = 4096) => { const b = N.read(a, max); const n = b.indexOf(0); return String.fromCharCode(...b.subarray(0, n < 0 ? b.length : n)); },
+  /** fn(ctx) before the function at `addr` runs (or before one instruction with {instruction: true}) */
+  intercept: (addr, fn, opts = {}) => {
+    const k = ++icbId;
+    ICB.set(k, { fn, plugin: id });
+    let stub;
+    try { stub = N.intercept(addr, k, !opts.instruction); } catch (e) { ICB.delete(k); throw e; }
+    return track(id, () => { if (ICB.delete(k)) N.unintercept(stub); });
+  },
+});
+
 // Plugins: id -> { id, name, description, source, enabled, error, unsubs, unload }
 const plugins = new Map();
 let cfg = { disabled: [] }; try { cfg = { disabled: [], ...JSON.parse(P.readFile('plugins.json') || '{}') }; } catch {}
@@ -67,7 +95,7 @@ const api = (id) => ({ id,
   // Live Phoenix stores via Phoenix's own serializers; store-thread only (inside phoenix.on).
   stores: { me: () => { const s = P.me(); return s == null ? null : JSON.parse(s); },
     raw: (ser, off) => { const s = P.storeJson(ser, off); return s == null ? null : JSON.parse(s); } },
-  native: { scan: (pattern) => P.scan(pattern) } });
+  native: nativeFor(id) });
 globalThis.phoenix = api('global');
 
 // "// Name: what it does" on the first line names the plugin in Settings.

@@ -76,14 +76,25 @@ Optional, ticked on the page. The patcher renames the host lib's `DT_NEEDED` `li
 |---|---|
 | `loader` | the cdylib. Its `.init_array` constructor checks the config block, hooks the registry, reads the plugin bundle out of the APK (`lib/<abi>/libplg.js.so`) and starts the runtime. |
 | `sigs` | the typed config block the patcher fills: host lib build ID (a different build runs without plugins), gateway registry anchor, store serializer offsets. |
-| `hook` | gateway registry hooks (handler swap, no inline hooks), the JNI bridge (ART table filters + `nativeDispatch`), module/dynsym helpers and an IDA-pattern scanner. |
+| `hook` | gateway registry hooks (handler swap), the JNI bridge (ART table filters + `nativeDispatch`), module/dynsym helpers, an IDA-pattern scanner, and inline hooks through ShadowHook 2.0.1 (`hook/shadowhook`, MIT, arm64 only; the patcher ships its `libshadowhook_nothing.so` next to libplg). |
 | `runtime` | rquickjs (QuickJS-ng). The `phoenix` API is typed in `runtime/phoenix.d.ts`; `plugins/example` is a TypeScript plugin bundled with esbuild. |
 
-JS plugins live in `files/phoenix-js/`; ones shipped in the APK are copied there and replace older copies.
+JS plugins live in `files/phoenix-js/`; ones shipped in the APK are copied there and replace older
+copies. Discord's **Settings** gets a **Phoenix** row at the top, opening a page with a switch per
+plugin (turned off = unloaded live, remembered), Reload and About. It is built from Phoenix's own row
+layouts and spliced into its UI-op stream (`plugin/runtime/src/settings.js`, format in
+`plugin/ui/FORMAT.md`).
+
+Plugin API (`phoenix`, typed in `plugin/runtime/phoenix.d.ts`): gateway events (`on` to change or
+drop them on Phoenix's store thread, `observe`), `dispatch`, `fetch`, `storage`, live stores via
+Phoenix's serializers (`stores`), the guest/host bridge (`bridge`) and `native`: `sym`, `read`/`write`
+(through the kernel, so a bad address throws instead of crashing), `call`, `scan`, and on arm64
+`intercept(addr, ctx => ...)` with x0-x30 as BigInts.
 
 - **MessageLogger** (`web/plugins/message-logger.js`): a JS plugin. Deleted messages stay, marked
   "(deleted)"; edits keep the earlier text under the new one.
-- **Frida (JS plugins)**: chains frida-gadget 17.27.4 (`libfrg.so`, wxWindows Library Licence)
+- **JS plugins (rquickjs)**: your own `.js` files, picked on the page and bundled into the APK.
+- **Frida gadget (advanced)**: chains frida-gadget 17.27.4 (`libfrg.so`, wxWindows Library Licence)
   in as libplg's dependency, in script mode, so the app starts without a PC. The bootstrap
   (`frida/bootstrap.js`, built into `web/plugins/frida-bootstrap.js` by `frida/build.sh`) runs
   the plugins from `files/phoenix-plugins/`; ones picked on the page are copied there on first

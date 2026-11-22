@@ -13,7 +13,7 @@ const V1_SIG = /^META-INF\/([^/]+\.(SF|RSA|DSA|EC)|MANIFEST\.MF)$/;
 const HOST = 'liblibdiscord_wasm_host.so';
 // Android ABI dir -> its config split, libplg.so build (plugin/build.sh) and host-lib patcher
 export const ABIS = {
-  'arm64-v8a': { split: 'config.arm64_v8a', pluginLib: 'plugins/libplg-arm64.so', patch: patchArm64, machine: 183 },
+  'arm64-v8a': { split: 'config.arm64_v8a', pluginLib: 'plugins/libplg-arm64.so', shadowhookNothing: 'plugins/libshadowhook_nothing-arm64.so', patch: patchArm64, machine: 183 },
   'x86_64': { split: 'config.x86_64', pluginLib: 'plugins/libplg-x86_64.so', patch: patchX86, machine: 62 },
 };
 /** ABI of a config split (the one whose lib/<abi>/ holds the host lib), or undefined. */
@@ -30,12 +30,13 @@ const SKIP = (n) => V1_SIG.test(n) || n === 'stamp-cert-sha256';
  * @param label                  launcher name, e.g. when renamed
  * @param plugins                plugin ids to enable (see plugins.js)
  * @param pluginLib              libplg.so for that ABI (needed when plugins are enabled)
+ * @param shadowhookNothing      arm64: libshadowhook_nothing.so (ShadowHook dlopens it at init)
  * @param pluginSources          {id: source} for the enabled JS plugins (PLUGINS[].js)
  * @param userScripts            [{id, source}] your own JS plugins (with 'jsPlugins')
  * @param frida                  {gadget, script} for the 'frida' plugin: frida-gadget .so for that ABI and the bundled JS (frida.js)
  * @returns {Promise<Uint8Array[]>} parts of the signed APK (new Blob(parts))
  */
-export async function buildPatchedApk({ base, abi, configs = [], identity, packageName = 'com.discord', label = null, plugins = [], pluginLib = null, pluginSources = {}, userScripts = [], frida = null, log = () => {} }) {
+export async function buildPatchedApk({ base, abi, configs = [], identity, packageName = 'com.discord', label = null, plugins = [], pluginLib = null, shadowhookNothing = null, pluginSources = {}, userScripts = [], frida = null, log = () => {} }) {
   if (plugins.length && !pluginLib) throw new Error('plugins need libplg.so');
   if (plugins.includes('frida') && !frida) throw new Error('the Frida plugin needs the gadget and a script');
   if (!/^[a-zA-Z][\w]*(\.[a-zA-Z][\w]*)+$/.test(packageName)) throw new Error(`invalid package name: ${packageName}`);
@@ -81,6 +82,7 @@ export async function buildPatchedApk({ base, abi, configs = [], identity, packa
       const plug = plugins.length ? configurePlugins(data, pluginLib, plugins, pluginSources, userScripts, log) : null;
       out.push({ ...e, raw: data, crc: crc32(data) });
       if (plug) out.push(storedEntry(`lib/${abiName}/libplg.so`, plug.lib));
+      if (plug && shadowhookNothing) out.push(storedEntry(`lib/${abiName}/libshadowhook_nothing.so`, shadowhookNothing));
       if (plug?.bundle) out.push(storedEntry(`lib/${abiName}/libplg.js.so`, plug.bundle)); // read from the APK by libplg
       if (plug && plugins.includes('frida')) {
         for (const [n, d] of fridaFiles(frida.gadget, frida.script, abiName)) out.push(storedEntry(n, d));
