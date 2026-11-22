@@ -9,6 +9,9 @@ use crate::{
 
 /// Every Phoenix build has this event, so its entry seeds the walk.
 const SEED: &str = "MESSAGE_CREATE";
+/// Seeds the walk over the reducers behind the exported
+/// `LIBDISCORD_REDUCERS_TABLE`, whose per-domain slices sit back to back.
+const DOMAIN_SEED: &str = "READY_SUPPLEMENTAL";
 const STRIDE: usize = 3 * size_of::<usize>();
 const MAX_NAME: usize = 64;
 
@@ -35,6 +38,9 @@ pub struct GatewayEntry {
 /// The target's gateway registry, a contiguous array of `{name ptr, name len,
 /// handler}`, walked out from the [`SEED`] entry in both directions until an
 /// entry stops looking like one.
+///
+/// The domain reducers, found from [`DOMAIN_SEED`] the same way, follow when
+/// the target has them.
 pub struct GatewayRegistry {
    entries: Vec<GatewayEntry>,
    by_name: HashMap<String, EventId>,
@@ -42,36 +48,19 @@ pub struct GatewayRegistry {
 
 impl GatewayRegistry {
    pub fn locate(image: &Image<'_>) -> Result<Self, Error> {
-      let mut seeds = table_entries(image, SEED, GATEWAY_HANDLER_FIELD);
-      seeds.sort_unstable();
-      seeds.dedup();
-      let seed = match seeds[..] {
-         [(slot, _)] => slot,
-         [] => {
-            return Err(Error::NotFound {
-               sig: "gateway registry".into(),
-            });
+      let mut entries = walk(image, SEED)?;
+      match walk(image, DOMAIN_SEED) {
+         Ok(domain) => {
+            let main = entries.len();
+            for entry in domain {
+               if !entries[..main].iter().any(|known| known.name == entry.name) {
+                  entries.push(entry);
+               }
+            }
          },
-         _ => {
-            return Err(Error::Ambiguous {
-               sig:    "gateway registry".into(),
-               anchor: format!("table {SEED:?}"),
-               hits:   seeds.iter().map(|(slot, _)| *slot).collect(),
-            });
-         },
-      };
-
-      let mut first = seed;
-      while let Some(previous) = first.checked_sub(STRIDE)
-         && entry(image, previous).is_some()
-      {
-         first = previous;
+         Err(Error::NotFound { .. }) => {},
+         Err(err) => return Err(err),
       }
-
-      let entries = (0..)
-         .map(|index| first + index * STRIDE)
-         .map_while(|slot| entry(image, slot))
-         .collect::<Vec<GatewayEntry>>();
 
       let by_name = entries
          .iter()
@@ -123,4 +112,37 @@ fn entry(image: &Image<'_>, slot: usize) -> Option<GatewayEntry> {
       slot,
       handler,
    })
+}
+
+fn walk(image: &Image<'_>, seed: &str) -> Result<Vec<GatewayEntry>, Error> {
+   let mut seeds = table_entries(image, seed, GATEWAY_HANDLER_FIELD);
+   seeds.sort_unstable();
+   seeds.dedup();
+   let start = match seeds[..] {
+      [(slot, _)] => slot,
+      [] => {
+         return Err(Error::NotFound {
+            sig: format!("gateway table holding {seed}"),
+         });
+      },
+      _ => {
+         return Err(Error::Ambiguous {
+            sig:    format!("gateway table holding {seed}"),
+            anchor: format!("table {seed:?}"),
+            hits:   seeds.iter().map(|(slot, _)| *slot).collect(),
+         });
+      },
+   };
+
+   let mut first = start;
+   while let Some(previous) = first.checked_sub(STRIDE)
+      && entry(image, previous).is_some()
+   {
+      first = previous;
+   }
+
+   Ok((0..)
+      .map(|index| first + index * STRIDE)
+      .map_while(|slot| entry(image, slot))
+      .collect())
 }
