@@ -1,6 +1,7 @@
 [workspace]
 members  = [
   "crates/hook",
+  "crates/loader",
   "crates/runtime",
   "crates/sigs",
   "crates/sigscan",
