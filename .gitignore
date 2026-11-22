@@ -4,3 +4,4 @@ out/
 *.dex
 *.jks
 *.png
+__pycache__/

@@ -1,21 +1,52 @@
 # phoenix-unlock
 
-Makes Discord's Phoenix client (the native Rust client in Discord Android **356.7 Alpha,
-versionCode 356207, x86_64**) usable on an account without Phoenix access, and turns on
-its staff-only settings (DevTools, Experiment Overrides).
+Makes Discord's Phoenix client usable on an account without Phoenix access, and turns on
+its staff-only settings (DevTools, Experiment Overrides). Phoenix is the native Rust client
+in Discord Android alpha builds.
 
-It is an add-on to the Valenced Xposed module: a small Java hook plus a native payload
-that patches `liblibdiscord_wasm_host.so` in memory. Offsets apply to this exact build
-only. The payload checks the original bytes first and skips any patch that doesn't match.
+There are two ways to apply it:
 
-## Patches
+1. **APK patcher (`patcher/`)**: no root and no Xposed. It patches the Discord split APKs
+   directly and re-signs them. Targets are found by anchors (strings and code shape), not
+   fixed offsets, so after a Discord update you just run it again. Supports arm64 and
+   x86_64.
+2. **Xposed module (`native/`, `java/`)**: patches the library in memory at runtime, with
+   offsets hardcoded for 356207 x86_64. Used for WSA with LSPosed.
+
+## APK patcher
+
+Requirements: Python 3 with `capstone` and `numpy`, Android build-tools (zipalign and
+apksigner), and the NDK (clang and lld, used to assemble the staff hook).
+
+```sh
+# splits from https://tracker.vendetta.rocks/tracker/download/<versionCode>/<split>
+python patcher/patch.py --ks key.jks --pass PASS --out out     base.apk config.arm64_v8a.apk config.xxhdpi.apk config.en.apk
+adb uninstall com.discord            # the signature differs from the Play build
+adb install-multiple out/*.apk
+```
+
+What it patches:
+
+| target | how it is found | patch |
+|---|---|---|
+| `PhoenixLaunch.i` (dex) | the only method containing the string "Phoenix didn't stay up for 3 launches"; must return `Z` | `const/4 v0,1; return v0`, then the dex checksum and SHA-1 are fixed |
+| access evaluator (`.so`) | the only function that references the experiment table whose first entry is `{"2026-11-phoenix-app-access", 26}` | `return Some(true)` |
+| `is_staff` (`.so`) | the call made right after `dev_analytics_env()` in the Dev Tools settings builder (the function that references "Show Dev Tools Widget") | the body is replaced with a staff-override hook (see Staff below); the key, `read_state`, `drop` and field offsets are read from the original function |
+
+Verified on 356207: arm64 (Android 16 phone, Phoenix reaches READY with no gate, Staff
+Settings and DevTools work) and x86_64 (the finders return the same addresses that were
+found by hand).
+
+## Xposed module (runtime, x86_64 356207)
+
+### Patches
 
 | name   | offset      | function                                                                                  | patch                  |
 |--------|-------------|-------------------------------------------------------------------------------------------|------------------------|
 | access | `0x2eac1c4` | `ops_surfaces::client_access` evaluator for experiments `2026-11-phoenix-app-access` / `2026-11-phoenix-rollout` (with overrides). Returns `Option<bool>`, where 2 = unknown. | `mov al,1; ret` |
-| staff  | `0x1f76640` | `is_staff(handle, force)`, 17 call sites through GOT slot `0x6bc5f30`. | jump to a C hook (see below) |
+| staff  | `0x1f76640` | `is_staff(handle, force)`, 17 call sites through GOT slot `0x6bc5f30`. | jump to a C hook (see Staff below) |
 
-### Staff
+## Staff
 
 Staff is checked as `(user.flags | flag_override.unwrap_or(0)) & 1`. `user.flags` is at
 `state+0x84f0`. `flag_override` is an `Option<u32>`, with its tag at `+0x8580` and its
@@ -37,7 +68,7 @@ broke input: dropping the gate's UI op batches, and stubbing the gate view.
 The Java side only hooks `PhoenixLaunch.i(ContextWrapper)` to force Phoenix to launch.
 `PhoenixLaunch.d` must not be hooked, because it causes a launch loop.
 
-## Layout
+### Layout
 
 - `native/accessfix.c`: the payload (`gate_payload_init`). It polls every 1 ms for the
   host lib to load, then applies the patches.
@@ -50,7 +81,7 @@ The Java side only hooks `PhoenixLaunch.i(ContextWrapper)` to force Phoenix to l
   Valenced APK.
 - `bench.sh`: cold-starts Phoenix N times and prints `ld-perf` milestones.
 
-## Build and install
+### Build and install
 
 Requirements: Android SDK (build-tools 36, platform 33), NDK 26, a JDK, and Python 3.
 
