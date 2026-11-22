@@ -37,6 +37,7 @@ use crate::{
    Chosen,
    Control,
    Error,
+   Header,
    Plugin,
    PluginInfo,
    STATE,
@@ -119,6 +120,9 @@ struct Registry<'js> {
    defined: RefCell<BTreeMap<String, Vec<Definition<'js>>>>,
    /// Kept across unloads, so a reloaded plugin sees what the user chose.
    chosen:  RefCell<ChosenMap>,
+   /// `plumage.onUnload` callbacks, run when the plugin is turned off,
+   /// reloaded or removed.
+   unloads: RefCell<HashMap<String, Vec<Function<'js>>>>,
    /// Each pending `plumage.fetch`'s resolve and reject, by id.
    #[cfg(target_os = "android")]
    fetches: RefCell<HashMap<u64, (Function<'js>, Function<'js>)>>,
@@ -200,6 +204,7 @@ impl Engine {
                   enabled: loaded.enabled,
                   error: loaded.error.clone(),
                   installed: loaded.installed,
+                  header: Header::from(loaded.source.as_str()),
                   settings,
                }
             })
@@ -279,6 +284,16 @@ impl Engine {
          let Some(registry) = ctx.userdata::<Registry<'_>>() else {
             return;
          };
+         let cleanups = registry
+            .unloads
+            .borrow_mut()
+            .remove(name)
+            .unwrap_or_default();
+         for cleanup in cleanups {
+            if let Err(err) = cleanup.call::<_, ()>(()).catch(&ctx) {
+               log::error!("[{name}] onUnload: {err}");
+            }
+         }
          registry.defined.borrow_mut().remove(name);
          let mut hooks = registry.hooks.borrow_mut();
          for (event, list) in hooks.iter_mut() {
@@ -289,6 +304,7 @@ impl Engine {
          }
          hooks.retain(|_, list| !list.is_empty());
       });
+      drain(&self.runtime);
    }
 
    pub fn set_enabled(&mut self, name: &str, enabled: bool) {
@@ -560,6 +576,7 @@ fn registry<'js>(ctx: &Ctx<'js>, events: &GatewayRegistry) -> rquickjs::Result<R
       hooks: RefCell::default(),
       defined: RefCell::default(),
       chosen: RefCell::default(),
+      unloads: RefCell::default(),
       #[cfg(target_os = "android")]
       fetches: RefCell::default(),
    })
@@ -660,6 +677,46 @@ fn api<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
       )?,
    )?;
 
+   api.set("log", log_object(ctx, plugin)?)?;
+   api.set("storage", storage(ctx, plugin)?)?;
+   let settings = Object::new(ctx.clone())?;
+   let name = plugin.to_owned();
+   settings.set(
+      "define",
+      Function::new(ctx.clone(), move |ctx: Ctx<'js>, schema: Object<'js>| {
+         define(&ctx, &name, &schema)
+      })?,
+   )?;
+   api.set("settings", settings)?;
+   let name = plugin.to_owned();
+   api.set(
+      "onUnload",
+      Function::new(ctx.clone(), move |ctx: Ctx<'js>, cleanup: Function<'js>| {
+         ctx.userdata::<Registry<'js>>()
+            .ok_or_else(|| Exception::throw_internal(&ctx, "no registry"))?
+            .unloads
+            .borrow_mut()
+            .entry(name.clone())
+            .or_default()
+            .push(cleanup);
+         Ok::<_, rquickjs::Error>(())
+      })?,
+   )?;
+   #[cfg(target_os = "android")]
+   api.set(
+      "fetch",
+      Function::new(
+         ctx.clone(),
+         |ctx: Ctx<'js>, url: String, init: rquickjs::function::Opt<Object<'js>>| {
+            start_fetch(&ctx, url, init.0)
+         },
+      )?,
+   )?;
+   Ok(api)
+}
+
+/// `plumage.log`, whose lines carry the plugin's name.
+fn log_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
    let log = Object::new(ctx.clone())?;
    for (method, level) in [
       ("debug", Level::Debug),
@@ -687,28 +744,7 @@ fn api<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
          })?,
       )?;
    }
-   api.set("log", log)?;
-   api.set("storage", storage(ctx, plugin)?)?;
-   let settings = Object::new(ctx.clone())?;
-   let name = plugin.to_owned();
-   settings.set(
-      "define",
-      Function::new(ctx.clone(), move |ctx: Ctx<'js>, schema: Object<'js>| {
-         define(&ctx, &name, &schema)
-      })?,
-   )?;
-   api.set("settings", settings)?;
-   #[cfg(target_os = "android")]
-   api.set(
-      "fetch",
-      Function::new(
-         ctx.clone(),
-         |ctx: Ctx<'js>, url: String, init: rquickjs::function::Opt<Object<'js>>| {
-            start_fetch(&ctx, url, init.0)
-         },
-      )?,
-   )?;
-   Ok(api)
+   Ok(log)
 }
 
 /// Sends the request on its own thread, so neither the gateway nor the UI

@@ -1153,7 +1153,8 @@ fn main_sections(plugins: &[PluginInfo]) -> Vec<Tree> {
             let subtitle = plugin
                .error
                .as_deref()
-               .map(|error| format!("Failed: {error}"));
+               .map(|error| format!("Failed: {error}"))
+               .or_else(|| plugin.header.description.clone());
             switch_row(
                Some(ICON_PLUGIN),
                &plugin.name,
@@ -1337,9 +1338,16 @@ fn plugin_sections(index: usize, plugin: &PluginInfo) -> Vec<Tree> {
       ));
    }
    sections.push(section("", actions));
-   sections.push(section("Info", vec![
-      value_row("Name", &plugin.name),
-      value_row("Status", status),
-   ]));
+   let mut info = vec![value_row("Name", &plugin.name)];
+   for (label, value) in [
+      ("Version", &plugin.header.version),
+      ("Author", &plugin.header.author),
+   ] {
+      if let Some(value) = value {
+         info.push(value_row(label, value));
+      }
+   }
+   info.push(value_row("Status", status));
+   sections.push(section("Info", info));
    sections
 }

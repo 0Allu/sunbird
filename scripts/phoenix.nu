@@ -25,7 +25,12 @@ def main [...apks: path] {
    let plugins = $root | path join target phoenix-plugins
    rm -rf $plugins
    for plugin in (ls plugins | where type == dir | get name | path basename) {
-      ^esbuild $"plugins/($plugin)/src/index.ts" --bundle --format=iife --target=es2023 --log-level=warning $"--outfile=($plugins)/($plugin).js"
+      let package = open $"plugins/($plugin)/package.json"
+      let header = [description version author]
+         | where {|key| ($package | get -o $key) != null }
+         | each {|key| $"// @($key) ($package | get $key)" }
+         | str join (char nl)
+      ^esbuild $"plugins/($plugin)/src/index.ts" --bundle --format=iife --target=es2023 --log-level=warning $"--banner:js=($header)" $"--outfile=($plugins)/($plugin).js"
    }
    let bundled = glob $"($plugins)/*.js" | each {|plugin| [--plugin $plugin] } | flatten
    ^($root | path join target release patcher) --out $out --loader ($release | path join libplumage.so) --lib $probe ...$bundled ...$apks

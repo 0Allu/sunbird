@@ -932,7 +932,9 @@ declare namespace Plumage {
     readonly log: Log;
     readonly storage: Storage;
     readonly settings: Settings;
-    /// HTTP through Android's own stack, off the gateway and UI threads. Bodies over 8 MiB fail.
+    /// Runs when the plugin is turned off, reloaded or removed. Hooks and settings go away on their
+    /// own, anything else the plugin started is its to undo here.
+    onUnload(cleanup: () => void): void;
     fetch(url: string, init?: FetchInit): Promise<FetchResponse>;
   }
 

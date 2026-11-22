@@ -82,7 +82,46 @@ pub struct PluginInfo {
    pub enabled:   bool,
    pub error:     Option<String>,
    pub installed: bool,
+   pub header:    Header,
    pub settings:  Vec<Setting>,
+}
+
+/// The `// @key value` lines a bundle starts with.
+#[derive(Clone, Debug, Default)]
+pub struct Header {
+   pub description: Option<String>,
+   pub version:     Option<String>,
+   pub author:      Option<String>,
+}
+
+impl From<&str> for Header {
+   fn from(source: &str) -> Self {
+      let mut header = Self::default();
+      for line in source
+         .lines()
+         .map(str::trim)
+         .filter(|line| !line.is_empty())
+      {
+         let Some(comment) = line.strip_prefix("//") else {
+            break;
+         };
+         let Some((key, value)) = comment
+            .trim()
+            .strip_prefix('@')
+            .and_then(|tag| tag.split_once(' '))
+         else {
+            continue;
+         };
+         let value = Some(value.trim().to_owned());
+         match key {
+            "description" => header.description = value,
+            "version" => header.version = value,
+            "author" => header.author = value,
+            _ => {},
+         }
+      }
+      header
+   }
 }
 
 /// A plugin setting as the user currently has it.
