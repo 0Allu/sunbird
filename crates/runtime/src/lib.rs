@@ -27,6 +27,7 @@ use plumage_sigs::{
 pub mod console;
 mod gateway;
 mod js;
+#[cfg(target_os = "android")] mod jvm;
 #[cfg(target_os = "android")] mod settings;
 
 #[derive(Debug, flub::Error)]
