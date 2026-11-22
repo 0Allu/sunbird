@@ -1,0 +1,15 @@
+[package]
+name = "sigscan"
+description = "Evaluates plumage's rules against a library file and prints a build table entry"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+color-eyre   = { workspace = true }
+eyre         = { workspace = true }
+object       = { workspace = true }
+plumage-sigs = { workspace = true }
+
+[lints]
+workspace = true

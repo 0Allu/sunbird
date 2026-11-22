@@ -2,6 +2,7 @@
 members  = [
   "crates/hook",
   "crates/sigs",
+  "crates/sigscan",
 ]
 resolver = "3"
 
