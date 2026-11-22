@@ -264,14 +264,23 @@ fn evaluate(anchor: &Anchor<'_>, image: &Image<'_>) -> Vec<usize> {
 /// `(slot, code)` for every `{name ptr, name len, ...}` entry named `key` whose
 /// pointer `field` bytes in starts a function.
 fn table_entries(image: &Image<'_>, key: &str, field: usize) -> Vec<(usize, usize)> {
+   // Stops at the first copy of `key` a table points at. Literals sit in
+   // `.rodata` at the front of the image, so the scan never reaches `.text`
+   // (most of the library) at startup. Every table pointing at that copy still
+   // counts, so callers still see ambiguity.
    image
-      .find_bytes(key.as_bytes())
-      .into_iter()
-      .flat_map(|string| image.pointers_to(string))
-      .filter(|slot| image.read_usize(slot + size_of::<usize>()) == Some(key.len()))
-      .filter_map(|slot| Some((slot, image.read_usize(slot + field)?)))
-      .filter(|(_, code)| image.is_function(*code))
-      .collect()
+      .find_bytes_iter(key.as_bytes())
+      .map(|string| {
+         image
+            .pointers_to(string)
+            .into_iter()
+            .filter(|slot| image.read_usize(slot + size_of::<usize>()) == Some(key.len()))
+            .filter_map(|slot| Some((slot, image.read_usize(slot + field)?)))
+            .filter(|(_, code)| image.is_function(*code))
+            .collect::<Vec<_>>()
+      })
+      .find(|entries| !entries.is_empty())
+      .unwrap_or_default()
 }
 
 /// A gateway handler rule in a [`Build`], named by the event's registry key.

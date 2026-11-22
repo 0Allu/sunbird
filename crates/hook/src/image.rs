@@ -340,6 +340,14 @@ impl Image<'_> {
       self.find_in(needle, |_| true)
    }
 
+   /// [`Image::find_bytes`], lazily in address order, so a caller can stop at
+   /// the first hit it accepts instead of scanning (and faulting in) the rest.
+   pub fn find_bytes_iter<'a>(&'a self, needle: &'a [u8]) -> impl Iterator<Item = usize> + 'a {
+      self.segments.iter().flat_map(move |segment| {
+         memmem::find_iter(&segment.bytes, needle).map(move |offset| segment.addr + offset)
+      })
+   }
+
    /// Pointer-aligned slots in non-executable segments that hold `target`.
    #[must_use]
    pub fn pointers_to(&self, target: usize) -> Vec<usize> {
