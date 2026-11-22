@@ -15,6 +15,12 @@ use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const PRELUDE: &str = include_str!("prelude.js");
+/// Built in after the prelude: the UI-op codec, Settings row templates and the Settings page.
+const MODULES: [(&str, &str); 3] = [
+    ("uiops", include_str!("../../ui/uiops.js")),
+    ("settings_tpl", include_str!("settings_tpl.js")),
+    ("settings", include_str!("settings.js")),
+];
 
 pub struct Config {
     /// files/phoenix-js
@@ -124,10 +130,20 @@ fn install(ctx: &Ctx) -> rquickjs::Result<()> {
     }))?;
     f(&p, "now", Function::new(ctx.clone(), || JS.get().unwrap().start.elapsed().as_secs_f64() * 1e3))?;
     f(&p, "wake", Function::new(ctx.clone(), || push(Job::Wake)))?;
+    // UI ops straight to Java's UIManager. Not on the main thread (see hook::jni::apply_ops).
+    f(&p, "uiApply", Function::new(ctx.clone(), |v: Value| {
+        extern "C" { fn gettid() -> i32; fn getpid() -> i32; }
+        if unsafe { gettid() == getpid() } { return false; }
+        bytes_of(v).is_some_and(|b| hook::jni::apply_ops(&b))
+    }))?;
     f(&p, "bridgeListen", Function::new(ctx.clone(), |k: usize, d: i32| hook::jni::listen(k, d)))?;
     p.set("events", registry::names())?;
     ctx.globals().set("__phx", p)?;
-    ctx.eval::<(), _>(PRELUDE)
+    ctx.eval::<(), _>(PRELUDE)?;
+    for (name, src) in MODULES {
+        if let Err(e) = ctx.eval::<(), _>(src).catch(ctx) { log(ERROR, &format!("{name}: {e}")); }
+    }
+    Ok(())
 }
 
 struct Sink;

@@ -51,10 +51,17 @@ globalThis.__phx_bridge = (k, a, b) => { let cur = k === 2 ? b : a, changed = fa
 const brOn = (k, id, fn) => { fn.__plugin = id; BR[k].push(fn); P.bridgeListen(k, 1);
   return () => { const i = BR[k].indexOf(fn); if (i >= 0) { BR[k].splice(i, 1); P.bridgeListen(k, -1); } }; };
 
+// Plugins: id -> { id, name, description, source, enabled, error, unsubs, unload }
+const plugins = new Map();
+let cfg = { disabled: [] }; try { cfg = { disabled: [], ...JSON.parse(P.readFile('plugins.json') || '{}') }; } catch {}
+const track = (id, unsub) => { const p = plugins.get(id); if (p) p.unsubs.push(unsub); return unsub; };
 const api = (id) => ({ id,
-  bridge: { onOps: (fn) => brOn(0, id, fn), onInvoke: (fn) => brOn(1, id, fn), onInvokeResult: (fn) => brOn(2, id, fn), onDispatch: (fn) => brOn(3, id, fn) },
-  on: (n, fn) => { fn.__plugin = id; return add(sync, 0, n, fn); },
-  observe: (n, fn) => { fn.__plugin = id; return add(async, 1, n, fn); },
+  bridge: { onOps: (fn) => track(id, brOn(0, id, fn)), onInvoke: (fn) => track(id, brOn(1, id, fn)),
+    onInvokeResult: (fn) => track(id, brOn(2, id, fn)), onDispatch: (fn) => track(id, brOn(3, id, fn)) },
+  on: (n, fn) => { fn.__plugin = id; return track(id, add(sync, 0, n, fn)); },
+  observe: (n, fn) => { fn.__plugin = id; return track(id, add(async, 1, n, fn)); },
+  /** Runs when the plugin is turned off in Settings (undo timers, Java hooks, ...). */
+  onUnload: (fn) => { const p = plugins.get(id); if (p) p.unload.push(fn); },
   dispatch: (n, data) => P.dispatch(n, typeof data === 'string' ? data : JSON.stringify(data)),
   fetch: fetchImpl, storage: storageFor(id), events: [...names],
   // Live Phoenix stores via Phoenix's own serializers; store-thread only (inside phoenix.on).
@@ -63,10 +70,43 @@ const api = (id) => ({ id,
   native: { scan: (pattern) => P.scan(pattern) } });
 globalThis.phoenix = api('global');
 
-const load = (id, src) => { const fn = new Function('phoenix', 'console', src + `\n//# sourceURL=${id}.js`);
-  const tag = (k) => (...a) => console[k](`[${id}]`, ...a);
-  try { fn(api(id), { log: tag('log'), info: tag('info'), warn: tag('warn'), error: tag('error'), debug: tag('debug') }); console.info(`plugin ${id} loaded`); return true; }
-  catch (e) { console.error(`plugin ${id} failed:`, e, e && e.stack); return false; } };
+// "// Name: what it does" on the first line names the plugin in Settings.
+const meta = (id, src) => { const m = /^\s*\/\/\s*([^:\n]{1,40}):\s*([^\n]*)/.exec(src); return m ? { name: m[1].trim(), description: m[2].trim() } : { name: id, description: '' }; };
+const run = (p) => {
+  const fn = new Function('phoenix', 'console', p.source + `\n//# sourceURL=${p.id}.js`);
+  const tag = (k) => (...a) => console[k](`[${p.id}]`, ...a);
+  try { fn(api(p.id), { log: tag('log'), info: tag('info'), warn: tag('warn'), error: tag('error'), debug: tag('debug') }); p.error = null; console.info(`plugin ${p.id} loaded`); }
+  catch (e) { p.error = String(e); console.error(`plugin ${p.id} failed:`, e, e && e.stack); stop(p); }
+};
+const stop = (p) => {
+  for (const u of p.unsubs.splice(0)) try { u(); } catch {}
+  for (const u of p.unload.splice(0)) try { u(); } catch (e) { console.error(`[${p.id}] onUnload:`, e); }
+};
+const load = (id, source) => {
+  const p = { id, ...meta(id, source), source, enabled: !cfg.disabled.includes(id), error: null, unsubs: [], unload: [] };
+  plugins.set(id, p);
+  if (p.enabled) run(p); else console.info(`plugin ${id} is turned off`);
+};
+globalThis.__phx_plugins = {
+  list: () => [...plugins.values()].map(({ id, name, description, enabled, error }) => ({ id, name, description, enabled, error })),
+  setEnabled: (id, on) => {
+    const p = plugins.get(id);
+    if (!p || p.enabled === on) return;
+    p.enabled = on;
+    cfg.disabled = cfg.disabled.filter((x) => x !== id).concat(on ? [] : [id]);
+    P.writeFile('plugins.json', JSON.stringify(cfg));
+    if (on) run(p); else { stop(p); console.info(`plugin ${id} turned off`); }
+  },
+  /** Re-reads every plugin from files/phoenix-js and restarts the enabled ones. */
+  reload: () => {
+    for (const p of plugins.values()) {
+      const src = P.readFile(p.id + '.js');
+      if (src != null && src !== p.source) Object.assign(p, meta(p.id, src), { source: src });
+      if (p.enabled) { stop(p); run(p); }
+    }
+    console.info(`plugins reloaded: ${plugins.size}`);
+  },
+};
 
 // Bundle entries with a source (shipped in the APK, so a reinstall updates them) are written to
 // files/phoenix-js and win over older copies; then every other *.js there (sorted). url

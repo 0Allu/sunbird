@@ -1,5 +1,4 @@
-// MessageLogger: deleted messages stay (shown in red, marked "(deleted)"); edited messages keep
-// their earlier versions under the new text, newest first.
+// MessageLogger: Keeps deleted messages (in red, marked "(deleted)") and earlier versions of edited ones.
 const MAX = 8192;
 const cache = new Map(); // id -> { channel_id, guild_id, content, hist: string[], deleted }
 

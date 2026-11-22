@@ -21,6 +21,8 @@ extern "C" fn init() {
     let n = unsafe { hook::registry::install(&host, host.base + cfg.registry_anchor as usize) };
     if n == 0 { return warn!("gateway registry not found; plugins off") }
     if cfg.flags & sigs::FLAG_RUNTIME == 0 { return }
+    // patch the JNI table now (the loading thread is attached), so the bridge sees the very first UI batches
+    hook::jni::attach();
     let me = (cfg.me_ser != 0).then(|| (host.base + cfg.me_ser as usize, cfg.me_val as usize));
     let bundle = bundle();
     info!("libplg: {n} events hooked, plugin bundle {}", bundle.as_ref().map_or("none".into(), |b| format!("{} bytes", b.len())));

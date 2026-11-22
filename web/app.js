@@ -87,7 +87,8 @@ async function patchAndOffer(vc, base, abi, configs, abiName) {
   const pluginLib = plugins.length ? new Uint8Array(await (await fetch(ABIS[abiName].pluginLib)).arrayBuffer()) : null;
   const pluginSources = Object.fromEntries(await Promise.all(PLUGINS.filter((p) => p.js && plugins.includes(p.id))
     .map(async (p) => [p.id, await (await fetch(p.js)).text()])));
-  const parts = await buildPatchedApk({ base, abi, configs, identity: await identity(), packageName, label: side ? 'Discord Phoenix' : null, plugins, pluginLib, pluginSources, frida, log });
+  const userScripts = plugins.includes('jsPlugins') ? await jsInput() : [];
+  const parts = await buildPatchedApk({ base, abi, configs, identity: await identity(), packageName, label: side ? 'Discord Phoenix' : null, plugins, pluginLib, pluginSources, userScripts, frida, log });
   const blob = new Blob(parts, { type: 'application/vnd.android.package-archive' });
   s.done(mb(blob.size));
   $('note-side').hidden = !side; $('note-replace').hidden = side;
@@ -128,7 +129,19 @@ for (const p of PLUGINS) {
   $('plugins').append(l);
 }
 
-// Frida: JS plugins from picked files and the editor (prefilled with the example), bundled into one script
+// JS plugins (rquickjs): picked .js files and the editor, each bundled as its own plugin
+const jsBox = document.querySelector('#plugins input[value=jsPlugins]');
+jsBox.onchange = () => { $('jsp').hidden = !jsBox.checked; };
+const pluginId = (name) => name.replace(/\.js$/i, '').replace(/[^\w-]+/g, '-').slice(0, 40) || 'plugin';
+async function jsInput() {
+  const scripts = await Promise.all([...$('jsp-files').files].map(async (f) => ({ id: pluginId(f.name), source: await f.text() })));
+  const code = $('jsp-code').value.trim();
+  if (code) scripts.push({ id: 'my-plugin', source: code });
+  if (scripts.length) log(`JS plugins: ${scripts.map((x) => x.id).join(', ')}`);
+  return scripts;
+}
+
+// Frida: Frida scripts from picked files and the editor (prefilled with the example), bundled into one script
 const fridaBox = document.querySelector('#plugins input[value=frida]');
 fridaBox.onchange = () => { $('frida').hidden = !fridaBox.checked; };
 fetch('plugins/frida-example.js').then((r) => r.text()).then((t) => { if (!$('frida-code').value) $('frida-code').value = t; }).catch(() => {});

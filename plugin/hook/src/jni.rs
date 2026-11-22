@@ -193,11 +193,14 @@ unsafe extern "system" fn w_call_object_method_a(env: *mut JNIEnv, obj: jobject,
     let kind = if watch || !NATIVES_BOUND.load(Relaxed) { method_kind(env, obj, mid) } else { -1 };
     if kind >= 0 { bind_natives(env, obj); }
     if !watch || kind != KIND_INVOKE { return call(args); }
+    remember_guest_host(env, obj, mid);
     let req = get_bytes(env, (*args).l, None);
     if req.len() >= 4 && req[..4] == [0; 4] {
-        // UI-op batch: invoke returns null for these
-        if !on(OPS) { return call(args); }
-        return match sink(OPS, &req[4..], None) {
+        // UI-op batch: invoke returns null for these. UIManager parses on the caller's thread, so
+        // Rust's batches and ours (apply_ops) go through one lock.
+        let act = if on(OPS) { sink(OPS, &req[4..], None) } else { Action::Pass };
+        let _g = UI_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        return match act {
             Action::Drop => std::ptr::null_mut(),
             Action::Pass => call(args),
             Action::Replace(v) => {
@@ -228,6 +231,38 @@ unsafe extern "system" fn w_call_object_method_a(env: *mut JNIEnv, obj: jobject,
             new_bytes(env, &v)
         }
         _ => resp,
+    }
+}
+
+// ---- our own UI ops -----------------------------------------------------------------------------
+static UI_LOCK: Mutex<()> = Mutex::new(());
+static GUEST_HOST: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut()); // global ref
+static INVOKE_MID: AtomicUsize = AtomicUsize::new(0);
+
+unsafe fn remember_guest_host(env: *mut JNIEnv, obj: jobject, mid: jmethodID) {
+    if !GUEST_HOST.load(Relaxed).is_null() { return; }
+    INVOKE_MID.store(mid as usize, Relaxed);
+    GUEST_HOST.store(jcall!(env, NewGlobalRef, obj) as *mut c_void, Relaxed);
+}
+
+/// Sends a UI-op batch (version byte + ops) to Java's UIManager, as Rust does. False until Rust
+/// has sent its first batch (we need its GuestHost). Never call it on the main thread: Rust may be
+/// holding the UI lock while waiting for it.
+pub fn apply_ops(ops: &[u8]) -> bool {
+    let gh = GUEST_HOST.load(Relaxed) as jobject;
+    if gh.is_null() { return false; }
+    unsafe {
+        let Some(env) = env() else { return false };
+        let mut f = vec![0u8; 4];
+        f.extend_from_slice(ops);
+        let arr = new_bytes(env, &f);
+        let r = {
+            let _g = UI_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            jcall!(env, CallObjectMethodA, gh, INVOKE_MID.load(Relaxed) as jmethodID, [jvalue { l: arr }].as_ptr())
+        };
+        if !r.is_null() { jcall!(env, DeleteLocalRef, r); }
+        jcall!(env, DeleteLocalRef, arr);
+        !clear_exc(env)
     }
 }
 

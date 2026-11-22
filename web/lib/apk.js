@@ -31,10 +31,11 @@ const SKIP = (n) => V1_SIG.test(n) || n === 'stamp-cert-sha256';
  * @param plugins                plugin ids to enable (see plugins.js)
  * @param pluginLib              libplg.so for that ABI (needed when plugins are enabled)
  * @param pluginSources          {id: source} for the enabled JS plugins (PLUGINS[].js)
+ * @param userScripts            [{id, source}] your own JS plugins (with 'jsPlugins')
  * @param frida                  {gadget, script} for the 'frida' plugin: frida-gadget .so for that ABI and the bundled JS (frida.js)
  * @returns {Promise<Uint8Array[]>} parts of the signed APK (new Blob(parts))
  */
-export async function buildPatchedApk({ base, abi, configs = [], identity, packageName = 'com.discord', label = null, plugins = [], pluginLib = null, pluginSources = {}, frida = null, log = () => {} }) {
+export async function buildPatchedApk({ base, abi, configs = [], identity, packageName = 'com.discord', label = null, plugins = [], pluginLib = null, pluginSources = {}, userScripts = [], frida = null, log = () => {} }) {
   if (plugins.length && !pluginLib) throw new Error('plugins need libplg.so');
   if (plugins.includes('frida') && !frida) throw new Error('the Frida plugin needs the gadget and a script');
   if (!/^[a-zA-Z][\w]*(\.[a-zA-Z][\w]*)+$/.test(packageName)) throw new Error(`invalid package name: ${packageName}`);
@@ -77,7 +78,7 @@ export async function buildPatchedApk({ base, abi, configs = [], identity, packa
       if (e.method !== 0) throw new Error('host lib is compressed; expected stored');
       const data = e.raw; // patched in place inside the caller's split buffer (saves ~100 MB on phones)
       patch(data, (s) => log(`host lib: ${s}`));
-      const plug = plugins.length ? configurePlugins(data, pluginLib, plugins, pluginSources, log) : null;
+      const plug = plugins.length ? configurePlugins(data, pluginLib, plugins, pluginSources, userScripts, log) : null;
       out.push({ ...e, raw: data, crc: crc32(data) });
       if (plug) out.push(storedEntry(`lib/${abiName}/libplg.so`, plug.lib));
       if (plug?.bundle) out.push(storedEntry(`lib/${abiName}/libplg.js.so`, plug.bundle)); // read from the APK by libplg
