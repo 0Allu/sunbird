@@ -3,9 +3,25 @@
 //! arrives on a Java thread and goes to [`crate::settings::picked`].
 
 use std::{
-   ffi::c_void,
+   collections::HashMap,
+   ffi::{
+      CString,
+      c_void,
+   },
    ptr,
-   sync::OnceLock,
+   sync::{
+      Mutex,
+      OnceLock,
+      PoisonError,
+      atomic::{
+         AtomicI32,
+         Ordering,
+      },
+      mpsc::{
+         self,
+         Sender,
+      },
+   },
 };
 
 use jni_sys::{
@@ -36,6 +52,121 @@ pub type Picked = Result<Option<(String, Vec<u8>)>, String>;
 
 /// `phx.Picker` as a global reference.
 static CLASS: OnceLock<usize> = OnceLock::new();
+/// Who waits for each open [`choose`] dialog.
+static CHOICES: Mutex<Option<HashMap<i32, Sender<i32>>>> = Mutex::new(None);
+
+/// Shows a dialog over Phoenix's activity and waits for it: a list of
+/// `options` without `message`, or `message` with up to three buttons.
+/// Returns the chosen option's index, or -1 when it was dismissed.
+pub fn choose(title: Option<&str>, message: Option<&str>, options: &[String]) -> Result<i32, String> {
+   static NEXT: AtomicI32 = AtomicI32::new(1);
+   let id = NEXT.fetch_add(1, Ordering::Relaxed);
+   let (sender, receiver) = mpsc::channel();
+   CHOICES
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .get_or_insert_default()
+      .insert(id, sender);
+   let shown = call_static(c"choose", |env| {
+      // SAFETY: `env` is this thread's, inside the caller's local frame.
+      unsafe {
+         let string_class = jni!(env, FindClass, c"java/lang/String".as_ptr());
+         let array = jni!(
+            env,
+            NewObjectArray,
+            jni_sys::jsize::try_from(options.len()).unwrap_or_default(),
+            string_class,
+            ptr::null_mut()
+         );
+         for (index, option) in options.iter().enumerate() {
+            let option = jstring_of(env, option);
+            jni!(env, SetObjectArrayElement, array, jni_sys::jsize::try_from(index).unwrap_or_default(), option);
+         }
+         (
+            c"(Ljava/lang/Object;ILjava/lang/String;Ljava/lang/String;[Ljava/lang/String;)V",
+            vec![
+               jvalue {
+                  l: bridge::guest_host(),
+               },
+               jvalue { i: id },
+               jvalue {
+                  l: title.map_or(ptr::null_mut(), |title| jstring_of(env, title)),
+               },
+               jvalue {
+                  l: message.map_or(ptr::null_mut(), |message| jstring_of(env, message)),
+               },
+               jvalue { l: array },
+            ],
+         )
+      }
+   });
+   let forget = || {
+      if let Some(choices) = CHOICES.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
+         choices.remove(&id);
+      }
+   };
+   if let Err(err) = shown {
+      forget();
+      return Err(err);
+   }
+   let chosen = receiver.recv().unwrap_or(-1);
+   forget();
+   Ok(chosen)
+}
+
+/// Shows `text` briefly at the bottom of the screen.
+pub fn toast(text: &str) -> Result<(), String> {
+   call_static(c"toast", |env| {
+      // SAFETY: as in `choose`.
+      unsafe {
+         (c"(Ljava/lang/Object;Ljava/lang/String;)V", vec![
+            jvalue {
+               l: bridge::guest_host(),
+            },
+            jvalue {
+               l: jstring_of(env, text),
+            },
+         ])
+      }
+   })
+}
+
+/// A Java string of `text`, with NULs dropped.
+unsafe fn jstring_of(env: *mut JNIEnv, text: &str) -> jni_sys::jobject {
+   let text = CString::new(text.replace('\0', "")).unwrap_or_default();
+   // SAFETY: forwarded from the caller.
+   unsafe { jni!(env, NewStringUTF, text.as_ptr()) }
+}
+
+/// Calls the static `phx.Picker.name` with the signature and arguments `args`
+/// makes, in a local frame.
+fn call_static(
+   name: &core::ffi::CStr,
+   args: impl FnOnce(*mut JNIEnv) -> (&'static core::ffi::CStr, Vec<jvalue>),
+) -> Result<(), String> {
+   let env = jvm::env().ok_or("no JNI env")?;
+   // SAFETY: as in `pick`; every reference made here is local to the frame.
+   unsafe {
+      if jni!(env, PushLocalFrame, 32) != 0 {
+         return Err(failure(env, "out of local references"));
+      }
+      let result = (|| {
+         let class = class(env)?;
+         let (signature, args) = args(env);
+         let method = jni!(env, GetStaticMethodID, class, name.as_ptr(), signature.as_ptr());
+         if method.is_null() {
+            return Err(failure(env, &format!("phx.Picker.{} is missing", name.to_string_lossy())));
+         }
+         jni!(env, CallStaticVoidMethodA, class, method, args.as_ptr());
+         if jni!(env, ExceptionCheck) {
+            return Err(failure(env, &format!("phx.Picker.{} threw", name.to_string_lossy())));
+         }
+         Ok(())
+      })();
+      jni!(env, PopLocalFrame, ptr::null_mut());
+      result
+   }
+}
 
 /// Opens the picker over Phoenix's activity. The answer comes later through
 /// [`crate::settings::picked`].
@@ -179,13 +310,20 @@ unsafe fn class(env: *mut JNIEnv) -> Result<jclass, String> {
       if class.is_null() || jni!(env, ExceptionCheck) {
          return Err(failure(env, "phx.Picker is not in the dex"));
       }
-      let native = JNINativeMethod {
-         name:      c"onPicked".as_ptr().cast_mut(),
-         signature: c"(ILjava/lang/String;[BLjava/lang/String;)V".as_ptr().cast_mut(),
-         fnPtr:     on_picked as *mut c_void,
-      };
-      if jni!(env, RegisterNatives, class, &raw const native, 1) != 0 {
-         return Err(failure(env, "could not bind phx.Picker.onPicked"));
+      let natives = [
+         JNINativeMethod {
+            name:      c"onPicked".as_ptr().cast_mut(),
+            signature: c"(ILjava/lang/String;[BLjava/lang/String;)V".as_ptr().cast_mut(),
+            fnPtr:     on_picked as *mut c_void,
+         },
+         JNINativeMethod {
+            name:      c"onChosen".as_ptr().cast_mut(),
+            signature: c"(II)V".as_ptr().cast_mut(),
+            fnPtr:     on_chosen as *mut c_void,
+         },
+      ];
+      if jni!(env, RegisterNatives, class, natives.as_ptr(), 2) != 0 {
+         return Err(failure(env, "could not bind phx.Picker's natives"));
       }
       let global = jni!(env, NewGlobalRef, class) as usize;
       Ok(*CLASS.get_or_init(|| global) as jclass)
@@ -214,4 +352,15 @@ unsafe extern "system" fn on_picked(
       }
    };
    crate::settings::picked(picked);
+}
+
+unsafe extern "system" fn on_chosen(_env: *mut JNIEnv, _class: jclass, id: jint, index: jint) {
+   let waiter = CHOICES
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .as_mut()
+      .and_then(|choices| choices.remove(&id));
+   if let Some(waiter) = waiter {
+      let _ = waiter.send(index);
+   }
 }

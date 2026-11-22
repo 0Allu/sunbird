@@ -961,7 +961,22 @@ declare namespace Phoenix {
     readonly discord: Discord;
   }
 
+  interface AuthorizeOptions {
+    clientId: string;
+    redirectUri: string;
+    /// `["identify"]` by default.
+    scopes?: string[];
+    /// `"code"` by default.
+    responseType?: string;
+  }
+
   interface Discord {
+    /// Opens Discord's own authorize screen for an OAuth2 application. Once the user taps
+    /// Authorize, resolves to the redirect URL (`redirectUri?code=…`) for the plugin to fetch
+    /// itself; the app shows Discord's "authorized" page instead of opening the redirect, so no
+    /// browser is involved. Rejects when the user doesn't authorize within 10 minutes or another
+    /// `authorize` starts. The URL holds a credential, so don't log it.
+    authorize(options: AuthorizeOptions): Promise<string>;
     request(path: string, init?: FetchInit): Promise<FetchResponse>;
     get(path: string, init?: FetchInit): Promise<FetchResponse>;
     delete(path: string, init?: FetchInit): Promise<FetchResponse>;
@@ -1016,11 +1031,55 @@ declare namespace Phoenix {
     | false;
 
   /// Undoes a registration. `update` draws it again, asking the plugin anew; for a message
-  /// accessory, `update(messageId)` redraws only that message.
+  /// accessory, `update(messageId)` redraws only that message, and for a profile tab,
+  /// `update(userId)` only that profile's page.
   interface Remover {
     (): void;
     update?(messageId?: string): void;
   }
+
+  /// A pressable piece of text, or plain text without `onPress`. `color` (32-bit ARGB) wins over
+  /// `danger`.
+  interface ProfileAction {
+    label: string;
+    danger?: boolean;
+    color?: number;
+    onPress?(): void;
+  }
+
+  /// What a profile tab shows, top to bottom. Colors follow the profile's theme.
+  type ProfileBlock =
+    /// A paragraph, with an optional heading above it.
+    | { type: "text"; text: string; title?: string; color?: number }
+    /// A post by someone, laid out like a chat message: avatar (an image URL), then the name,
+    /// `badges` (image URLs) and a muted `subtitle` like a date, the text (custom emoji such as
+    /// `<:name:id>` show as images), `images` under it, and a row of actions. `onLongPress` runs
+    /// when the entry is held.
+    | {
+        type: "entry";
+        avatar?: string;
+        title: string;
+        subtitle?: string;
+        text: string;
+        badges?: string[];
+        images?: string[];
+        actions?: ProfileAction[];
+        /// A column at the entry's end, like ▲ score ▼ votes.
+        side?: ProfileAction[];
+        onLongPress?(): void;
+      }
+    /// A text box. `onSubmit` gets its text when the keyboard's send key is pressed, and the box
+    /// empties. What is typed survives the page being drawn again.
+    | {
+        type: "input";
+        placeholder?: string;
+        onSubmit(text: string): void;
+        /// A send button at the box's end, which submits like the send key.
+        sendButton?: boolean;
+      }
+    | { type: "button"; label: string; danger?: boolean; onPress(): void }
+    /// Buttons side by side.
+    | { type: "buttons"; buttons: ProfileAction[] };
 
   /// A drawable in Phoenix's resources, like `res://ic_mana_puzzle_piece_plus`.
   type Icon = string;
@@ -1062,6 +1121,25 @@ declare namespace Phoenix {
       priority?: number;
       render(ctx: ProfileContext): Rendered | Promise<Rendered>;
     }): Remover;
+    /// A tab of its own on profiles, after Phoenix's tabs. `render` runs when the profile opens
+    /// (not when the tab is picked), and its page stays until `update`.
+    addProfileTab(options: {
+      title: string;
+      priority?: number;
+      render(ctx: ProfileContext): ProfileBlock[] | Promise<ProfileBlock[]>;
+    }): Remover;
+    /// Without `message`: a bottom sheet of `options` like Discord's message menu (a plain list
+    /// dialog until that menu has been opened once). An option's `icon` is a drawable, or the
+    /// accessibility id of a message menu row to borrow its icon, like `"message.actions.delete"`.
+    /// With `message`: a dialog with the text and up to three buttons (`options[0]` is the main
+    /// one). Resolves to the index picked, or -1 when it was dismissed.
+    choose(options: {
+      title?: string;
+      message?: string;
+      options?: (string | { label: string; icon?: Icon; danger?: boolean })[];
+    }): Promise<number>;
+    /// A short message at the bottom of the screen.
+    toast(text: string): void;
   }
 
   interface CommandInfo {

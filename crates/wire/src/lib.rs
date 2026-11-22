@@ -559,11 +559,20 @@ pub fn encode_batch(frames: &[Vec<u8>]) -> Vec<u8> {
 /// 0 and unchanged otherwise.
 #[must_use]
 pub fn without_frames(bytes: &[u8], offsets: &[usize]) -> Vec<u8> {
+   let edits = offsets.iter().map(|offset| (*offset, None)).collect::<Vec<_>>();
+   edit_frames(bytes, &edits)
+}
+
+/// Rebuilds a kind-4 batch with the top-level frame at each offset dropped
+/// (`None`) or replaced. Any other input is one frame at offset 0.
+#[must_use]
+pub fn edit_frames(bytes: &[u8], edits: &[(usize, Option<Vec<u8>>)]) -> Vec<u8> {
+   let edit = |offset: usize| edits.iter().find(|(at, _)| *at == offset).map(|(_, new)| new);
    if bytes.first() != Some(&BATCH) {
-      return if offsets.contains(&0) {
-         Vec::new()
-      } else {
-         bytes.to_vec()
+      return match edit(0) {
+         Some(Some(new)) => new.clone(),
+         Some(None) => Vec::new(),
+         None => bytes.to_vec(),
       };
    }
 
@@ -575,8 +584,13 @@ pub fn without_frames(bytes: &[u8], offsets: &[usize]) -> Vec<u8> {
    let mut out = bytes[..pos.min(bytes.len())].to_vec();
    while let Some(inner) = u32_at(bytes, pos) {
       let stop = (pos + 4).saturating_add(inner);
-      if !offsets.contains(&(pos + 4)) {
-         out.extend_from_slice(&bytes[pos..stop.min(bytes.len())]);
+      match edit(pos + 4) {
+         None => out.extend_from_slice(&bytes[pos..stop.min(bytes.len())]),
+         Some(None) => {},
+         Some(Some(new)) => {
+            put_i32_len(&mut out, new.len());
+            out.extend_from_slice(new);
+         },
       }
       pos = stop;
    }

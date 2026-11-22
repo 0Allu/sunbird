@@ -131,6 +131,11 @@ impl Mirror {
          .find_map(|kid| self.find_down(*kid, test, depth - 1))
    }
 
+   /// The sheet created last, which is on top.
+   pub fn newest_sheet(&self) -> Option<i32> {
+      self.sheets.iter().max().copied()
+   }
+
    /// The sheet holding `id`, if any.
    pub fn sheet_of(&self, id: i32) -> Option<i32> {
       let mut node = self.parent(id);

@@ -1,6 +1,6 @@
 //! Plugin UI spliced into Phoenix's screens: buttons in the chat header and
 //! the message box, lines under messages, rows in the message long-press
-//! menu, profile sections, and slash commands in the `/` suggestions.
+//! menu, profile sections and tabs, and slash commands in the `/` suggestions.
 //!
 //! - Rust's batches are mirrored (children, accessibility ids), and plugin
 //!   nodes go next to stable accessibility ids, cloned from Phoenix's own
@@ -12,6 +12,7 @@
 
 mod commands;
 mod mirror;
+mod tabs;
 pub mod targets;
 
 use std::{
@@ -86,6 +87,14 @@ const DISMISS: Key = Prop::named("dismiss").key();
 const FORCE_VALUE: Prop = Prop::named("forceValue");
 const ROW_LONG_PRESS: Key = Prop::named("rowLongPress").key();
 const RESULTS_CAP: usize = 4096;
+const PAGE: Prop = Prop::named("page");
+const PAGE_EVENTS: [Key; 3] = [
+   Prop::named("pageSelect").key(),
+   Prop::named("pageSettle").key(),
+   Prop::named("pageScroll").key(),
+];
+const LAYOUT: Key = Prop::named("layout").key();
+const LONG_PRESS: Key = Prop::named("longPress").key();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ContributionId(u64);
@@ -149,6 +158,57 @@ pub struct Rendered {
 pub enum Outcome {
    Text(Option<Rendered>),
    Shown(bool),
+   /// A profile tab's page.
+   Page(Vec<Block>),
+}
+
+/// A piece of a profile tab's page. `handler` indexes the callbacks the
+/// engine kept for the page.
+#[derive(Clone)]
+pub enum Block {
+   Text {
+      title: Option<String>,
+      text:  String,
+      color: Option<i64>,
+   },
+   Entry {
+      avatar:   Option<String>,
+      title:    String,
+      subtitle: Option<String>,
+      text:     String,
+      /// Small images after the title, like badges.
+      badges:   Vec<String>,
+      /// Images under the text.
+      images:   Vec<String>,
+      /// A row under the text. Actions without a handler are plain text.
+      actions:  Vec<BlockAction>,
+      /// A column at the entry's end, like votes.
+      side:     Vec<BlockAction>,
+      /// Runs on a long press of the entry.
+      hold:     Option<u32>,
+   },
+   /// Buttons side by side.
+   Buttons(Vec<BlockAction>),
+   Input {
+      placeholder: String,
+      handler:     u32,
+      /// A send button, which submits like the keyboard's send key.
+      send:        bool,
+   },
+   Button {
+      label:   String,
+      danger:  bool,
+      handler: u32,
+   },
+}
+
+#[derive(Clone)]
+pub struct BlockAction {
+   pub label:   String,
+   pub danger:  bool,
+   /// 32-bit ARGB, over `danger`.
+   pub color:   Option<i64>,
+   pub handler: Option<u32>,
 }
 
 /// What plugins made of a message about to be sent.
@@ -177,6 +237,33 @@ enum Handler {
    },
    /// A command row in the `/` suggestions.
    Pick(String),
+   /// A plugin's profile tab.
+   Tab { contribution: ContributionId },
+   /// A press in a profile tab's page.
+   Block {
+      contribution: ContributionId,
+      index:        u32,
+   },
+   /// A text box in a profile tab's page.
+   Input {
+      contribution: ContributionId,
+      index:        u32,
+   },
+   /// A profile tab page's content, which reports its height.
+   Page { contribution: ContributionId },
+   /// The send button of a text box in a profile tab's page.
+   Send {
+      contribution: ContributionId,
+      index:        u32,
+   },
+   /// A row of a plugin menu sheet, or with `index` -1 the sheet itself,
+   /// which says when it was swiped away.
+   Choice { menu: u32, index: i32 },
+   /// An entry in a profile tab's page that takes long presses.
+   Hold {
+      contribution: ContributionId,
+      index:        u32,
+   },
 }
 
 /// A node to create, with the handler its subtree answers presses with.
@@ -206,6 +293,15 @@ impl Draft {
 enum SlotKind {
    Target(Target),
    Suggestions,
+   /// A plugin menu sheet.
+   Menu(u32),
+}
+
+/// A menu sheet row a plugin asked for.
+pub struct MenuItem {
+   pub label:  String,
+   pub icon:   Option<String>,
+   pub danger: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -218,6 +314,8 @@ enum Before {
 /// Plugin nodes living under one of Phoenix's parents.
 struct Slot {
    kind:   SlotKind,
+   /// The Phoenix node the slot was opened for.
+   anchor: i32,
    parent: i32,
    before: Before,
    place:  Place,
@@ -240,6 +338,44 @@ enum Job {
       text:  String,
       frame: Vec<u8>,
    },
+   /// Open a plugin's profile tab on `pager`.
+   Select {
+      pager:        i32,
+      contribution: ContributionId,
+   },
+   /// Open Phoenix's tab `index` on `pager`.
+   Leave {
+      pager: i32,
+      index: i32,
+   },
+   Block {
+      contribution: ContributionId,
+      place:        Place,
+      index:        u32,
+      text:         Option<String>,
+      /// The text box to empty.
+      input:        Option<i32>,
+   },
+   PageHeight {
+      pager:        i32,
+      contribution: ContributionId,
+      height:       f64,
+   },
+   /// Submit the text box `index` on `contribution`'s page.
+   Send {
+      contribution: ContributionId,
+      place:        Place,
+      index:        u32,
+   },
+   /// Show a menu sheet; the chosen row's index, or -1, goes to `answer`,
+   /// and -2 when no sheet can be drawn.
+   Menu {
+      title:  Option<String>,
+      items:  Vec<MenuItem>,
+      answer: Sender<i32>,
+   },
+   /// Close menu `menu`, answering `index`.
+   CloseMenu { menu: u32, index: i32 },
 }
 
 #[derive(Default)]
@@ -266,6 +402,21 @@ struct Patches {
    /// Phoenix's author and content text nodes: their message and props as
    /// Phoenix set them.
    texts:         HashMap<i32, (String, Props)>,
+   /// The plugin tab open on each profile pager.
+   shown:         HashMap<i32, ContributionId>,
+   /// The height Rust last gave each pager.
+   rust_heights:  HashMap<i32, Value>,
+   /// The height of each plugin page, by pager.
+   page_heights:  HashMap<(i32, ContributionId), f64>,
+   /// What is typed in the text boxes of plugin pages, so a redraw keeps it.
+   typed:         HashMap<(ContributionId, Place, u32), String>,
+   /// A plugin tab's text and bar, by the tab.
+   tab_parts:     HashMap<i32, (i32, i32)>,
+   /// Open menu sheets and who waits for them.
+   menus:         HashMap<u32, Sender<i32>>,
+   /// Pagers whose own tab labels we color, since a plugin tab was opened:
+   /// their animation stops at Phoenix's last tab and would light it up.
+   static_tabs:   HashSet<i32>,
 }
 
 static PATCHES: LazyLock<Mutex<Patches>> = LazyLock::new(|| {
@@ -404,7 +555,67 @@ pub fn start() {
 /// The engine and the patch state are never held together.
 fn run(job: Job) -> Vec<Op> {
    match job {
-      Job::Refresh(target) => patches().refresh(target),
+      Job::Refresh(target) => {
+         let mut state = patches();
+         Target::ALL
+            .into_iter()
+            .filter(|drawn| drawn.drawn_by() == target)
+            .flat_map(|drawn| state.refresh(drawn))
+            .collect()
+      },
+      Job::Select {
+         pager,
+         contribution,
+      } => patches().select_tab(pager, contribution),
+      Job::Leave { pager, index } => patches().leave_tab(pager, Some(index)),
+      Job::PageHeight {
+         pager,
+         contribution,
+         height,
+      } => {
+         let mut state = patches();
+         state.page_heights.insert((pager, contribution), height);
+         if state.shown.get(&pager) == Some(&contribution) {
+            vec![Op::Update {
+               id:    pager,
+               props: vec![(Prop::HEIGHT, Value::F64(height))],
+            }]
+         } else {
+            Vec::new()
+         }
+      },
+      Job::Send {
+         contribution,
+         place,
+         index,
+      } => {
+         let mut state = patches();
+         let input = state.input_node(contribution, &place, index);
+         let text = state.typed.remove(&(contribution, place.clone(), index));
+         drop(state);
+         if let Some(engine) = crate::engine() {
+            engine.ui_block(contribution, &place, index, Some(text.unwrap_or_default()));
+         }
+         input.map(|input| vec![commands::force_text(input, "")]).unwrap_or_default()
+      },
+      Job::Menu {
+         title,
+         items,
+         answer,
+      } => patches().open_menu(title.as_deref(), items, answer),
+      Job::CloseMenu { menu, index } => patches().close_menu(menu, index),
+      Job::Block {
+         contribution,
+         place,
+         index,
+         text,
+         input,
+      } => {
+         if let Some(engine) = crate::engine() {
+            engine.ui_block(contribution, &place, index, text);
+         }
+         input.map(|input| vec![commands::force_text(input, "")]).unwrap_or_default()
+      },
       Job::Evaluate(contribution, place) => {
          let context = UiContext {
             channel_id: patches().channel.clone(),
@@ -573,6 +784,18 @@ pub fn update(id: ContributionId, place: Option<Place>) {
    queue(Job::Refresh(target));
 }
 
+/// Shows a menu sheet like the message long-press one and waits for the
+/// choice: the row's index, -1 when it was swiped away, or `None` when no
+/// such sheet can be drawn yet.
+pub fn menu(title: Option<String>, items: Vec<MenuItem>) -> Option<i32> {
+   let (answer, receiver) = mpsc::channel();
+   queue(Job::Menu { title, items, answer });
+   match receiver.recv() {
+      Ok(-2) | Err(_) => None,
+      Ok(index) => Some(index),
+   }
+}
+
 /// A plugin settled a `render` or `visible` it returned as a promise.
 pub fn evaluated(contribution: ContributionId, place: Place, outcome: Outcome) {
    queue(Job::Evaluated(contribution, place, outcome));
@@ -664,6 +887,12 @@ impl Patches {
          }
          for op in &ops {
             if let Op::Update { id, props } = op
+               && let Some(height) = prop(props, Prop::HEIGHT)
+               && self.anchors.get(&Target::Tab).is_some_and(|pagers| pagers.contains(id))
+            {
+               self.rust_heights.insert(*id, height.clone());
+            }
+            if let Op::Update { id, props } = op
                && let Some((_, stored)) = self.texts.get_mut(id)
             {
                for (key, value) in props {
@@ -689,7 +918,7 @@ impl Patches {
                self.suggestions.scroll = Some(*id);
             }
             if aid == "profile-tab-pages" {
-               self.seen.profile_user = profile_user(&ops, *id);
+               self.seen.profile_user = profile_user(&ops);
             }
          }
          if self.suggestions.scroll.is_some() {
@@ -706,6 +935,12 @@ impl Patches {
                   continue;
                }
                self.anchors.entry(target).or_default().insert(id);
+               if target == Target::Tab
+                  && let Some((_, props)) = created.get(&id)
+                  && let Some(height) = prop(props, Prop::HEIGHT)
+               {
+                  self.rust_heights.insert(id, height.clone());
+               }
                if let Some(parent) = self.place(target, id, &mut mine) {
                   touched.insert(parent);
                }
@@ -733,6 +968,10 @@ impl Patches {
       let rewrites_children = ops.iter().any(|op| {
          matches!(op, Op::Children { id, .. } | Op::ChildEdits { id, .. } if slot_parents.contains(id))
       });
+      let tabbed = ops
+         .iter()
+         .any(|op| matches!(op, Op::Update { id, .. }
+            if self.shown.contains_key(id) || self.static_tabs.contains(id)));
       let recolors = !self.tints.is_empty()
          && ops.iter().any(|op| {
             matches!(op, Op::Create { id, .. } | Op::Update { id, .. } if self.tint_of(*id).is_some())
@@ -743,13 +982,41 @@ impl Patches {
          && !rewrites_children
          && !restored
          && !recolors
+         && !tabbed
       {
          return None;
       }
 
       let mut out = mine;
+      let mut left = Vec::new();
+      let mut recolor = Vec::new();
       for op in ops {
          match op {
+            Op::Update { id, mut props }
+               if self.shown.contains_key(&id) || self.static_tabs.contains(&id) =>
+            {
+               if let Some(page) = prop(&props, PAGE) {
+                  // Rust opened one of its tabs.
+                  if self.shown.contains_key(&id) {
+                     left.push(id);
+                  }
+                  let index = page
+                     .field(Prop::INDEX.key())
+                     .and_then(Value::as_i32)
+                     .and_then(|index| usize::try_from(index).ok());
+                  recolor.push((id, index));
+               } else if self.shown.contains_key(&id)
+                  && prop(&props, Prop::HEIGHT).is_some()
+                  && let Some(height) = self
+                     .shown
+                     .get(&id)
+                     .and_then(|shown| self.page_heights.get(&(id, *shown)))
+               {
+                  // Rust sized the pager to its own page, under ours.
+                  set_prop(&mut props, Prop::HEIGHT, Some(Value::F64(*height)));
+               }
+               out.push(Op::Update { id, props });
+            },
             Op::Children { id, .. } | Op::ChildEdits { id, .. } if slot_parents.contains(&id) => {
                out.push(Op::Children {
                   id,
@@ -784,6 +1051,12 @@ impl Patches {
          });
       }
       out.extend(extra);
+      for pager in left {
+         out.extend(self.leave_tab(pager, None));
+      }
+      for (pager, index) in recolor {
+         out.extend(self.rust_label_colors(pager, index));
+      }
       Some(out)
    }
 
@@ -797,12 +1070,22 @@ impl Patches {
             .partition::<Vec<_>, _>(|slot| slot.parent == *id);
          self.slots = kept;
          for slot in gone {
+            if let SlotKind::Menu(menu) = slot.kind
+               && let Some(answer) = self.menus.remove(&menu)
+            {
+               let _ = answer.send(-1);
+            }
             self.forget_slot(&slot);
             orphans.extend(slot.all);
          }
          for anchors in self.anchors.values_mut() {
             anchors.remove(id);
          }
+         self.shown.remove(id);
+         self.static_tabs.remove(id);
+         self.rust_heights.remove(id);
+         self.page_heights.retain(|(pager, _), _| pager != id);
+         self.tab_parts.remove(id);
          if self.suggestions.scroll == Some(*id) {
             orphans.extend(self.drop_suggestions());
          }
@@ -834,6 +1117,17 @@ impl Patches {
             frames.push(raw);
             continue;
          };
+         if PAGE_EVENTS.contains(event) && self.beyond_rust(*node, payload) {
+            // About a plugin page, which Rust does not know.
+            changed = true;
+            continue;
+         }
+         if *event == Prop::PRESS.key()
+            && let Some((pager, index)) = self.rust_tab(*node)
+            && self.shown.contains_key(&pager)
+         {
+            queue(Job::Leave { pager, index });
+         }
          if *event == ROW_LONG_PRESS
             && let Some(index) = payload.field(Prop::INDEX.key()).and_then(Value::as_i32)
          {
@@ -856,6 +1150,8 @@ impl Patches {
             changed = true;
             if *event == Prop::PRESS.key() {
                self.pressed(*node, handler, &mut frames);
+            } else {
+               self.page_event(*node, &handler, *event, payload);
             }
             continue;
          }
@@ -896,6 +1192,42 @@ impl Patches {
                frames.push(encode_view_event(sheet, DISMISS, &Value::Obj(Vec::new())));
             }
          },
+         Handler::Tab { contribution } => {
+            if let Some(slot) = self.slots.iter().find(|slot| slot.all.contains(&node)) {
+               queue(Job::Select {
+                  pager: slot.anchor,
+                  contribution,
+               });
+            }
+         },
+         Handler::Block {
+            contribution,
+            index,
+         } => {
+            if let Some(slot) = self.slots.iter().find(|slot| slot.all.contains(&node)) {
+               queue(Job::Block {
+                  contribution,
+                  place: slot.place.clone(),
+                  index,
+                  text: None,
+                  input: None,
+               });
+            }
+         },
+         Handler::Send {
+            contribution,
+            index,
+         } => {
+            if let Some(slot) = self.slots.iter().find(|slot| slot.all.contains(&node)) {
+               queue(Job::Send {
+                  contribution,
+                  place: slot.place.clone(),
+                  index,
+               });
+            }
+         },
+         Handler::Choice { menu, index } => queue(Job::CloseMenu { menu, index }),
+         Handler::Input { .. } | Handler::Page { .. } | Handler::Hold { .. } => {},
          Handler::Pick(name) => {
             if let Some((input, _)) = self.mirror.composer() {
                frames.push(commands::change_text(input, &format!("/{name} ")));
@@ -903,6 +1235,333 @@ impl Patches {
             }
          },
       }
+   }
+
+   /// Takes typing, sends and heights from a plugin page.
+   fn page_event(&mut self, node: i32, handler: &Handler, event: Key, payload: &Value) {
+      let slot = self.slots.iter().find(|slot| slot.all.contains(&node));
+      match *handler {
+         Handler::Input {
+            contribution,
+            index,
+         } => {
+            let Some(place) = slot.map(|slot| slot.place.clone()) else {
+               return;
+            };
+            if event == Prop::CHANGE_TEXT.key() {
+               let text = payload
+                  .field(Prop::TEXT.key())
+                  .and_then(Value::as_str)
+                  .or_else(|| payload.as_str())
+                  .unwrap_or_default();
+               if self.typed.len() >= RESULTS_CAP {
+                  self.typed.clear();
+               }
+               self.typed.insert((contribution, place, index), text.to_owned());
+            } else if event == Prop::SUBMIT.key() {
+               let text = self.typed.remove(&(contribution, place.clone(), index));
+               queue(Job::Block {
+                  contribution,
+                  place,
+                  index,
+                  text: Some(text.unwrap_or_default()),
+                  input: Some(node),
+               });
+            }
+         },
+         Handler::Hold {
+            contribution,
+            index,
+         } if event == LONG_PRESS => {
+            if let Some(slot) = slot {
+               queue(Job::Block {
+                  contribution,
+                  place: slot.place.clone(),
+                  index,
+                  text: None,
+                  input: None,
+               });
+            }
+         },
+         Handler::Choice { menu, .. } if event == DISMISS => {
+            queue(Job::CloseMenu { menu, index: -1 });
+         },
+         Handler::Page { contribution } if event == LAYOUT => {
+            if let (Some(slot), Some(height)) = (
+               slot,
+               payload.field(Prop::HEIGHT.key()).and_then(number),
+            ) {
+               queue(Job::PageHeight {
+                  pager: slot.anchor,
+                  contribution,
+                  height,
+               });
+            }
+         },
+         _ => {},
+      }
+   }
+
+   /// Shows a menu sheet over the top sheet, like the message long-press one.
+   fn open_menu(&mut self, title: Option<&str>, items: Vec<MenuItem>, answer: Sender<i32>) -> Vec<Op> {
+      static NEXT: AtomicU64 = AtomicU64::new(1);
+      #[expect(clippy::cast_possible_truncation, reason = "menus are few")]
+      let menu = NEXT.fetch_add(1, Ordering::Relaxed) as u32;
+      let host = self
+         .mirror
+         .newest_sheet()
+         .and_then(|sheet| self.mirror.parent(sheet))
+         .and_then(|outer| self.mirror.parent(outer));
+      let rows = items
+         .into_iter()
+         .enumerate()
+         .map(|(index, item)| {
+            targets::MenuRow {
+               label:  item.label,
+               icon:   item.icon,
+               danger: item.danger,
+               press:  Handler::Choice {
+                  menu,
+                  index: i32::try_from(index).unwrap_or_default(),
+               },
+               id:     None,
+            }
+         })
+         .collect();
+      let draft = self.templates.menu(title, rows, Handler::Choice { menu, index: -1 });
+      let (Some(host), Some(draft)) = (host, draft) else {
+         let _ = answer.send(-2);
+         return Vec::new();
+      };
+      let mut out = Vec::new();
+      let mut all = Vec::new();
+      let root = self.emit(draft, None, &mut out, &mut all);
+      self.slots.push(Slot {
+         kind: SlotKind::Menu(menu),
+         anchor: host,
+         parent: host,
+         before: Before::End,
+         place: Place::Screen,
+         roots: vec![root],
+         all,
+      });
+      self.menus.insert(menu, answer);
+      out.push(Op::Children {
+         id:  host,
+         ids: self.merged(host),
+      });
+      out
+   }
+
+   fn close_menu(&mut self, menu: u32, index: i32) -> Vec<Op> {
+      if let Some(answer) = self.menus.remove(&menu) {
+         let _ = answer.send(index);
+      }
+      let Some(at) = self.slots.iter().position(|slot| slot.kind == SlotKind::Menu(menu)) else {
+         return Vec::new();
+      };
+      let slot = self.slots.remove(at);
+      self.forget_ids(&slot.all);
+      let mut out = Vec::new();
+      if self.mirror.has_kids(slot.parent) {
+         out.push(Op::Children {
+            id:  slot.parent,
+            ids: self.merged(slot.parent),
+         });
+      }
+      out.push(Op::Delete { ids: slot.all });
+      out
+   }
+
+   /// The node of text box `index` on `contribution`'s page at `place`.
+   fn input_node(&self, contribution: ContributionId, place: &Place, index: u32) -> Option<i32> {
+      self
+         .slots
+         .iter()
+         .filter(|slot| slot.kind == SlotKind::Target(Target::TabPage) && slot.place == *place)
+         .flat_map(|slot| slot.all.iter())
+         .copied()
+         .find(|node| {
+            matches!(self.handlers.get(node), Some(Handler::Input { contribution: owner, index: at })
+               if *owner == contribution && *at == index)
+         })
+   }
+
+   /// Puts back what was typed into the text boxes of a page drawn anew.
+   fn restore_typed(&self, draft: &mut Draft, place: &Place) {
+      if let Some(Handler::Input {
+         contribution,
+         index,
+      }) = &draft.press
+         && let Some(text) = self.typed.get(&(*contribution, place.clone(), *index))
+      {
+         draft.set(Prop::VALUE, Some(Value::Str(text.clone())));
+      }
+      for kid in &mut draft.kids {
+         self.restore_typed(kid, place);
+      }
+   }
+
+   /// Whether a page event on `node` is about a page past Rust's.
+   fn beyond_rust(&self, node: i32, payload: &Value) -> bool {
+      if !self.anchors.get(&Target::Tab).is_some_and(|pagers| pagers.contains(&node)) {
+         return false;
+      }
+      let Some(row) = self.mirror.kids(node).first() else {
+         return false;
+      };
+      let last = self.mirror.kids(*row).len().saturating_sub(1);
+      #[expect(clippy::cast_precision_loss, reason = "a handful of pages")]
+      let last = last as f64;
+      let page = payload.field(PAGE.key()).and_then(Value::as_i32).map(f64::from);
+      let offset = payload.field(Prop::named("offset").key()).and_then(number);
+      page.or(offset).is_some_and(|at| at > last + 0.001)
+   }
+
+   /// The pager and index of Rust's profile tab `node`.
+   fn rust_tab(&self, node: i32) -> Option<(i32, i32)> {
+      let row = self.mirror.parent(node)?;
+      let slot = self
+         .slots
+         .iter()
+         .find(|slot| slot.parent == row && slot.kind == SlotKind::Target(Target::Tab))?;
+      let index = self.mirror.kids(row).iter().position(|tab| *tab == node)?;
+      Some((slot.anchor, i32::try_from(index).ok()?))
+   }
+
+   /// Opens `contribution`'s page on `pager`, after Rust's pages.
+   fn select_tab(&mut self, pager: i32, contribution: ContributionId) -> Vec<Op> {
+      let Some(at) = self
+         .contributions
+         .iter()
+         .filter(|known| known.target == Target::Tab)
+         .position(|known| known.id == contribution)
+      else {
+         return Vec::new();
+      };
+      let Some(&row) = self.mirror.kids(pager).first() else {
+         return Vec::new();
+      };
+      let page = self.mirror.kids(row).len() + at;
+      let mut out = vec![page_op(pager, page)];
+      if let Some(height) = self.page_heights.get(&(pager, contribution)) {
+         out.push(Op::Update {
+            id:    pager,
+            props: vec![(Prop::HEIGHT, Value::F64(*height))],
+         });
+      }
+      if let Some((tabs, indicator)) = targets::tab_row(&self.mirror, pager) {
+         out.push(Op::Update {
+            id:    indicator,
+            props: vec![(HIDDEN, Value::Bool(true))],
+         });
+         if let Some(strip) = self.mirror.parent(tabs) {
+            let index = self.mirror.kids(tabs).len() - 1 + at;
+            out.push(Op::ScrollTo {
+               id:    strip,
+               value: Value::Obj(vec![
+                  (Prop::INDEX.key(), Value::I32(i32::try_from(index).unwrap_or_default())),
+                  (Prop::named("align").key(), Value::Str("reveal".to_owned())),
+                  (Prop::named("offset").key(), Value::F64(16.0)),
+                  (Prop::named("animated").key(), Value::Bool(true)),
+               ]),
+            });
+         }
+      }
+      self.shown.insert(pager, contribution);
+      self.static_tabs.insert(pager);
+      out.extend(self.rust_label_colors(pager, None));
+      out.extend(self.tab_looks(pager));
+      out
+   }
+
+   /// Closes the plugin page open on `pager`, opening Rust's page `index`
+   /// unless Rust does that itself.
+   fn leave_tab(&mut self, pager: i32, index: Option<i32>) -> Vec<Op> {
+      if self.shown.remove(&pager).is_none() {
+         return Vec::new();
+      }
+      let mut out = Vec::new();
+      if let Some(index) = index {
+         out.push(page_op(pager, usize::try_from(index).unwrap_or_default()));
+         out.extend(self.rust_label_colors(pager, usize::try_from(index).ok()));
+      }
+      if let Some(height) = self.rust_heights.get(&pager) {
+         out.push(Op::Update {
+            id:    pager,
+            props: vec![(Prop::HEIGHT, height.clone())],
+         });
+      }
+      if let Some((_, indicator)) = targets::tab_row(&self.mirror, pager) {
+         out.push(Op::Update {
+            id:    indicator,
+            props: vec![(HIDDEN, Value::Null)],
+         });
+      }
+      out.extend(self.tab_looks(pager));
+      out
+   }
+
+   /// Colors Phoenix's own tab labels on `pager`, `selected` lit, with their
+   /// animation off.
+   fn rust_label_colors(&self, pager: i32, selected: Option<usize>) -> Vec<Op> {
+      let (on, off) = self.templates.tab_colors();
+      let Some((row, _)) = targets::tab_row(&self.mirror, pager) else {
+         return Vec::new();
+      };
+      let tabs = self.mirror.kids(row);
+      tabs[..tabs.len().saturating_sub(1)]
+         .iter()
+         .enumerate()
+         .filter_map(|(index, tab)| {
+            let inner = *self.mirror.kids(*tab).first()?;
+            let text = *self.mirror.kids(inner).first()?;
+            let color = if Some(index) == selected { on } else { off };
+            Some(Op::Update {
+               id:    text,
+               props: vec![
+                  (Prop::named("worklet"), Value::Null),
+                  (Prop::COLOR, Value::I64(color)),
+               ],
+            })
+         })
+         .collect()
+   }
+
+   /// Colors the plugin tabs on `pager` and shows the open one's bar.
+   fn tab_looks(&self, pager: i32) -> Vec<Op> {
+      let (on, off) = self.templates.tab_colors();
+      let shown = self.shown.get(&pager);
+      let tabs = self
+         .contributions
+         .iter()
+         .filter(|known| known.target == Target::Tab)
+         .map(|known| known.id);
+      let roots = self
+         .slots
+         .iter()
+         .filter(|slot| slot.anchor == pager && slot.kind == SlotKind::Target(Target::Tab))
+         .flat_map(|slot| slot.roots.iter().copied());
+      let mut out = Vec::new();
+      for (contribution, root) in tabs.zip(roots) {
+         let Some((text, bar)) = self.tab_parts.get(&root) else {
+            continue;
+         };
+         let open = shown == Some(&contribution);
+         out.push(Op::Update {
+            id:    *text,
+            props: vec![(Prop::COLOR, Value::I64(if open { on } else { off }))],
+         });
+         out.push(Op::Update {
+            id:    *bar,
+            props: vec![(BACKGROUND, Value::I64(if open { on } else { 0 }))],
+         });
+         out.push(Op::Update {
+            id:    root,
+            props: vec![(Prop::named("accessibilitySelected"), Value::Bool(open))],
+         });
+      }
+      out
    }
 
    /// The composer input when `event` on `node` sends a message and a plugin
@@ -943,7 +1602,7 @@ impl Patches {
       if !self
          .contributions
          .iter()
-         .any(|contribution| contribution.target == target)
+         .any(|contribution| contribution.target == target.drawn_by())
       {
          return None;
       }
@@ -960,6 +1619,7 @@ impl Patches {
       }
       self.slots.push(Slot {
          kind: SlotKind::Target(target),
+         anchor: id,
          parent: placement.parent,
          before,
          place: placement.place,
@@ -980,7 +1640,7 @@ impl Patches {
       let contributions = self
          .contributions
          .iter()
-         .filter(|contribution| contribution.target == target)
+         .filter(|contribution| contribution.target == target.drawn_by())
          .collect::<Vec<_>>();
       for contribution in &contributions {
          let key = (contribution.id, place.clone());
@@ -999,11 +1659,24 @@ impl Patches {
          });
       let mut roots = Vec::new();
       let mut all = Vec::new();
-      for draft in drafts {
-         roots.push(self.emit(draft, None, out, &mut all));
+      for mut draft in drafts {
+         if target == Target::TabPage {
+            self.restore_typed(&mut draft, &place);
+         }
+         let root = self.emit(draft, None, out, &mut all);
+         if target == Target::Tab
+            && let [.., text, _, bar, _] = all[..]
+         {
+            // Kids come first: text, inner, bar, then the tab.
+            self.tab_parts.insert(root, (text, bar));
+         }
+         roots.push(root);
       }
       self.slots[index].roots = roots;
       self.slots[index].all = all;
+      if target == Target::Tab {
+         out.extend(self.tab_looks(self.slots[index].anchor));
+      }
       // The content's tint, once no answer for it is outstanding.
       if target == Target::Content
          && !ids.iter().any(|id| self.pending.contains(&(*id, place.clone())))
@@ -1108,8 +1781,13 @@ impl Patches {
    }
 
    fn forget_slot(&mut self, slot: &Slot) {
-      for id in &slot.all {
+      self.forget_ids(&slot.all);
+   }
+
+   fn forget_ids(&mut self, ids: &[i32]) {
+      for id in ids {
          self.handlers.remove(id);
+         self.tab_parts.remove(id);
       }
    }
 
@@ -1124,9 +1802,7 @@ impl Patches {
             continue;
          }
          let old = std::mem::take(&mut self.slots[index].all);
-         for id in &old {
-            self.handlers.remove(id);
-         }
+         self.forget_ids(&old);
          deletes.extend(old);
          self.fill(index, &mut out);
          touched.insert(self.slots[index].parent);
@@ -1175,13 +1851,13 @@ impl Patches {
       let mut touched = HashSet::new();
       for index in 0..self.slots.len() {
          let slot = &self.slots[index];
-         if slot.kind != SlotKind::Target(target) || slot.place != place {
+         if !matches!(slot.kind, SlotKind::Target(drawn) if drawn.drawn_by() == target)
+            || slot.place != place
+         {
             continue;
          }
          let old = std::mem::take(&mut self.slots[index].all);
-         for id in &old {
-            self.handlers.remove(id);
-         }
+         self.forget_ids(&old);
          deletes.extend(old);
          self.fill(index, &mut out);
          touched.insert(self.slots[index].parent);
@@ -1235,24 +1911,79 @@ fn recolored(props: &Props, color: i64, all: bool) -> Props {
    props
 }
 
-/// The user whose avatar a profile batch shows before its pages node.
-fn profile_user(ops: &[Op], pages: i32) -> Option<String> {
-   ops.iter().find_map(|op| {
-      let Op::Create { id, props, .. } = op else {
-         return None;
-      };
-      if *id > pages {
-         return None;
+const HIDDEN: Prop = Prop::named("hidden");
+
+fn number(value: &Value) -> Option<f64> {
+   match value {
+      Value::F64(number) => Some(*number),
+      Value::I32(number) => Some(f64::from(*number)),
+      _ => None,
+   }
+}
+const BACKGROUND: Prop = Prop::named("background");
+
+/// Turns `pager` to `page`. Rust counts its own `seq` up from 1, and the host
+/// takes any new one.
+fn page_op(pager: i32, page: usize) -> Op {
+   static SEQUENCE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(1 << 30);
+   Op::Update {
+      id:    pager,
+      props: vec![(
+         PAGE,
+         Value::Obj(vec![
+            (Prop::named("seq").key(), Value::I32(SEQUENCE.fetch_add(1, Ordering::Relaxed))),
+            (Prop::INDEX.key(), Value::I32(i32::try_from(page).unwrap_or_default())),
+            (Prop::named("animated").key(), Value::Bool(true)),
+         ]),
+      )],
+   }
+}
+
+/// The user a profile batch is about: the id in the avatar image under the
+/// node `Avatar`. A default avatar has none, and then it is the profile
+/// Phoenix just fetched. Other avatars in the batch (mutual friends) are
+/// never taken for it.
+fn profile_user(ops: &[Op]) -> Option<String> {
+   let avatar = ops.iter().find_map(|op| {
+      match op {
+         Op::Create { id, props, .. }
+            if matches!(prop(props, Prop::ACCESSIBILITY_ID), Some(Value::Str(aid)) if aid == "Avatar") =>
+         {
+            Some(*id)
+         },
+         _ => None,
       }
-      let Some(Value::Str(uri)) = prop(props, Prop::URI) else {
-         return None;
-      };
-      let rest = &uri[memmem::find(uri.as_bytes(), b"/avatars/")? + "/avatars/".len()..];
-      let id = rest.split('/').next()?;
-      id.bytes()
-         .all(|byte| byte.is_ascii_digit())
-         .then(|| id.to_owned())
-   })
+   });
+   let image = avatar.and_then(|avatar| {
+      ops.iter().find_map(|op| {
+         match op {
+            Op::Create { id, kind, props } if *id > avatar && *kind == ViewKind::Image => {
+               match prop(props, Prop::URI) {
+                  Some(Value::Str(uri)) => Some(uri.clone()),
+                  _ => None,
+               }
+            },
+            _ => None,
+         }
+      })
+   });
+   image
+      .as_deref()
+      .and_then(avatar_user)
+      .or_else(crate::discord::last_profile)
+}
+
+/// The user id in an avatar URL, `…/avatars/<id>/<hash>` or
+/// `…/users/<id>/avatars/<hash>` for a server avatar.
+fn avatar_user(uri: &str) -> Option<String> {
+   let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+   if let Some(at) = memmem::find(uri.as_bytes(), b"/users/") {
+      let id = uri[at + "/users/".len()..].split('/').next()?;
+      return digits(id).then(|| id.to_owned());
+   }
+   let at = memmem::find(uri.as_bytes(), b"/avatars/")?;
+   let id = uri[at + "/avatars/".len()..].split('/').next()?;
+   digits(id).then(|| id.to_owned())
 }
 
 /// The message id in `message.{content,avatar,author,timestamp}:<id>`.

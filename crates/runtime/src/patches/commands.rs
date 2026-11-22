@@ -161,6 +161,7 @@ impl Patches {
          }
          self.slots.push(Slot {
             kind: SlotKind::Suggestions,
+            anchor: rows,
             parent: rows,
             before: Before::Start,
             place: Place::Screen,

@@ -14,9 +14,11 @@ use crate::patches::{
    Place,
    Rendered,
    mirror::{
+      self,
       Created,
       Mirror,
    },
+   tabs,
 };
 
 const DANGER: i64 = 4_294_475_386;
@@ -46,17 +48,32 @@ pub enum Target {
    Action,
    /// The end of a profile's main tab.
    Profile,
+   /// A tab after a profile's own tabs. Plugins add these; the page that goes
+   /// with each is drawn at [`Target::TabPage`].
+   Tab,
+   /// The pages of profile tabs, after the profile's own pages.
+   TabPage,
 }
 
 impl Target {
-   pub const ALL: [Self; 6] = [
+   pub const ALL: [Self; 8] = [
       Self::Header,
       Self::Composer,
       Self::Content,
       Self::Timestamp,
       Self::Action,
       Self::Profile,
+      Self::Tab,
+      Self::TabPage,
    ];
+
+   /// The target whose contributions this one draws.
+   pub const fn drawn_by(self) -> Self {
+      match self {
+         Self::TabPage => Self::Tab,
+         other => other,
+      }
+   }
 
    pub fn matches(self, aid: &str) -> bool {
       match self {
@@ -65,7 +82,7 @@ impl Target {
          Self::Content => aid.starts_with("message.content:"),
          Self::Timestamp => aid.starts_with("message.timestamp:"),
          Self::Action => aid == "message.actions.root",
-         Self::Profile => aid == "profile-tab-pages",
+         Self::Profile | Self::Tab | Self::TabPage => aid == "profile-tab-pages",
       }
    }
 
@@ -121,13 +138,48 @@ impl Target {
                place:  Place::User(seen.profile_user.clone()),
             })
          },
+         Self::Tab => {
+            let (row, indicator) = tab_row(mirror, id)?;
+            Some(Placement {
+               parent: row,
+               before: Some(indicator),
+               place:  Place::User(seen.profile_user.clone()),
+            })
+         },
+         Self::TabPage => {
+            Some(Placement {
+               parent: *mirror.kids(id).first()?,
+               before: None,
+               place:  Place::User(seen.profile_user.clone()),
+            })
+         },
       }
    }
 
    /// Whether drawing this target needs a plugin's `render` or `visible`.
    pub const fn evaluates(self) -> bool {
-      matches!(self, Self::Content | Self::Timestamp | Self::Profile)
+      matches!(self, Self::Content | Self::Timestamp | Self::Profile | Self::TabPage)
    }
+}
+
+/// The row holding the tabs of the profile whose pages are `pager`, and its
+/// last child, the sliding indicator.
+///
+/// `column > [tabs > stack > column > [strip > row > [tab…, indicator], divider],
+/// frame > pager]`
+pub fn tab_row(mirror: &Mirror, pager: i32) -> Option<(i32, i32)> {
+   let frame = mirror.parent(pager)?;
+   let siblings = mirror.kids(mirror.parent(frame)?);
+   let at = siblings.iter().position(|sibling| *sibling == frame)?;
+   let mut node = *siblings.get(at.checked_sub(1)?)?;
+   for _ in 0..4 {
+      node = *mirror.kids(node).first()?;
+   }
+   let kids = mirror.kids(node);
+   if kids.len() < 2 {
+      return None;
+   }
+   Some((node, *kids.last()?))
 }
 
 /// What the dispatches and batches showed about the screen.
@@ -155,18 +207,53 @@ pub struct Templates {
    group:     Option<(ViewKind, Props)>,
    divider:   Option<Node>,
    profile:   Option<Node>,
+   /// A profile tab that is not selected, and the page width.
+   tab:       Option<Node>,
+   page_width: Option<Value>,
+   /// The first text color on Phoenix's first page.
+   page_text: Option<i64>,
+   /// The selected tab's text color.
+   tab_color: Option<i64>,
+   /// The message long-press sheet from its outer view down to the node
+   /// holding its groups, without animation or ids, for plugin menus.
+   sheet:     Option<Vec<(ViewKind, Props)>>,
+   /// The icons of the message menu's rows, by their accessibility id.
+   icons:     std::collections::HashMap<String, String>,
 }
+
+/// A row of a menu sheet.
+pub(super) struct MenuRow {
+   pub(super) label:  String,
+   pub(super) icon:   Option<String>,
+   pub(super) danger: bool,
+   pub(super) press:  Handler,
+   pub(super) id:     Option<String>,
+}
+
+/// Props that tie a node to Phoenix's own animations or to its identity.
+const BOUND: [&str; 5] = ["viewMotion", "worklet", "portalSlot", "accessibilityId", "accessibilityLabel"];
 
 impl Templates {
    pub fn learn(&mut self, mirror: &Mirror, id: i32, aid: &str, created: &Created<'_>) {
       match aid {
          "search.entry" => self.header = mirror.snapshot(id, created),
          "composer.expressions" => self.composer = mirror.snapshot(id, created),
-         "profile-tab-pages" => self.learn_profile(mirror, id, created),
+         "profile-tab-pages" => {
+            self.learn_profile(mirror, id, created);
+            self.learn_tabs(mirror, id, created);
+         },
          _ if aid.starts_with("message.timestamp:") && self.timestamp.is_none() => {
             self.timestamp = mirror.snapshot(id, created);
          },
-         _ if ROW_TEMPLATES.contains(&aid) => self.learn_row(mirror, id, created),
+         "message.actions.root" => self.learn_sheet(mirror, id, created),
+         _ if aid.starts_with("message.actions.") => {
+            if ROW_TEMPLATES.contains(&aid) {
+               self.learn_row(mirror, id, created);
+            }
+            if let Some(icon) = mirror.snapshot(id, created).as_ref().and_then(first_image) {
+               self.icons.insert(aid.to_owned(), icon);
+            }
+         },
          _ => {},
       }
    }
@@ -195,6 +282,111 @@ impl Templates {
          self.group = Some(((*kind).clone(), (*props).clone()));
       }
       self.row = Some(row);
+   }
+
+   fn learn_sheet(&mut self, mirror: &Mirror, root: i32, created: &Created<'_>) {
+      let Some(&groups) = mirror.kids(root).last() else {
+         return;
+      };
+      let Some(sheet) = mirror.sheet_of(root) else {
+         return;
+      };
+      let top = mirror.parent(sheet).unwrap_or(sheet);
+      let mut path = vec![groups];
+      let mut node = groups;
+      while node != top && path.len() < 24 {
+         let Some(parent) = mirror.parent(node) else {
+            return;
+         };
+         path.push(parent);
+         node = parent;
+      }
+      path.reverse();
+      let chain = path
+         .iter()
+         .map(|node| {
+            let (kind, props) = created.get(node)?;
+            let props = props
+               .iter()
+               .filter(|(key, _)| !key.name().is_some_and(|name| BOUND.contains(&name)))
+               .cloned()
+               .collect();
+            Some(((*kind).clone(), props))
+         })
+         .collect::<Option<Vec<_>>>();
+      if chain.is_some() {
+         self.sheet = chain;
+      }
+   }
+
+   /// A menu sheet like the message long-press one: `title` over `rows`.
+   /// `None` until that sheet was seen.
+   pub(super) fn menu(&self, title: Option<&str>, rows: Vec<MenuRow>, dismiss: Handler) -> Option<Draft> {
+      let chain = self.sheet.as_ref()?;
+      let mut kids = Vec::new();
+      if let Some(title) = title
+         && let Some(row) = &self.row
+         && let Some(sample) = row.kids.first().and_then(|inner| inner.kids.get(1))
+      {
+         let mut head = text(&sample.props, &Rendered {
+            text:  title.to_owned(),
+            color: None,
+            tint:  None,
+         });
+         head.set(Prop::MARGIN, Some(Value::Rect([4.0, 0.0, 4.0, 8.0])));
+         head.set(Prop::named("fontWeight"), Some(Value::I32(700)));
+         kids.push(head);
+      }
+      kids.extend(self.group(rows));
+      let mut node: Option<Draft> = None;
+      for (kind, props) in chain.iter().rev() {
+         let mut draft = Draft {
+            kind:  kind.clone(),
+            props: props.clone(),
+            kids:  node.take().map_or_else(|| std::mem::take(&mut kids), |inner| vec![inner]),
+            press: None,
+         };
+         if kind.as_str() == "sheet" {
+            draft.press = Some(dismiss.clone());
+         }
+         node = Some(draft);
+      }
+      node
+   }
+
+   fn learn_tabs(&mut self, mirror: &Mirror, pager: i32, created: &Created<'_>) {
+      let page = mirror.kids(pager).first().and_then(|row| mirror.kids(*row).first());
+      if let Some(width) = page
+         .and_then(|page| created.get(page))
+         .and_then(|(_, props)| mirror::prop(props, Prop::named("width")))
+      {
+         self.page_width = Some(width.clone());
+      }
+      if let Some(page) = page.and_then(|page| mirror.snapshot(*page, created)) {
+         self.page_text = first_text_color(&page).or(self.page_text);
+      }
+      let Some((row, _)) = tab_row(mirror, pager) else {
+         return;
+      };
+      let tabs = mirror.kids(row);
+      let color = |tab: &Node| {
+         match tab.kids.first()?.kids.first().and_then(|text| mirror::prop(&text.props, Prop::COLOR)) {
+            Some(Value::I64(color)) => Some(*color),
+            Some(Value::I32(color)) => Some(i64::from(*color)),
+            _ => None,
+         }
+      };
+      for tab in &tabs[..tabs.len() - 1] {
+         let Some(node) = mirror.snapshot(*tab, created) else {
+            continue;
+         };
+         let selected = mirror::prop(&node.props, Prop::named("accessibilitySelected"));
+         if matches!(selected, Some(Value::Bool(true))) {
+            self.tab_color = color(&node).or(self.tab_color);
+         } else if node.kids.first().is_some_and(|inner| !inner.kids.is_empty()) {
+            self.tab = Some(node);
+         }
+      }
    }
 
    fn learn_profile(&mut self, mirror: &Mirror, id: i32, created: &Created<'_>) {
@@ -255,6 +447,23 @@ impl Templates {
                .collect()
          },
          Target::Action => self.action_group(contributions, place, outcome),
+         Target::Tab => {
+            let Some(tab) = &self.tab else {
+               return Vec::new();
+            };
+            contributions
+               .iter()
+               .map(|contribution| tabs::tab(tab, contribution))
+               .collect()
+         },
+         Target::TabPage => {
+            contributions
+               .iter()
+               .map(|contribution| {
+                  tabs::page(self.page_width.clone(), self.palette(), contribution, outcome(contribution))
+               })
+               .collect()
+         },
          Target::Profile => {
             let Some(section) = &self.profile else {
                return Vec::new();
@@ -328,18 +537,36 @@ impl Templates {
       place: &Place,
       outcome: &impl Fn(&Contribution) -> Option<Outcome>,
    ) -> Vec<Draft> {
-      let (Some(row), Some((group_kind, group_props))) = (&self.row, &self.group) else {
-         return Vec::new();
-      };
-      let shown = contributions
+      let rows = contributions
          .iter()
          .filter(|contribution| {
             !contribution.conditional || matches!(outcome(contribution), Some(Outcome::Shown(true)))
          })
-         .collect::<Vec<_>>();
-      let count = shown.len();
+         .map(|contribution| {
+            MenuRow {
+               label:  contribution.label.clone(),
+               icon:   contribution.icon.clone(),
+               danger: contribution.danger,
+               press:  Handler::Press {
+                  contribution: contribution.id,
+                  place:        place.clone(),
+                  dismiss:      true,
+               },
+               id:     Some(format!("phoenix.{}.{}", contribution.plugin, contribution.id.0)),
+            }
+         })
+         .collect();
+      self.group(rows)
+   }
+
+   /// `rows` in one rounded group, styled like the message menu's rows.
+   fn group(&self, rows: Vec<MenuRow>) -> Vec<Draft> {
+      let (Some(row), Some((group_kind, group_props))) = (&self.row, &self.group) else {
+         return Vec::new();
+      };
+      let count = rows.len();
       let mut kids = Vec::new();
-      for (index, contribution) in shown.into_iter().enumerate() {
+      for (index, entry) in rows.into_iter().enumerate() {
          let mut draft = Draft::from_node(row);
          for corner in [
             Prop::RADIUS,
@@ -360,30 +587,22 @@ impl Templates {
             draft.set(Prop::RADIUS_BOTTOM_LEFT, round.clone());
             draft.set(Prop::RADIUS_BOTTOM_RIGHT, round);
          }
-         draft.set(
-            Prop::ACCESSIBILITY_ID,
-            Some(Value::Str(format!(
-               "phoenix.{}.{}",
-               contribution.plugin, contribution.id.0
-            ))),
-         );
-         draft.set(
-            Prop::ACCESSIBILITY_LABEL,
-            Some(Value::Str(contribution.label.clone())),
-         );
+         draft.set(Prop::ACCESSIBILITY_ID, entry.id.map(Value::Str));
+         draft.set(Prop::ACCESSIBILITY_LABEL, Some(Value::Str(entry.label.clone())));
          let inner = &mut draft.kids[0];
-         let icon = contribution.icon.as_deref().unwrap_or(DEFAULT_ICON);
+         // An icon without a scheme names a message menu row to borrow it from.
+         let icon = match entry.icon.as_deref() {
+            Some(icon) if !icon.contains("://") => self.icons.get(icon).map_or(DEFAULT_ICON, String::as_str),
+            Some(icon) => icon,
+            None => DEFAULT_ICON,
+         };
          inner.kids[0].set(Prop::URI, Some(Value::Str(icon.to_owned())));
-         inner.kids[1].set(Prop::TEXT, Some(Value::Str(contribution.label.clone())));
-         if contribution.danger {
+         inner.kids[1].set(Prop::TEXT, Some(Value::Str(entry.label.clone())));
+         if entry.danger {
             inner.kids[1].set(Prop::COLOR, Some(Value::I64(DANGER)));
             inner.kids[0].set(Prop::TINT, Some(Value::I64(DANGER)));
          }
-         draft.press = Some(Handler::Press {
-            contribution: contribution.id,
-            place:        place.clone(),
-            dismiss:      true,
-         });
+         draft.press = Some(entry.press);
          if index > 0
             && let Some(divider) = &self.divider
          {
@@ -400,6 +619,31 @@ impl Templates {
          kids,
          press: None,
       }]
+   }
+
+   /// The colors of Phoenix's first profile page.
+   pub fn palette(&self) -> tabs::Palette {
+      tabs::Palette {
+         text:  self.page_text.unwrap_or(tabs::TEXT),
+         muted: self.tab_colors().1,
+      }
+   }
+
+   /// A plugin tab's text color when selected, and when not.
+   pub fn tab_colors(&self) -> (i64, i64) {
+      let unselected = self
+         .tab
+         .as_ref()
+         .and_then(|tab| tab.kids.first()?.kids.first())
+         .and_then(|text| {
+            match mirror::prop(&text.props, Prop::COLOR) {
+               Some(Value::I64(color)) => Some(*color),
+               Some(Value::I32(color)) => Some(i64::from(*color)),
+               _ => None,
+            }
+         })
+         .unwrap_or(tabs::MUTED);
+      (self.tab_color.unwrap_or(tabs::ACCENT), unselected)
    }
 
    /// The timestamp's text style without its placement, or a fallback.
@@ -433,7 +677,27 @@ impl Templates {
    }
 }
 
-fn text(props: &Props, rendered: &Rendered) -> Draft {
+fn first_image(node: &Node) -> Option<String> {
+   if node.kind == ViewKind::Image
+      && let Some(Value::Str(uri)) = mirror::prop(&node.props, Prop::URI)
+   {
+      return Some(uri.clone());
+   }
+   node.kids.iter().find_map(first_image)
+}
+
+fn first_text_color(node: &Node) -> Option<i64> {
+   if node.kind == ViewKind::Text {
+      match mirror::prop(&node.props, Prop::COLOR) {
+         Some(Value::I64(color)) => return Some(*color),
+         Some(Value::I32(color)) => return Some(i64::from(*color)),
+         _ => {},
+      }
+   }
+   node.kids.iter().find_map(first_text_color)
+}
+
+pub fn text(props: &Props, rendered: &Rendered) -> Draft {
    let mut node = Draft {
       kind:  ViewKind::Text,
       props: props.clone(),

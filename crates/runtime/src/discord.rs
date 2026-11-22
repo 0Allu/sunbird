@@ -27,7 +27,10 @@ use std::{
          Sender,
       },
    },
-   time::Duration,
+   time::{
+      Duration,
+      Instant,
+   },
 };
 
 use phoenix_wire::{
@@ -36,7 +39,7 @@ use phoenix_wire::{
    Key,
    Value,
    decode_dispatch,
-   without_frames,
+   edit_frames,
 };
 
 use crate::{
@@ -71,6 +74,37 @@ const PER_REQUEST: [&str; 4] = [
    "x-audit-log-reason",
 ];
 
+/// A plugin waiting for the user to authorize `client_id` in Phoenix's
+/// authorize screen, and Phoenix's request id once it sends the authorization.
+struct Authorizing {
+   client_id: String,
+   call:      Option<i32>,
+   waiter:    Sender<String>,
+   /// Tells this wait from a newer one.
+   turn:      u64,
+}
+
+static AUTHORIZING: Mutex<Option<Authorizing>> = Mutex::new(None);
+/// The user whose profile Phoenix fetched last, and when.
+static LAST_PROFILE: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+
+/// The user `url` fetches the profile of, `…/users/<id>/profile`.
+fn profile_of(url: &str) -> Option<String> {
+   let after = &url[url.find("/users/")? + "/users/".len()..];
+   let (id, rest) = after.split_once('/')?;
+   (rest.starts_with("profile") && !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+      .then(|| id.to_owned())
+}
+
+/// The user whose profile Phoenix fetched in the last few seconds, for a
+/// profile screen that shows no user id of its own.
+pub fn last_profile() -> Option<String> {
+   let last = LAST_PROFILE.lock().unwrap_or_else(PoisonError::into_inner);
+   let (id, at) = last.as_ref()?;
+   (at.elapsed() < Duration::from_secs(5)).then(|| id.clone())
+}
+const AUTHORIZE_TIMEOUT: Duration = Duration::from_secs(600);
+
 #[derive(Debug, flub::Error)]
 pub enum DiscordError {
    #[error("Phoenix has not made an API request yet, so there is no session")]
@@ -83,6 +117,9 @@ pub enum DiscordError {
    Timeout { path: String },
    #[error("{path}: {message}")]
    Network { path: String, message: String },
+   /// Discord turned down an OAuth2 authorization. The message is Discord's.
+   #[error("authorize: Discord answered {status}: {message}")]
+   Refused { status: i32, message: String },
 }
 
 /// What Phoenix's own API requests carry.
@@ -142,6 +179,22 @@ pub fn observe_call(frame: &[u8]) {
    let Ok(call) = HostCall::decode(frame) else {
       return;
    };
+   if let Some(id) = call.args.field(URL).and_then(Value::as_str).and_then(profile_of) {
+      *LAST_PROFILE.lock().unwrap_or_else(PoisonError::into_inner) = Some((id, Instant::now()));
+   }
+   if let Some(url) = call.args.field(URL).and_then(Value::as_str)
+      && url.contains("/oauth2/authorize?")
+      && call.args.field(METHOD).and_then(Value::as_str) == Some("POST")
+      && let Some(authorizing) = AUTHORIZING
+         .lock()
+         .unwrap_or_else(PoisonError::into_inner)
+         .as_mut()
+      && url
+         .split(['?', '&'])
+         .any(|pair| pair.strip_prefix("client_id=") == Some(authorizing.client_id.as_str()))
+   {
+      authorizing.call = call.args.field(ID).and_then(Value::as_i32);
+   }
    let Some(base) = call
       .args
       .field(URL)
@@ -174,10 +227,16 @@ pub fn observe_call(frame: &[u8]) {
 /// Takes the `@http` replies to phoenix's requests out of a `nativeDispatch`
 /// call.
 pub fn filter(bytes: &[u8]) -> Action {
-   if PENDING
+   let watching = AUTHORIZING
       .lock()
       .unwrap_or_else(PoisonError::into_inner)
-      .is_empty()
+      .as_ref()
+      .is_some_and(|authorizing| authorizing.call.is_some());
+   if !watching
+      && PENDING
+         .lock()
+         .unwrap_or_else(PoisonError::into_inner)
+         .is_empty()
    {
       return Action::Pass;
    }
@@ -196,10 +255,11 @@ pub fn filter(bytes: &[u8]) -> Action {
          else {
             return None;
          };
-         let id = args
-            .field(ID)
-            .and_then(Value::as_i32)
-            .filter(|id| *id >= FIRST_ID)?;
+         let id = args.field(ID).and_then(Value::as_i32)?;
+         if id < FIRST_ID {
+            let frame = &bytes[item.offset..item.offset + item.len];
+            return authorized(id, frame, &body).map(|new| (item.offset, Some(new)));
+         }
          let waiter = PENDING
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -215,14 +275,15 @@ pub fn filter(bytes: &[u8]) -> Action {
                body,
             });
          }
-         Some(item.offset)
+         Some((item.offset, None))
       })
-      .collect::<Vec<usize>>();
+      .collect::<Vec<_>>();
 
+   let dropped = taken.iter().filter(|(_, new)| new.is_none()).count();
    match taken.len() {
       0 => Action::Pass,
-      all if all == count => Action::Drop,
-      _ => Action::Replace(without_frames(bytes, &taken)),
+      _ if dropped == count => Action::Drop,
+      _ => Action::Replace(edit_frames(bytes, &taken)),
    }
 }
 
@@ -299,4 +360,93 @@ pub fn send(
       status: reply.status,
       body:   reply.body,
    })
+}
+
+/// What [`authorize`] asks Discord for.
+pub struct Authorization {
+   pub client_id:     String,
+   pub redirect_uri:  String,
+   pub scopes:        Vec<String>,
+   pub response_type: String,
+}
+
+/// Opens Phoenix's own OAuth2 authorize screen for `request` and waits for
+/// the user to authorize. Phoenix's authorize request is then answered with
+/// Discord's own "authorized" page instead of the redirect, so the code stays
+/// in the app, and the redirect URL with the code comes back here. The URL
+/// holds a credential and is never logged.
+pub fn authorize(request: &Authorization) -> Result<String, DiscordError> {
+   let link = format!(
+      "discord://action/oauth2/authorize?client_id={}&response_type={}&redirect_uri={}&scope={}",
+      encode(&request.client_id),
+      encode(&request.response_type),
+      encode(&request.redirect_uri),
+      encode(&request.scopes.join(" ")),
+   );
+   static TURN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+   let turn = TURN.fetch_add(1, Ordering::Relaxed);
+   let (sender, receiver) = mpsc::channel();
+   // A newer authorize drops the older one's sender, which rejects it.
+   *AUTHORIZING.lock().unwrap_or_else(PoisonError::into_inner) = Some(Authorizing {
+      client_id: request.client_id.clone(),
+      call:      None,
+      waiter:    sender,
+      turn,
+   });
+   if let Err(message) = crate::picker::open(&link) {
+      AUTHORIZING.lock().unwrap_or_else(PoisonError::into_inner).take();
+      return Err(DiscordError::Refused { status: 0, message });
+   }
+   let location = receiver.recv_timeout(AUTHORIZE_TIMEOUT);
+   let mut authorizing = AUTHORIZING.lock().unwrap_or_else(PoisonError::into_inner);
+   if authorizing.as_ref().is_some_and(|current| current.turn == turn) {
+      authorizing.take();
+   }
+   drop(authorizing);
+   location.map_err(|_| DiscordError::Refused {
+      status:  0,
+      message: "not authorized".to_owned(),
+   })
+}
+
+/// Rewrites the reply to Phoenix's own authorize request while a plugin waits
+/// for it. Returns the replacement frame.
+fn authorized(id: i32, frame: &[u8], body: &[u8]) -> Option<Vec<u8>> {
+   let mut authorizing = AUTHORIZING.lock().unwrap_or_else(PoisonError::into_inner);
+   if authorizing.as_ref()?.call != Some(id) {
+      return None;
+   }
+   let current = authorizing.take()?;
+   drop(authorizing);
+   let json = serde_json::from_slice::<serde_json::Value>(body).ok()?;
+   let location = json.get("location")?.as_str()?.to_owned();
+   let _ = current.waiter.send(location);
+   let head = &frame[..frame.len() - body.len()];
+   let mut out = head.to_vec();
+   out.extend_from_slice(br#"{"location":"https://discord.com/oauth2/authorized"}"#);
+   Some(out)
+}
+
+/// Percent-encodes `text` for a query value.
+fn encode(text: &str) -> String {
+   let mut out = String::with_capacity(text.len());
+   for byte in text.bytes() {
+      if byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte) {
+         out.push(char::from(byte));
+      } else {
+         out.push_str(&format!("%{byte:02X}"));
+      }
+   }
+   out
+}
+
+#[cfg(test)]
+mod tests {
+   #[test]
+   fn encodes_query_values() {
+      assert_eq!(
+         super::encode("https://a.b/api/auth x"),
+         "https%3A%2F%2Fa.b%2Fapi%2Fauth%20x"
+      );
+   }
 }

@@ -1,6 +1,9 @@
 package phx;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.DialogInterface;
+import android.widget.Toast;
 import android.app.Fragment;
 import android.content.ContentResolver;
 import android.content.Intent;
@@ -25,6 +28,9 @@ public final class Picker extends Fragment {
 
     /** name/data are null when nothing was picked; error is null unless something failed. */
     static native void onPicked(int id, String name, byte[] data, String error);
+
+    /** The option the user chose in a {@link #choose} dialog, or -1 when they dismissed it. */
+    static native void onChosen(int id, int index);
 
     private int id;
     private String mime;
@@ -58,6 +64,62 @@ public final class Picker extends Fragment {
                     findActivity(owner).startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
                 } catch (Throwable t) {
                     android.util.Log.e("phoenix", "opening " + url + ": " + t);
+                }
+            }
+        });
+    }
+
+    /**
+     * A dialog over Phoenix's activity: a list of `options` without `message`, or `message` with
+     * up to three buttons (the first is the positive one). Answers once through onChosen.
+     */
+    public static void choose(final Object owner, final int id, final String title, final String message, final String[] options) {
+        new Handler(Looper.getMainLooper()).post(new Runnable() {
+            public void run() {
+                final boolean[] answered = {false};
+                class Answer implements DialogInterface.OnClickListener {
+                    final int index;
+                    Answer(int index) { this.index = index; }
+                    public void onClick(DialogInterface d, int which) {
+                        if (answered[0]) return;
+                        answered[0] = true;
+                        onChosen(id, index < 0 ? which : index);
+                    }
+                }
+                try {
+                    AlertDialog.Builder b = new AlertDialog.Builder(findActivity(owner), android.R.style.Theme_DeviceDefault_Dialog_Alert);
+                    if (title != null) b.setTitle(title);
+                    if (message == null) {
+                        b.setItems(options, new Answer(-1));
+                    } else {
+                        b.setMessage(message);
+                        if (options.length > 0) b.setPositiveButton(options[0], new Answer(0));
+                        if (options.length > 1) b.setNegativeButton(options[1], new Answer(1));
+                        if (options.length > 2) b.setNeutralButton(options[2], new Answer(2));
+                    }
+                    b.setOnDismissListener(new DialogInterface.OnDismissListener() {
+                        public void onDismiss(DialogInterface d) {
+                            if (answered[0]) return;
+                            answered[0] = true;
+                            onChosen(id, -1);
+                        }
+                    });
+                    b.show();
+                } catch (Throwable t) {
+                    android.util.Log.e("phoenix", "choose: " + t);
+                    if (!answered[0]) { answered[0] = true; onChosen(id, -1); }
+                }
+            }
+        });
+    }
+
+    public static void toast(final Object owner, final String text) {
+        new Handler(Looper.getMainLooper()).post(new Runnable() {
+            public void run() {
+                try {
+                    Toast.makeText(findActivity(owner), text, Toast.LENGTH_SHORT).show();
+                } catch (Throwable t) {
+                    android.util.Log.e("phoenix", "toast: " + t);
                 }
             }
         });

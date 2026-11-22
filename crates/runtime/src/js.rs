@@ -185,7 +185,14 @@ struct Callbacks<'js> {
    target:   Target,
    press:    Option<Function<'js>>,
    evaluate: Option<Function<'js>>,
+   /// A profile tab's page callbacks, by profile, as `Block` handlers index
+   /// them.
+   pages:    HashMap<Place, Vec<Function<'js>>>,
 }
+
+/// Profiles whose page callbacks a tab keeps.
+#[cfg(target_os = "android")]
+const PAGES_CAP: usize = 64;
 
 // SAFETY: every field is bound to 'js, and Changed swaps exactly that lifetime.
 unsafe impl<'js> JsLifetime<'js> for Registry<'js> {
@@ -335,7 +342,14 @@ impl Engine {
                callbacks.evaluate.clone()?,
             )
          };
-         let failed = || outcome_of(target, None);
+         let answer = |value| {
+            if target == Target::Tab {
+               page_of(&ctx, id, place, value)
+            } else {
+               outcome_of(target, value)
+            }
+         };
+         let failed = || answer(None);
          let argument = match context_object(&ctx, context) {
             Ok(argument) => argument,
             Err(err) => {
@@ -351,16 +365,26 @@ impl Engine {
             },
          };
          let Some(promise) = result.as_promise() else {
-            return Some(outcome_of(target, Some(&result)));
+            return Some(answer(Some(&result)));
          };
          let settle = |place: Place, plugin: String| {
             let settled = place.clone();
             let ok = Function::new(ctx.clone(), move |value: Value<'_>| {
-               patches::evaluated(id, settled.clone(), outcome_of(target, Some(&value)));
+               let outcome = if target == Target::Tab {
+                  page_of(value.ctx(), id, &settled, Some(&value))
+               } else {
+                  outcome_of(target, Some(&value))
+               };
+               patches::evaluated(id, settled.clone(), outcome);
             });
             let err = Function::new(ctx.clone(), move |reason: Value<'_>| {
                log::error!("[{plugin}] render: {reason:?}");
-               patches::evaluated(id, place.clone(), outcome_of(target, None));
+               let outcome = if target == Target::Tab {
+                  page_of(reason.ctx(), id, &place, None)
+               } else {
+                  outcome_of(target, None)
+               };
+               patches::evaluated(id, place.clone(), outcome);
             });
             let then = promise.then()?;
             then.call::<_, ()>((rquickjs::function::This(promise.clone()), ok?, err?))
@@ -373,6 +397,26 @@ impl Engine {
       });
       drain(&self.runtime);
       outcome
+   }
+
+   /// Runs handler `index` of the page contribution `id` drew at `place`,
+   /// with the text of the box it belongs to, if any.
+   #[cfg(target_os = "android")]
+   pub fn ui_block(&self, id: ContributionId, place: &Place, index: u32, text: Option<String>) {
+      self.context.with(|ctx| {
+         let Some((plugin, handler)) = ctx.userdata::<Registry<'_>>().and_then(|registry| {
+            let callbacks = registry.ui.borrow();
+            let callbacks = callbacks.get(&id)?;
+            let handler = callbacks.pages.get(place)?.get(usize::try_from(index).ok()?)?;
+            Some((callbacks.plugin.clone(), handler.clone()))
+         }) else {
+            return;
+         };
+         if let Err(err) = handler.call::<_, Value<'_>>((text,)).catch(&ctx) {
+            log::error!("[{plugin}] page: {err}");
+         }
+      });
+      drain(&self.runtime);
    }
 
    #[cfg(target_os = "android")]
@@ -728,6 +772,9 @@ impl Engine {
             Settlement::Fetch(Ok(response)) | Settlement::Discord(Ok(response)) => {
                response_object(&ctx, &response).map(|object| Ok(object.into_value()))
             },
+            Settlement::Int(Ok(number)) => Ok(Ok(Value::new_int(ctx.clone(), number))),
+            Settlement::Int(Err(err)) => Ok(Err(err)),
+            Settlement::Text(Ok(text)) => rquickjs::String::from_str(ctx.clone(), &text).map(|text| Ok(text.into_value())),
             Settlement::Rows(Ok(rows)) => {
                serde_json::to_string(&rows)
                   .map_err(|err| Exception::throw_internal(&ctx, &err.to_string()))
@@ -735,7 +782,7 @@ impl Engine {
                   .map(Ok)
             },
             Settlement::Fetch(Err(err)) => Ok(Err(err.to_string())),
-            Settlement::Discord(Err(err)) => Ok(Err(err.to_string())),
+            Settlement::Discord(Err(err)) | Settlement::Text(Err(err)) => Ok(Err(err.to_string())),
             Settlement::Rows(Err(err)) => Ok(Err(err.to_string())),
          };
          let outcome = value.and_then(|value| {
@@ -1160,19 +1207,161 @@ fn outcome_of(target: Target, value: Option<&Value<'_>>) -> Outcome {
    Outcome::Text(rendered)
 }
 
-/// A function that undoes a registration, with `update` to redraw it.
+/// A profile tab's `render` result as the page it draws. Its callbacks stay
+/// here, numbered in the order the blocks name them.
+#[cfg(target_os = "android")]
+fn page_of<'js>(
+   ctx: &Ctx<'js>,
+   id: ContributionId,
+   place: &Place,
+   value: Option<&Value<'js>>,
+) -> Outcome {
+   let mut handlers = Vec::new();
+   let blocks = match value.and_then(Value::as_array) {
+      Some(array) => {
+         array
+            .iter::<Value<'js>>()
+            .filter_map(|block| block_of(block.ok()?.as_object()?, &mut handlers))
+            .collect()
+      },
+      None => {
+         vec![patches::Block::Text {
+            title: None,
+            text:  "This tab could not be drawn.".to_owned(),
+            color: None,
+         }]
+      },
+   };
+   if let Some(registry) = ctx.userdata::<Registry<'js>>()
+      && let Some(callbacks) = registry.ui.borrow_mut().get_mut(&id)
+   {
+      if callbacks.pages.len() >= PAGES_CAP {
+         callbacks.pages.clear();
+      }
+      callbacks.pages.insert(place.clone(), handlers);
+   }
+   Outcome::Page(blocks)
+}
+
+/// The `{label, danger?, color?, onPress?}` objects in `object[key]`.
+#[cfg(target_os = "android")]
+fn actions_of<'js>(
+   object: &Object<'js>,
+   key: &str,
+   handler: &mut impl FnMut(&Object<'js>, &str) -> Option<u32>,
+) -> Vec<patches::BlockAction> {
+   let Some(array) = object.get::<_, Option<rquickjs::Array<'js>>>(key).ok().flatten() else {
+      return Vec::new();
+   };
+   array
+      .iter::<Object<'js>>()
+      .filter_map(|action| {
+         let action = action.ok()?;
+         Some(patches::BlockAction {
+            label:   action.get::<_, Option<String>>("label").ok().flatten()?,
+            danger:  action.get::<_, Option<bool>>("danger").ok().flatten().unwrap_or_default(),
+            color:   action.get::<_, Option<f64>>("color").ok().flatten().map(|color| {
+               #[expect(clippy::cast_possible_truncation, reason = "colors are 32-bit ARGB")]
+               let color = color as i64;
+               color
+            }),
+            handler: handler(&action, "onPress"),
+         })
+      })
+      .collect()
+}
+
+#[cfg(target_os = "android")]
+fn block_of<'js>(object: &Object<'js>, handlers: &mut Vec<Function<'js>>) -> Option<patches::Block> {
+   let text = |object: &Object<'js>, key: &str| object.get::<_, Option<String>>(key).ok().flatten();
+   let flag = |object: &Object<'js>, key: &str| {
+      object
+         .get::<_, Option<bool>>(key)
+         .ok()
+         .flatten()
+         .unwrap_or_default()
+   };
+   let mut handler = |object: &Object<'js>, key: &str| {
+      let function = object.get::<_, Option<Function<'js>>>(key).ok().flatten()?;
+      handlers.push(function);
+      u32::try_from(handlers.len() - 1).ok()
+   };
+   let block = match text(object, "type")?.as_str() {
+      "text" => {
+         patches::Block::Text {
+            title: text(object, "title"),
+            text:  text(object, "text")?,
+            color: object.get::<_, Option<f64>>("color").ok().flatten().map(|color| {
+               #[expect(clippy::cast_possible_truncation, reason = "colors are 32-bit ARGB")]
+               let color = color as i64;
+               color
+            }),
+         }
+      },
+      "entry" => {
+         let actions = actions_of(object, "actions", &mut handler);
+         let strings = |key: &str| {
+            object
+               .get::<_, Option<Vec<String>>>(key)
+               .ok()
+               .flatten()
+               .unwrap_or_default()
+         };
+         patches::Block::Entry {
+            avatar: text(object, "avatar"),
+            title: text(object, "title")?,
+            subtitle: text(object, "subtitle"),
+            text: text(object, "text").unwrap_or_default(),
+            badges: strings("badges"),
+            images: strings("images"),
+            actions,
+            side: actions_of(object, "side", &mut handler),
+            hold: handler(object, "onLongPress"),
+         }
+      },
+      "buttons" => patches::Block::Buttons(actions_of(object, "buttons", &mut handler)),
+      "input" => {
+         let submit = handler(object, "onSubmit")?;
+         patches::Block::Input {
+            placeholder: text(object, "placeholder").unwrap_or_default(),
+            handler: submit,
+            send: flag(object, "sendButton"),
+         }
+      },
+      "button" => {
+         patches::Block::Button {
+            label:   text(object, "label")?,
+            danger:  flag(object, "danger"),
+            handler: handler(object, "onPress")?,
+         }
+      },
+      _ => return None,
+   };
+   Some(block)
+}
+
+/// A function that undoes a registration, with `update` to redraw it. For a
+/// message accessory or profile tab, `update(id)` redraws one message or
+/// profile.
 #[cfg(target_os = "android")]
 fn remover<'js>(
    ctx: &Ctx<'js>,
    remove: impl Fn(&Ctx<'js>) + 'js,
-   update: Option<ContributionId>,
+   update: Option<(ContributionId, Target)>,
 ) -> rquickjs::Result<Function<'js>> {
    let function = Function::new(ctx.clone(), move |ctx: Ctx<'js>| remove(&ctx))?;
-   if let Some(id) = update {
+   if let Some((id, target)) = update {
       function.set(
          "update",
-         Function::new(ctx.clone(), move |message: rquickjs::function::Opt<String>| {
-            patches::update(id, message.0.map(Place::Message));
+         Function::new(ctx.clone(), move |at: rquickjs::function::Opt<String>| {
+            let place = at.0.map(|at| {
+               if target == Target::Tab {
+                  Place::User(Some(at))
+               } else {
+                  Place::Message(at)
+               }
+            });
+            patches::update(id, place);
          })?,
       )?;
    }
@@ -1189,6 +1378,7 @@ fn ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>>
       ("addMessageAccessory", Target::Content),
       ("addMessageAction", Target::Action),
       ("addProfileSection", Target::Profile),
+      ("addProfileTab", Target::Tab),
    ] {
       let name = plugin.to_owned();
       ui.set(
@@ -1198,6 +1388,54 @@ fn ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>>
          })?,
       )?;
    }
+   ui.set(
+      "choose",
+      Function::new(ctx.clone(), |ctx: Ctx<'js>, options: Object<'js>| {
+         let title = options.get::<_, Option<String>>("title")?;
+         let message = options.get::<_, Option<String>>("message")?;
+         let items = options
+            .get::<_, Option<Vec<Value<'js>>>>("options")?
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|option| {
+               if let Some(label) = option.as_string() {
+                  return Some(patches::MenuItem {
+                     label:  label.to_string().ok()?,
+                     icon:   None,
+                     danger: false,
+                  });
+               }
+               let option = option.as_object()?;
+               Some(patches::MenuItem {
+                  label:  option.get::<_, Option<String>>("label").ok().flatten()?,
+                  icon:   option.get::<_, Option<String>>("icon").ok().flatten(),
+                  danger: option.get::<_, Option<bool>>("danger").ok().flatten().unwrap_or_default(),
+               })
+            })
+            .collect::<Vec<_>>();
+         if message.is_none() && items.is_empty() {
+            return Err(Exception::throw_type(&ctx, "choose needs options or a message"));
+         }
+         in_background(&ctx, move || {
+            let labels = items.iter().map(|item| item.label.clone()).collect::<Vec<_>>();
+            // A list goes in a sheet like Discord's own menus when one can be drawn.
+            if message.is_none()
+               && let Some(index) = patches::menu(title.clone(), items)
+            {
+               return Settlement::Int(Ok(index));
+            }
+            Settlement::Int(crate::picker::choose(title.as_deref(), message.as_deref(), &labels))
+         })
+      })?,
+   )?;
+   ui.set(
+      "toast",
+      Function::new(ctx.clone(), |text: String| {
+         if let Err(err) = crate::picker::toast(&text) {
+            log::warn!("toast: {err}");
+         }
+      })?,
+   )?;
    Ok(ui)
 }
 
@@ -1220,13 +1458,15 @@ fn add_contribution<'js>(
       options.get::<_, Option<Function<'js>>>("render")?
    };
    let label = match target {
-      Target::Profile => options.get::<_, Option<String>>("title")?,
+      Target::Profile | Target::Tab => options.get::<_, Option<String>>("title")?,
       _ => options.get::<_, Option<String>>("label")?,
    };
    let needs = match target {
       Target::Header | Target::Composer | Target::Action => (label.is_some(), "label and onPress"),
       Target::Content | Target::Timestamp => (evaluate.is_some(), "render"),
-      Target::Profile => (label.is_some() && evaluate.is_some(), "title and render"),
+      Target::Profile | Target::Tab | Target::TabPage => {
+         (label.is_some() && evaluate.is_some(), "title and render")
+      },
    };
    let missing_press =
       matches!(target, Target::Header | Target::Composer | Target::Action) && press.is_none();
@@ -1248,6 +1488,7 @@ fn add_contribution<'js>(
          target,
          press,
          evaluate,
+         pages: HashMap::new(),
       });
    patches::add(Contribution {
       id,
@@ -1271,7 +1512,7 @@ fn add_contribution<'js>(
          }
          patches::remove(id);
       },
-      Some(id),
+      Some((id, target)),
    )
 }
 
@@ -1507,6 +1748,27 @@ fn discord_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
 
    let object = Object::new(ctx.clone())?;
    object.set(
+      "authorize",
+      Function::new(ctx.clone(), |ctx: Ctx<'js>, options: Object<'js>| {
+         let client_id = options.get::<_, Option<String>>("clientId")?;
+         let redirect_uri = options.get::<_, Option<String>>("redirectUri")?;
+         let (Some(client_id), Some(redirect_uri)) = (client_id, redirect_uri) else {
+            return Err(Exception::throw_type(&ctx, "authorize needs clientId and redirectUri"));
+         };
+         let request = discord::Authorization {
+            client_id,
+            redirect_uri,
+            scopes: options
+               .get::<_, Option<Vec<String>>>("scopes")?
+               .unwrap_or_else(|| vec!["identify".to_owned()]),
+            response_type: options
+               .get::<_, Option<String>>("responseType")?
+               .unwrap_or_else(|| "code".to_owned()),
+         };
+         in_background(&ctx, move || Settlement::Text(discord::authorize(&request)))
+      })?,
+   )?;
+   object.set(
       "request",
       Function::new(
          ctx.clone(),
@@ -1552,6 +1814,8 @@ fn discord_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
 pub enum Settlement {
    Fetch(Result<fetch::Response, fetch::FetchError>),
    Discord(Result<fetch::Response, discord::DiscordError>),
+   Text(Result<String, discord::DiscordError>),
+   Int(Result<i32, String>),
    Rows(Result<Vec<serde_json::Map<String, serde_json::Value>>, store::StoreError>),
 }
 
