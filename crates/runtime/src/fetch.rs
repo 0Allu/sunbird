@@ -2,17 +2,13 @@
 //! certificates, proxy and VPN, and plumage ships no TLS code.
 
 use std::{
-   ffi::{
-      CStr,
-      CString,
-   },
+   ffi::CString,
    ptr,
 };
 
 use jni_sys::{
    JNIEnv,
    jclass,
-   jmethodID,
    jobject,
    jvalue,
 };
@@ -20,9 +16,10 @@ use jni_sys::{
 use crate::jvm::{
    env,
    jni,
+   method,
    new_bytes,
    read_bytes,
-   read_string,
+   take_exception,
 };
 
 /// Plugin bundles are a few hundred KiB, so anything far larger is a wrong URL.
@@ -321,35 +318,14 @@ unsafe fn send_body(
    Ok(())
 }
 
-/// # Safety
-///
-/// `env` is the current thread's `JNIEnv`, and `class` a live class.
-unsafe fn method(env: *mut JNIEnv, class: jclass, name: &CStr, signature: &CStr) -> jmethodID {
-   // SAFETY: forwarded from the caller, and both strings are NUL-terminated.
-   unsafe { jni!(env, GetMethodID, class, name.as_ptr(), signature.as_ptr()) }
-}
-
 /// The pending exception as `Throwable.toString()`, cleared.
 ///
 /// # Safety
 ///
 /// `env` is the current thread's `JNIEnv`.
 unsafe fn java_error(env: *mut JNIEnv, url: &str) -> FetchError {
-   // SAFETY: forwarded from the caller. The exception is cleared before
-   // `toString` runs, as JNI requires.
-   let message = unsafe {
-      let thrown: jobject = jni!(env, ExceptionOccurred);
-      jni!(env, ExceptionClear);
-      if thrown.is_null() {
-         None
-      } else {
-         let class = jni!(env, GetObjectClass, thrown);
-         let to_string = method(env, class, c"toString", c"()Ljava/lang/String;");
-         let text = jni!(env, CallObjectMethodA, thrown, to_string, ptr::null());
-         jni!(env, ExceptionClear);
-         read_string(env, text)
-      }
-   };
+   // SAFETY: forwarded from the caller.
+   let message = unsafe { take_exception(env) };
    FetchError::Java {
       url:     url.to_owned(),
       message: message.unwrap_or_else(|| "a Java call failed".to_owned()),

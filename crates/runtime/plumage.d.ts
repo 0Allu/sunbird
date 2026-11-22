@@ -932,10 +932,17 @@ declare namespace Plumage {
     readonly log: Log;
     readonly storage: Storage;
     readonly settings: Settings;
+    /// Read-only SQL over Phoenix's own cache (`files/store/<account>/cache.sqlite`), at most
+    /// 10000 rows. Arguments bind to `?` as text.
+    readonly stores: Stores;
     /// Runs when the plugin is turned off, reloaded or removed. Hooks and settings go away on their
     /// own, anything else the plugin started is its to undo here.
     onUnload(cleanup: () => void): void;
     fetch(url: string, init?: FetchInit): Promise<FetchResponse>;
+  }
+
+  interface Stores {
+    sql<Row = Record<string, unknown>>(query: string, ...args: unknown[]): Promise<Row[]>;
   }
 
   interface FetchInit {

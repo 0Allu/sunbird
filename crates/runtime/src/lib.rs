@@ -30,6 +30,7 @@ mod gateway;
 mod js;
 #[cfg(target_os = "android")] mod jvm;
 #[cfg(target_os = "android")] mod settings;
+#[cfg(target_os = "android")] mod store;
 
 #[derive(Debug, flub::Error)]
 pub enum Error {
@@ -320,6 +321,16 @@ impl State {
 
    fn choices_path(&self) -> PathBuf {
       self.home.join("plugins.json")
+   }
+
+   /// The app's `files` directory, which holds plumage's home and Phoenix's
+   /// store.
+   #[cfg(target_os = "android")]
+   fn files_dir(&self) -> PathBuf {
+      self
+         .home
+         .parent()
+         .map_or_else(|| self.home.clone(), Path::to_path_buf)
    }
 
    fn plugins_dir(&self) -> PathBuf {

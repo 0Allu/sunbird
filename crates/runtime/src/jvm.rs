@@ -27,7 +27,9 @@ use jni_sys::{
    JavaVM,
    jbyte,
    jbyteArray,
+   jclass,
    jint,
+   jmethodID,
    jsize,
    jstring,
 };
@@ -208,6 +210,37 @@ pub unsafe fn read_string(env: *mut JNIEnv, string: jstring) -> Option<String> {
       let owned = CStr::from_ptr(chars).to_string_lossy().into_owned();
       jni!(env, ReleaseStringUTFChars, string, chars);
       Some(owned)
+   }
+}
+
+/// # Safety
+///
+/// `env` is the current thread's `JNIEnv`, and `class` a live class.
+pub unsafe fn method(env: *mut JNIEnv, class: jclass, name: &CStr, signature: &CStr) -> jmethodID {
+   // SAFETY: forwarded from the caller, and both strings are NUL-terminated.
+   unsafe { jni!(env, GetMethodID, class, name.as_ptr(), signature.as_ptr()) }
+}
+
+/// The pending exception as `Throwable.toString()`, cleared. None when nothing
+/// was thrown or the message could not be read.
+///
+/// # Safety
+///
+/// `env` is the current thread's `JNIEnv`.
+pub unsafe fn take_exception(env: *mut JNIEnv) -> Option<String> {
+   // SAFETY: forwarded from the caller. The exception is cleared before
+   // `toString` runs, as JNI requires.
+   unsafe {
+      let thrown = jni!(env, ExceptionOccurred);
+      jni!(env, ExceptionClear);
+      if thrown.is_null() {
+         return None;
+      }
+      let class = jni!(env, GetObjectClass, thrown);
+      let to_string = method(env, class, c"toString", c"()Ljava/lang/String;");
+      let text = jni!(env, CallObjectMethodA, thrown, to_string, ptr::null());
+      jni!(env, ExceptionClear);
+      read_string(env, text)
    }
 }
 

@@ -32,7 +32,6 @@ use rquickjs::{
    object::Accessor,
 };
 
-#[cfg(target_os = "android")] use crate::fetch;
 use crate::{
    Chosen,
    Control,
@@ -45,6 +44,11 @@ use crate::{
    State,
    gateway,
    io_error,
+};
+#[cfg(target_os = "android")]
+use crate::{
+   fetch,
+   store,
 };
 
 pub struct Engine {
@@ -123,9 +127,10 @@ struct Registry<'js> {
    /// `plumage.onUnload` callbacks, run when the plugin is turned off,
    /// reloaded or removed.
    unloads: RefCell<HashMap<String, Vec<Function<'js>>>>,
-   /// Each pending `plumage.fetch`'s resolve and reject, by id.
+   /// The resolve and reject of each promise a worker thread will settle, by
+   /// id.
    #[cfg(target_os = "android")]
-   fetches: RefCell<HashMap<u64, (Function<'js>, Function<'js>)>>,
+   pending: RefCell<HashMap<u64, (Function<'js>, Function<'js>)>>,
 }
 
 // SAFETY: every field is bound to 'js, and Changed swaps exactly that lifetime.
@@ -469,27 +474,40 @@ impl Engine {
       result
    }
 
-   /// Resolves fetch `id` with `result` and runs what awaited it.
+   /// Settles promise `id` with what its worker thread produced, and runs what
+   /// awaited it.
    #[cfg(target_os = "android")]
-   pub fn settle(&self, id: u64, result: Result<fetch::Response, fetch::FetchError>) {
+   pub fn settle(&self, id: u64, settlement: Settlement) {
       self.context.with(|ctx| {
          let Some((resolve, reject)) = ctx
             .userdata::<Registry<'_>>()
-            .and_then(|registry| registry.fetches.borrow_mut().remove(&id))
+            .and_then(|registry| registry.pending.borrow_mut().remove(&id))
          else {
             return;
          };
-         let outcome = match result {
-            Ok(response) => {
-               response_object(&ctx, &response).and_then(|object| resolve.call::<_, ()>((object,)))
+         let value: rquickjs::Result<Result<Value<'_>, String>> = match settlement {
+            Settlement::Fetch(Ok(response)) => {
+               response_object(&ctx, &response).map(|object| Ok(object.into_value()))
             },
-            Err(err) => {
-               Exception::from_message(ctx.clone(), &err.to_string())
-                  .and_then(|exception| reject.call::<_, ()>((exception,)))
+            Settlement::Rows(Ok(rows)) => {
+               serde_json::to_string(&rows)
+                  .map_err(|err| Exception::throw_internal(&ctx, &err.to_string()))
+                  .and_then(|json| ctx.json_parse(json))
+                  .map(Ok)
             },
+            Settlement::Fetch(Err(err)) => Ok(Err(err.to_string())),
+            Settlement::Rows(Err(err)) => Ok(Err(err.to_string())),
          };
+         let outcome = value.and_then(|value| {
+            match value {
+               Ok(value) => resolve.call::<_, ()>((value,)),
+               Err(message) => {
+                  reject.call::<_, ()>((Exception::from_message(ctx.clone(), &message)?,))
+               },
+            }
+         });
          if let Err(err) = outcome.catch(&ctx) {
-            log::error!("fetch {id}: {err}");
+            log::error!("settling promise {id}: {err}");
          }
       });
       drain(&self.runtime);
@@ -578,7 +596,7 @@ fn registry<'js>(ctx: &Ctx<'js>, events: &GatewayRegistry) -> rquickjs::Result<R
       chosen: RefCell::default(),
       unloads: RefCell::default(),
       #[cfg(target_os = "android")]
-      fetches: RefCell::default(),
+      pending: RefCell::default(),
    })
 }
 
@@ -703,6 +721,8 @@ fn api<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
       })?,
    )?;
    #[cfg(target_os = "android")]
+   api.set("stores", stores_object(ctx)?)?;
+   #[cfg(target_os = "android")]
    api.set(
       "fetch",
       Function::new(
@@ -755,8 +775,6 @@ fn start_fetch<'js>(
    url: String,
    init: Option<Object<'js>>,
 ) -> rquickjs::Result<rquickjs::Promise<'js>> {
-   static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
    let mut request = fetch::Request {
       url,
       method: "GET".to_owned(),
@@ -777,20 +795,72 @@ fn start_fetch<'js>(
          .map(String::into_bytes);
    }
 
+   in_background(ctx, move || Settlement::Fetch(fetch::send(&request)))
+}
+
+/// What a worker thread hands back to settle a promise with.
+#[cfg(target_os = "android")]
+pub enum Settlement {
+   Fetch(Result<fetch::Response, fetch::FetchError>),
+   Rows(Result<Vec<serde_json::Map<String, serde_json::Value>>, store::StoreError>),
+}
+
+/// Runs `work` on its own thread and returns a promise it settles. The
+/// resolvers stay in the registry, since JS values cannot leave the thread
+/// that holds the engine.
+#[cfg(target_os = "android")]
+fn in_background<'js>(
+   ctx: &Ctx<'js>,
+   work: impl FnOnce() -> Settlement + Send + 'static,
+) -> rquickjs::Result<rquickjs::Promise<'js>> {
+   static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
    let (promise, resolve, reject) = ctx.promise()?;
    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
    ctx.userdata::<Registry<'js>>()
       .ok_or_else(|| Exception::throw_internal(ctx, "no registry"))?
-      .fetches
+      .pending
       .borrow_mut()
       .insert(id, (resolve, reject));
    std::thread::spawn(move || {
-      let result = fetch::send(&request);
+      let settlement = work();
       if let Some(engine) = crate::engine() {
-         engine.settle(id, result);
+         engine.settle(id, settlement);
       }
    });
    Ok(promise)
+}
+
+/// `plumage.stores`, read-only SQL over Phoenix's cache.
+#[cfg(target_os = "android")]
+fn stores_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+   let stores = Object::new(ctx.clone())?;
+   stores.set(
+      "sql",
+      Function::new(
+         ctx.clone(),
+         |ctx: Ctx<'js>, sql: String, args: Rest<Value<'js>>| {
+            let args = args
+               .0
+               .into_iter()
+               .map(|arg| {
+                  if let Some(text) = arg.as_string() {
+                     return text.to_string();
+                  }
+                  ctx.json_stringify(arg)?
+                     .map_or_else(|| Ok("null".to_owned()), |json| json.to_string())
+               })
+               .collect::<rquickjs::Result<Vec<String>>>()?;
+            let files = state().files_dir();
+            in_background(&ctx, move || {
+               Settlement::Rows(
+                  store::database(&files).and_then(|db| store::query(&db, &sql, &args)),
+               )
+            })
+         },
+      )?,
+   )?;
+   Ok(stores)
 }
 
 /// Records `schema` as the plugin's settings and returns an object with one
@@ -938,10 +1008,10 @@ fn storage<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
 )]
 pub fn load_plugins(state: &State, bundled: Vec<Plugin>) -> Result<Vec<String>, Error> {
    let dir = state.plugins_dir();
-   let mut sources: BTreeMap<String, (String, bool)> = bundled
+   let mut sources = bundled
       .into_iter()
       .map(|plugin| (plugin.name, (plugin.source, false)))
-      .collect();
+      .collect::<BTreeMap<String, (String, bool)>>();
    let paths = match fs::read_dir(&dir) {
       Ok(entries) => {
          entries
