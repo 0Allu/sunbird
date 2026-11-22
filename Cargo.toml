@@ -8,6 +8,7 @@ members  = [
   "crates/sigscan",
   "crates/stand-in",
   "crates/stand-in-demo",
+  "crates/ui",
 ]
 resolver = "3"
 
@@ -30,6 +31,7 @@ object          = { default-features = false, features = [ "elf", "read_core", "
 plumage-hook    = { path = "crates/hook" }
 plumage-runtime = { path = "crates/runtime" }
 plumage-sigs    = { path = "crates/sigs" }
+plumage-ui      = { path = "crates/ui" }
 rquickjs        = { features = [ "parallel" ], version = "0.14" }
 serde           = { features = [ "derive" ], version = "1" }
 serde_json      = { features = [ "raw_value" ], version = "1" }
