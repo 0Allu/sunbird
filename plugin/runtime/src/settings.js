@@ -1,7 +1,7 @@
 'use strict';
 // Phoenix in Discord's Settings: a "Phoenix" row at the top of the list opens our pages, pushed on
 // Settings' navigator (tablet) or the app's root one (phone) like Discord's own sub-pages:
-//   Phoenix: plugins (tap: its page, switch: on/off), Install from URL, Restore, Console, Reload, About
+//   Phoenix: plugins (tap: its page, switch: on/off), Install plugin (URL or file), Restore, Console, Reload, About
 //   <plugin>: Enabled, the plugin's own settings (phoenix.settings.define), Reload, Remove, Info
 //   Console: a JS prompt and the live log
 // Everything is built from Phoenix's own layouts (settings_tpl.js) and spliced into the UI-op
@@ -10,7 +10,7 @@
   const UI = PhxUI, T = __phx_tpl, PL = __phx_plugins, LOG = __phx_log;
   const ICON = {
     plugin: 'res://ic_mana_puzzle_piece_plus', reload: 'res://ic_mana_puzzle_piece_retry', remove: 'res://ic_mana_puzzle_piece_minus',
-    url: 'res://ic_mana_browser_link', console: 'res://ic_mana_angle_brackets',
+    url: 'res://ic_mana_browser_link', file: 'res://ic_mana_image_file_up', console: 'res://ic_mana_angle_brackets',
   };
   const COLOR = { text: 4294704123, muted: 4288059294, warn: 4293964338, danger: 4294475386 }; // ARGB
   const LEVEL_COLOR = [COLOR.text, COLOR.text, COLOR.warn, COLOR.danger, COLOR.muted];
@@ -204,7 +204,7 @@
       if (!rows.length) rows.push(buttonRow('No JS plugins installed', ICON.plugin));
       return [
         section('Plugins', rows),
-        section('', [buttonRow('Install from URL', ICON.url, () => openPage(INSTALL), { chevron: true, key: 'install-url' })]),
+        section('', [buttonRow('Install plugin', ICON.url, () => openPage(INSTALL), { chevron: true, key: 'install' })]),
         ...(removed.length ? [section('Removed (came with the app)', removed.map((p) => buttonRow(`Restore ${p.name}`, ICON.plugin, () => { PL.restore(p.id); rerenderMain(); }, { key: `restore-${p.id}` })))] : []),
         section('Debug', [
           buttonRow('Console', ICON.console, () => openPage(CONSOLE), { chevron: true, key: 'console' }),
@@ -265,19 +265,20 @@
   };
 
   const INSTALL = {
-    title: 'Install from URL',
+    title: 'Install plugin',
     render: (page) => {
-      const status = textLine('Paste the address of a plugin (.js) and press Enter.', COLOR.muted, false);
-      page.status = status;
+      const status = textLine('Install a plugin from a link or from a .js file on this device.', COLOR.muted, false);
+      const done = (id) => { if (id) { setText(status, `Installed ${id}. It is on the Phoenix page now.`, COLOR.text); rerenderMain(); } else setText(status, 'No file chosen.', COLOR.muted); };
+      const fail = (e) => setText(status, `Failed: ${e.message}`, COLOR.danger);
       return [
-        section('Plugin URL', [inputRow('https://…/plugin.js', ICON.url, 'install-input', (url, h) => {
+        section('From a URL', [inputRow('https://…/plugin.js', ICON.url, 'install-input', (url, h) => {
           setText(status, 'Installing…', COLOR.muted);
-          PL.installUrl(url).then((id) => {
-            setText(status, `Installed ${id}. It is on the Phoenix page now.`, COLOR.text);
-            clearInput(h);
-            rerenderMain();
-          }, (e) => setText(status, `Failed: ${e.message}`, COLOR.danger));
+          PL.installUrl(url).then((id) => { done(id); clearInput(h); }, fail);
         })]),
+        section('From a file', [buttonRow('Choose a file…', ICON.file, () => {
+          setText(status, 'Choose a .js file…', COLOR.muted);
+          PL.installFile().then(done, fail);
+        }, { key: 'install-file' })]),
         section('', [status], false),
       ];
     },

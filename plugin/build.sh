@@ -12,6 +12,16 @@ BIN=$(ls -d "$NDK"/toolchains/llvm/prebuilt/*/bin | head -1)
 win() { command -v cygpath >/dev/null && cygpath -w "$1" || echo "$1"; }
 ext=; [ -e "$BIN/clang.exe" ] && ext=.exe
 mkdir -p ../web/plugins
+# Java helper (file picker) -> hook/java/picker.dex, embedded in libplg. Needs a JDK; the committed
+# dex is used as is without one.
+if command -v javac >/dev/null; then
+  JT=$(mktemp -d)
+  javac --release 8 -nowarn -cp "$(win "$SDK/platforms/android-36/android.jar")" -d "$(win "$JT")" hook/java/phx/Picker.java
+  D8=$(ls "$SDK"/build-tools/*/d8* | sort -V | tail -1)
+  ( cd "$JT" && "$D8" --release --min-api 26 --lib "$(win "$SDK/platforms/android-36/android.jar")" --output . phx/*.class )
+  cp "$JT/classes.dex" hook/java/picker.dex
+  rm -rf "$JT"
+fi
 for t in aarch64:arm64 x86_64:x86_64; do
   triple=${t%%:*}-linux-android; abi=${t##*:}; T=$(echo "$triple" | tr 'a-z-' 'A-Z_'); t_=${triple//-/_}
   cc=$(ls "$BIN/${triple}28-clang.cmd" 2>/dev/null || ls "$BIN/${triple}28-clang")

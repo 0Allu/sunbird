@@ -328,3 +328,65 @@ pub unsafe fn load_class(env: *mut JNIEnv, anchor: jobject, name: &CStr) -> Opti
     let c = jcall!(env, CallObjectMethodA, loader, lc, a.as_ptr());
     (!clear_exc(env) && !c.is_null()).then_some(c as jclass)
 }
+
+// ---- Java helper (hook/java/phx/Picker.java, built to picker.dex) -------------------------------
+// Loaded once from memory under the app's class loader; it opens Android's document picker and
+// calls back onPicked(id, name, text, error) from Java.
+static HELPER: OnceLock<usize> = OnceLock::new(); // global ref to phx.Picker
+pub type PickedFn = fn(id: i32, name: Option<String>, text: Option<String>, error: Option<String>);
+static PICKED: OnceLock<PickedFn> = OnceLock::new();
+pub fn set_picked(f: PickedFn) { let _ = PICKED.set(f); }
+
+/// Java string via UTF-16 (GetStringUTFChars' modified UTF-8 would mangle emoji).
+pub unsafe fn jstr16(env: *mut JNIEnv, s: jstring) -> Option<String> {
+    if s.is_null() { return None; }
+    let n = jcall!(env, GetStringLength, s);
+    let mut b = vec![0u16; n.max(0) as usize];
+    jcall!(env, GetStringRegion, s, 0, n, b.as_mut_ptr());
+    Some(String::from_utf16_lossy(&b))
+}
+
+unsafe extern "system" fn w_on_picked(env: *mut JNIEnv, _cls: jclass, id: jint, name: jstring, text: jstring, error: jstring) {
+    let (n, t, e) = (jstr16(env, name), jstr16(env, text), jstr16(env, error));
+    if let Some(f) = PICKED.get() { f(id, n, t, e); }
+}
+
+unsafe fn helper(env: *mut JNIEnv) -> Result<jclass, String> {
+    if let Some(&c) = HELPER.get() { return Ok(c as jclass); }
+    const DEX: &[u8] = include_bytes!("../java/picker.dex");
+    let gh = GUEST_HOST.load(Relaxed) as jobject;
+    if gh.is_null() { return Err("Phoenix's UI bridge is not up yet".into()); }
+    let gc = jcall!(env, GetObjectClass, gh);
+    let cc = jcall!(env, FindClass, c"java/lang/Class".as_ptr());
+    let parent = jcall!(env, CallObjectMethodA, gc, jcall!(env, GetMethodID, cc, c"getClassLoader".as_ptr(), c"()Ljava/lang/ClassLoader;".as_ptr()), std::ptr::null());
+    let buf = jcall!(env, NewDirectByteBuffer, DEX.as_ptr() as *mut c_void, DEX.len() as jlong);
+    let lc = jcall!(env, FindClass, c"dalvik/system/InMemoryDexClassLoader".as_ptr());
+    let init = jcall!(env, GetMethodID, lc, c"<init>".as_ptr(), c"(Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;)V".as_ptr());
+    let loader = jcall!(env, NewObjectA, lc, init, [jvalue { l: buf }, jvalue { l: parent }].as_ptr());
+    if clear_exc(env) || loader.is_null() { return Err("could not load the helper dex".into()); }
+    let cl = jcall!(env, FindClass, c"java/lang/ClassLoader".as_ptr());
+    let load = jcall!(env, GetMethodID, cl, c"loadClass".as_ptr(), c"(Ljava/lang/String;)Ljava/lang/Class;".as_ptr());
+    let cls = jcall!(env, CallObjectMethodA, loader, load, [jvalue { l: jcall!(env, NewStringUTF, c"phx.Picker".as_ptr()) }].as_ptr());
+    if clear_exc(env) || cls.is_null() { return Err("phx.Picker not found in the helper dex".into()); }
+    let m = JNINativeMethod {
+        name: c"onPicked".as_ptr() as *mut c_char,
+        signature: c"(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V".as_ptr() as *mut c_char,
+        fnPtr: w_on_picked as *mut c_void,
+    };
+    if jcall!(env, RegisterNatives, cls, &m, 1) != 0 { clear_exc(env); return Err("RegisterNatives(onPicked) failed".into()); }
+    let g = jcall!(env, NewGlobalRef, cls) as usize;
+    Ok(*HELPER.get_or_init(|| g) as jclass)
+}
+
+/// Opens Android's document picker; the result arrives through set_picked's callback with `id`.
+pub fn pick_file(id: i32, mime: &str) -> Result<(), String> {
+    unsafe {
+        let env = env().ok_or("no JNI env")?;
+        let cls = helper(env)?;
+        let pick = jcall!(env, GetStaticMethodID, cls, c"pick".as_ptr(), c"(Ljava/lang/Object;ILjava/lang/String;)V".as_ptr());
+        let m = std::ffi::CString::new(mime).unwrap_or_default();
+        let args = [jvalue { l: GUEST_HOST.load(Relaxed) as jobject }, jvalue { i: id }, jvalue { l: jcall!(env, NewStringUTF, m.as_ptr()) }];
+        jcall!(env, CallStaticVoidMethodA, cls, pick, args.as_ptr());
+        if clear_exc(env) { Err("the picker could not start".into()) } else { Ok(()) }
+    }
+}

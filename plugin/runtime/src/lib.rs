@@ -42,6 +42,7 @@ struct Js {
 static JS: OnceLock<Js> = OnceLock::new();
 
 enum Job {
+    Picked(i32, Option<String>, Option<String>, Option<String>),
     Observe(usize, String),
     Fetched(i32, i32, Option<String>),
     Wake,
@@ -141,6 +142,10 @@ fn install(ctx: &Ctx) -> rquickjs::Result<()> {
         if unsafe { gettid() == getpid() } { return false; }
         bytes_of(v).is_some_and(|b| hook::jni::apply_ops(&b))
     }))?;
+    // pickFile(id, mime): Android's document picker; the result comes back as __phx_picked(id, name, text, error)
+    f(&p, "pickFile", Function::new(ctx.clone(), |ctx: Ctx, id: i32, mime: String| -> rquickjs::Result<()> {
+        hook::jni::pick_file(id, &mime).map_err(|e| rquickjs::Exception::throw_message(&ctx, &e))
+    }))?;
     f(&p, "bridgeListen", Function::new(ctx.clone(), |k: usize, d: i32| hook::jni::listen(k, d)))?;
     p.set("events", registry::names())?;
     native::install(ctx, &p)?;
@@ -190,6 +195,7 @@ fn js_thread() {
             with(|ctx| match j {
                 Job::Observe(i, s) => call::<()>(&ctx, "__phx_observe", (i as i32, s)).unwrap_or(()),
                 Job::Fetched(id, st, s) => call::<()>(&ctx, "__phx_fetched", (id, s, st)).unwrap_or(()),
+                Job::Picked(id, n, t, e) => call::<()>(&ctx, "__phx_picked", (id, n, t, e)).unwrap_or(()),
                 Job::Wake => {}
             });
         }
@@ -212,5 +218,6 @@ pub fn start(cfg: Config) -> bool {
     if !ok { return false; }
     registry::set_sink(Box::new(Sink));
     hook::jni::set_sink(bridge);
+    hook::jni::set_picked(|id, n, t, e| push(Job::Picked(id, n, t, e)));
     std::thread::Builder::new().name("phoenix-js".into()).spawn(js_thread).is_ok()
 }

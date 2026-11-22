@@ -113,6 +113,17 @@ const plugins = new Map();
 let cfg = { disabled: [], removed: [] }; try { cfg = { disabled: [], removed: [], ...JSON.parse(P.readFile('plugins.json') || '{}') }; } catch {}
 const saveCfg = () => P.writeFile('plugins.json', JSON.stringify(cfg));
 let bundled = []; // the APK's plugin bundle ([{id, source?, url?}])
+// Android's document picker (Java helper in libplg): resolves to {name, text}, or null if cancelled.
+const picks = new Map(); let pickId = 0;
+globalThis.__phx_picked = (id, name, text, error) => {
+  const p = picks.get(id); if (!p) return; picks.delete(id);
+  if (error) p.reject(new Error(error)); else p.resolve(text == null ? null : { name, text });
+};
+const pickFile = (mime = '*/*') => new Promise((resolve, reject) => {
+  const id = ++pickId; picks.set(id, { resolve, reject });
+  try { P.pickFile(id, mime); } catch (e) { picks.delete(id); reject(e); }
+});
+
 // Plugin settings: define({key: {type: 'switch'|'text'|'number'|'button', title, description?,
 // default?, onPress?}}); values persist in storage.json and show on the plugin's Settings page.
 const settingDefs = new Map(), settingListeners = new Map();
@@ -233,6 +244,17 @@ globalThis.__phx_plugins = {
   removedBundled: () => bundled.filter((b) => b.source && cfg.removed.includes(b.id)).map((b) => ({ id: b.id, name: meta(b.id, b.source).name })),
   /** Brings back a removed plugin that came with the app. */
   restore: (id) => { const b = bundled.find((x) => x.id === id && x.source); if (b) __phx_plugins.install(id, b.source); },
+  /** Lets the user pick a .js file and installs it (id: file name). Resolves to the id, or null if cancelled. */
+  installFile: async () => {
+    const f = await pickFile();
+    if (!f) return null;
+    const id = f.name.replace(/\.m?js$/i, '').replace(/[^\w-]+/g, '-').slice(0, 40) || 'plugin';
+    try { new Function(f.text); } catch (e) { throw new Error(`${f.name} is not valid JavaScript: ${e.message}`); }
+    (cfg.origins ||= {})[id] = `File: ${f.name}`;
+    const err = __phx_plugins.install(id, f.text);
+    if (err) throw new Error(err);
+    return id;
+  },
   /** Fetches a plugin from a URL and installs it (id: file name). Resolves to the id. */
   installUrl: async (url) => {
     const m = /([\w-]+)(\.m?js)?(?:[?#].*)?$/i.exec(url.trim());
