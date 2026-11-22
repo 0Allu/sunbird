@@ -1,0 +1,6 @@
+out/
+*.apk
+*.so
+*.dex
+*.jks
+*.png
