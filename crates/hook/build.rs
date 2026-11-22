@@ -109,7 +109,7 @@ fn source_dir(var: &str) -> PathBuf {
 }
 
 fn c_files(dir: &Path, skip: &[&str]) -> Vec<PathBuf> {
-   let mut files: Vec<_> = std::fs::read_dir(dir)
+   let mut files = std::fs::read_dir(dir)
       .unwrap_or_else(|err| panic!("{}: {err}", dir.display()))
       .map(|entry| entry.unwrap().path())
       .filter(|path| {
@@ -118,7 +118,7 @@ fn c_files(dir: &Path, skip: &[&str]) -> Vec<PathBuf> {
                .file_name()
                .is_some_and(|name| !skip.iter().any(|skip| name == *skip))
       })
-      .collect();
+      .collect::<Vec<PathBuf>>();
    files.sort();
    files
 }

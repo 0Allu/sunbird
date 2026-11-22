@@ -84,11 +84,12 @@ impl Pattern {
       }
 
       let (anchor_start, anchor_len) = best;
-      let anchor: Vec<u8> = tokens[anchor_start..anchor_start + anchor_len]
+      let anchor = tokens[anchor_start..anchor_start + anchor_len]
          .iter()
          .flatten()
          .copied()
-         .collect();
+         .collect::<Vec<u8>>();
+
       memmem::find_iter(haystack, &anchor)
          .filter_map(|found| {
             let start = found.checked_sub(anchor_start)?;

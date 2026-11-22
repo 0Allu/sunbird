@@ -164,10 +164,10 @@ fn registered<'js>(
 /// One frozen handle per live registry entry. Plugins compare nothing and parse
 /// nothing, the runtime recognizes a handle by identity.
 fn registry<'js>(ctx: &Ctx<'js>, events: &GatewayRegistry) -> rquickjs::Result<Registry<'js>> {
-   let freeze: Function<'js> = ctx
+   let freeze = ctx
       .globals()
-      .get::<_, Object<'js>>("Object")?
-      .get("freeze")?;
+      .get::<_, Object>("Object")?
+      .get::<_, Function>("freeze")?;
    let gateway = Object::new(ctx.clone())?;
    let mut handles = Vec::new();
    for (event, entry) in events.iter() {

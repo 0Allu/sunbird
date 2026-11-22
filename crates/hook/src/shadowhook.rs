@@ -39,7 +39,7 @@ unsafe impl Send for ShadowHook {}
 unsafe impl Sync for ShadowHook {}
 
 fn errmsg(errno: i32) -> String {
-   // SAFETY: shadowhook_to_errmsg returns a static NUL-terminated string for
+   // SAFETY: `shadowhook_to_errmsg` returns a static NUL-terminated string for
    // every errno.
    unsafe { CStr::from_ptr(sys::shadowhook_to_errmsg(errno)) }
       .to_string_lossy()
@@ -48,10 +48,12 @@ fn errmsg(errno: i32) -> String {
 
 pub fn init() -> Result<(), Error> {
    static INIT: OnceLock<i32> = OnceLock::new();
-   // SAFETY: plain FFI call, shadowhook serializes init internally.
+
+   // SAFETY: shadowhook serializes init internally.
    let errno = *INIT.get_or_init(|| unsafe {
       sys::shadowhook_init(sys::shadowhook_mode_t_SHADOWHOOK_MODE_UNIQUE, false)
    });
+
    if errno == 0 {
       Ok(())
    } else {
