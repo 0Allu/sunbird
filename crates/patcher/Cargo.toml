@@ -1,0 +1,18 @@
+[package]
+name = "patcher"
+description = "Patches Discord's split APKs to load plumage inside Phoenix"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+adler2       = "2"
+misstep      = { workspace = true }
+object       = { workspace = true }
+plumage-sigs = { features = [ "file" ], workspace = true }
+serde_json   = { workspace = true }
+sha1_smol    = "1"
+zip          = { features = [ "deflate-flate2-zlib-rs" ], workspace = true }
+
+[lints]
+workspace = true

@@ -2,6 +2,7 @@
 members  = [
   "crates/hook",
   "crates/loader",
+  "crates/patcher",
   "crates/runtime",
   "crates/sigs",
   "crates/sigscan",
