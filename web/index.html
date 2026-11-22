@@ -65,7 +65,10 @@
       <option value="replace">Replace Discord</option>
     </select></div>
     <div class="row" id="pkg-row"><label for="pkg">Package name</label><input type="text" id="pkg" value="com.discord.phoenix" spellcheck="false" autocapitalize="off" autocomplete="off"></div>
-    <div class="row"><label>CPU</label><span>arm64 (64-bit phones)</span></div>
+    <div class="row"><label for="cpu">CPU</label><select id="cpu">
+      <option value="arm64-v8a" selected>arm64 (phones, tablets)</option>
+      <option value="x86_64">x86_64 (WSA, emulators, Intel/AMD Chromebooks)</option>
+    </select></div>
   </section>
 
   <h2>Plugins</h2>

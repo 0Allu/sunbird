@@ -1,5 +1,6 @@
 // Find and patch the Phoenix access gate and the staff check in an arm64
-// liblibdiscord_wasm_host.so. JS port of patcher/sopatch.py (arm64 only, hand-decoded).
+// liblibdiscord_wasm_host.so. JS port of patcher/sopatch.py (arm64, hand-decoded; x86_64 is in x86.js,
+// which reuses Elf; findRegistrySlots/renameNeeded work for both).
 //
 // access:   only function referencing the experiment table {"2026-11-phoenix-app-access", 26}
 //           -> return Some(true)
@@ -11,16 +12,17 @@
 const EXPERIMENT = '2026-11-phoenix-app-access';
 const DEVTOOLS_ROW = 'Show Dev Tools Widget';
 const DEV_ENV = 'LIBDISCORD_DEV_ANALYTICS';
-const R_AARCH64_RELATIVE = 1027;
+const R_RELATIVE = { 183: 1027, 62: 8 }; // EM_AARCH64, EM_X86_64
 const te = new TextEncoder();
 
-class Elf {
+export class Elf {
   constructor(u8) {
     this.u8 = u8;
     this.v = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
     const v = this.v;
     if (v.getUint32(0) !== 0x7f454c46 || u8[4] !== 2) throw new Error('not an ELF64 file');
-    if (v.getUint16(18, true) !== 183) throw new Error('not an arm64 library');
+    this.rtype = R_RELATIVE[v.getUint16(18, true)];
+    if (!this.rtype) throw new Error('not an arm64 or x86_64 library');
     const phoff = Number(v.getBigUint64(32, true)), shoff = Number(v.getBigUint64(40, true));
     const phentsize = v.getUint16(54, true), phnum = v.getUint16(56, true);
     const shentsize = v.getUint16(58, true), shnum = v.getUint16(60, true), shstrndx = v.getUint16(62, true);
@@ -62,14 +64,14 @@ class Elf {
     return out;
   }
 
-  // R_AARCH64_RELATIVE: slot -> addend, from Android APS2-packed .rela.dyn
+  // R_*_RELATIVE: slot -> addend, from Android APS2-packed .rela.dyn
   relocs() {
     if (this._rel) return this._rel;
     const { off, size } = this.sec['.rela.dyn'];
     const d = this.u8, out = new Map();
     if (d[off] !== 0x41 || d[off + 1] !== 0x50 || d[off + 2] !== 0x53 || d[off + 3] !== 0x32) {
       for (let i = off; i < off + size; i += 24) {
-        if (Number(this.v.getBigUint64(i + 8, true) & 0xffffffffn) === R_AARCH64_RELATIVE)
+        if (Number(this.v.getBigUint64(i + 8, true) & 0xffffffffn) === this.rtype)
           out.set(Number(this.v.getBigUint64(i, true)), Number(this.v.getBigInt64(i + 16, true)));
       }
       return (this._rel = out);
@@ -92,7 +94,7 @@ class Elf {
         roff += fl & 2 ? god : sl();
         if (!(fl & 1)) info = sl();
         if (fl & 8 && !(fl & 4)) add += sl();
-        if (Number(info & 0xffffffffn) === R_AARCH64_RELATIVE) out.set(Number(roff), Number(fl & 8 ? add : 0n));
+        if (Number(info & 0xffffffffn) === this.rtype) out.set(Number(roff), Number(fl & 8 ? add : 0n));
       }
     }
     return (this._rel = out);
@@ -153,7 +155,7 @@ class Elf {
   }
 }
 
-const one = (xs, what) => {
+export const one = (xs, what) => {
   const u = [...new Set(xs)];
   if (u.length !== 1) throw new Error(`${what}: expected 1 match, got ${u.length}`);
   return u[0];
@@ -285,6 +287,7 @@ export function renameNeeded(u8, from, to) {
 /** Patch in place. Returns a log of what was found. */
 export function patchHostLib(u8, log = () => {}) {
   const e = new Elf(u8);
+  if (e.rtype !== 1027) throw new Error('not an arm64 library');
   const acc = findAccess(e);
   e.write(acc, [0x52800020, 0xd65f03c0]); // mov w0,#1; ret
   log(`access evaluator @ 0x${acc.toString(16)} -> Some(true)`);

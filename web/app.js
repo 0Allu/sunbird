@@ -1,6 +1,6 @@
 import { PROXY as DEFAULT_PROXY, VERIFIED } from './config.js';
-import { buildPatchedApk } from './lib/apk.js';
-import { BOOTSTRAP_URL, bundleScripts, GADGET_URL, gunzip } from './lib/frida.js';
+import { ABIS, abiOf, buildPatchedApk } from './lib/apk.js';
+import { BOOTSTRAP_URL, bundleScripts, GADGET_URLS, gunzip } from './lib/frida.js';
 import { PLUGINS } from './lib/plugins.js';
 import { readZip } from './lib/zip.js';
 
@@ -15,6 +15,10 @@ const dpi = Math.round((window.devicePixelRatio || 1) * 160);
 const bestDensity = (DENSITIES.find(([, d]) => d >= dpi) || DENSITIES.at(-1))[0];
 $('dpi').innerHTML = DENSITIES.map(([n, d]) => `<option value="${n}" ${n === bestDensity ? 'selected' : ''}>${n} (${d})</option>`).join('');
 const myLang = (navigator.language || 'en').slice(0, 2).toLowerCase();
+// x86_64 only where the browser runs on it (WSA, emulators, x86 Chromebooks); the APK is usually for this device
+const looksX86 = (arch) => /Android|CrOS/.test(navigator.userAgent) && (arch === 'x86' || /x86|i686|Subsystem for Android/i.test(navigator.userAgent));
+if (looksX86()) $('cpu').value = 'x86_64';
+navigator.userAgentData?.getHighEntropyValues(['architecture']).then(({ architecture }) => { if (looksX86(architecture)) $('cpu').value = 'x86_64'; }).catch(() => {});
 $('lang').innerHTML = ['none', ...LANGS].map((l) => `<option ${l === (LANGS.includes(myLang) ? myLang : 'en') ? 'selected' : ''}>${l}</option>`).join('');
 
 function setVersions(latest) {
@@ -71,16 +75,16 @@ async function download(vc, split, optional) {
 
 function splitNames() {
   const lang = $('lang').value;
-  return { abi: 'config.arm64_v8a', density: `config.${$('dpi').value}`, lang: lang === 'none' ? null : `config.${lang}` };
+  return { abi: ABIS[$('cpu').value].split, density: `config.${$('dpi').value}`, lang: lang === 'none' ? null : `config.${lang}` };
 }
 
-async function patchAndOffer(vc, base, abi, configs) {
+async function patchAndOffer(vc, base, abi, configs, abiName) {
   const plugins = [...document.querySelectorAll('#plugins input:checked')].map((i) => i.value);
-  const frida = plugins.includes('frida') ? await fridaInput() : null;
+  const frida = plugins.includes('frida') ? await fridaInput(abiName) : null;
   const s = step('Patch and sign');
   s.progress(0.5, 'working…');
   const packageName = chosenPackage(), side = packageName !== 'com.discord';
-  const pluginLib = plugins.length ? new Uint8Array(await (await fetch('plugins/libplg-arm64.so')).arrayBuffer()) : null;
+  const pluginLib = plugins.length ? new Uint8Array(await (await fetch(ABIS[abiName].pluginLib)).arrayBuffer()) : null;
   const parts = await buildPatchedApk({ base, abi, configs, identity: await identity(), packageName, label: side ? 'Discord Phoenix' : null, plugins, pluginLib, frida, log });
   const blob = new Blob(parts, { type: 'application/vnd.android.package-archive' });
   s.done(mb(blob.size));
@@ -126,13 +130,13 @@ for (const p of PLUGINS) {
 const fridaBox = document.querySelector('#plugins input[value=frida]');
 fridaBox.onchange = () => { $('frida').hidden = !fridaBox.checked; };
 fetch('plugins/frida-example.js').then((r) => r.text()).then((t) => { if (!$('frida-code').value) $('frida-code').value = t; }).catch(() => {});
-async function fridaInput() {
+async function fridaInput(abiName) {
   const scripts = await Promise.all([...$('frida-files').files].map(async (f) => ({ name: f.name, code: await f.text() })));
   const code = $('frida-code').value.trim();
   if (code) scripts.push({ name: 'editor.js', code });
   const script = bundleScripts(scripts, await (await fetch(BOOTSTRAP_URL)).text());
   const s = step('Download frida-gadget');
-  const res = await fetch(GADGET_URL);
+  const res = await fetch(GADGET_URLS[abiName]);
   if (!res.ok) { s.fail(`HTTP ${res.status}`); throw new Error(`frida-gadget: HTTP ${res.status}`); }
   const gadget = await gunzip(new Uint8Array(await res.arrayBuffer()));
   s.done(mb(gadget.length));
@@ -167,7 +171,7 @@ $('go').onclick = async () => {
     const base = await download(vc, 'base');
     const abi = await download(vc, n.abi);
     const configs = [await downloadDensity(vc), n.lang && (await download(vc, n.lang, true))].filter(Boolean);
-    await patchAndOffer(vc, base, abi, configs);
+    await patchAndOffer(vc, base, abi, configs, $('cpu').value);
     $('go').disabled = false;
   } catch (e) {
     if (e instanceof TypeError) { log(`download blocked (${e.message}); switching to manual mode`); return showManual(vc); }
@@ -186,14 +190,14 @@ function showManual(vc) {
       const found = { configs: [] };
       for (const f of ev.target.files) {
         const u8 = new Uint8Array(await f.arrayBuffer());
-        const names = readZip(u8).map((e) => e.name);
+        const entries = readZip(u8), names = entries.map((e) => e.name), abi = abiOf(entries);
         if (names.includes('classes.dex')) found.base = u8;
-        else if (names.some((x) => x.startsWith('lib/arm64-v8a/'))) found.abi = u8;
+        else if (abi) { found.abi = u8; found.abiName = abi; }
         else if (names.includes('resources.arsc')) found.configs.push(u8);
-        log(`${f.name}: ${names.includes('classes.dex') ? 'base' : names.some((x) => x.startsWith('lib/')) ? 'native libs' : 'config split'}`);
+        log(`${f.name}: ${names.includes('classes.dex') ? 'base' : abi ? `native libs (${abi})` : names.some((x) => x.startsWith('lib/')) ? 'native libs (unsupported CPU, ignored)' : 'config split'}`);
       }
-      if (!found.base || !found.abi) throw new Error('need at least base and config.arm64_v8a');
-      await patchAndOffer(vc, found.base, found.abi, found.configs);
+      if (!found.base || !found.abi) throw new Error('need at least base and config.arm64_v8a or config.x86_64');
+      await patchAndOffer(vc, found.base, found.abi, found.configs, found.abiName);
       $('go').disabled = false;
     } catch (e) { fail(e); }
   };

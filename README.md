@@ -19,10 +19,13 @@ https://mantikafasi.github.io/phoenix-unlock/
 
 Open it on the phone. The page downloads the Discord splits, patches them, merges them into
 one APK and signs it, all in the browser, so Android can install it with a single tap.
-`web/lib/` is a JS port of the APK patcher (arm64 only):
+`web/lib/` is a JS port of the APK patcher, for arm64 and x86_64 (WSA, emulators, x86
+Chromebooks; the CPU select defaults to x86_64 when the browser runs on x86 Android/ChromeOS):
 
-- `arm64.js`: the same anchors as `patcher/sopatch.py`, with a hand-written decoder and a
-  hand-encoded staff hook. Its output is byte-identical to the Python/clang build.
+- `arm64.js`, `x86.js`: the same anchors as `patcher/sopatch.py`, with a hand-written decoder and a
+  hand-encoded staff hook per ABI. Their output is byte-identical to the Python/clang build.
+  The ABI is taken from the split (`config.arm64_v8a` or `config.x86_64`); libplg and
+  frida-gadget are picked to match.
 - `dex.js`: patches `PhoenixLaunch.i`.
 - `axml.js`: removes `requiredSplitTypes`/`splitTypes` from the manifest and sets
   `com.android.vending.splits.required` to false. Optionally renames the package; the site
@@ -60,9 +63,9 @@ node web/tools/node-build.mjs out.apk base.apk config.arm64_v8a.apk config.xxhdp
 node web/tools/dev-server.mjs <dir with the split apks>   # then open http://localhost:8787/?proxy=http://localhost:8787
 ```
 
-Verified on 356207 arm64 (Android 16). The APK built in the browser is byte-identical to
-the Node build. It installs and runs: Phoenix reaches READY in 3.1 s, chat loads, and
-drawables render. The whole page flow also runs in the phone's own Chrome in about 30 s.
+Verified on 356207 arm64 (Android 16) and x86_64 (WSA, Android 13, MessageLogger + Frida).
+The APK built in the browser is byte-identical to the Node build. It installs and runs:
+Phoenix reaches READY in 3.1 s, chat loads, and drawables render. The whole page flow also runs in the phone's own Chrome in about 30 s.
 
 ### Plugins
 
