@@ -6,7 +6,7 @@
 //!   target.
 //! - Channel numbers are the cases of the host's setter, `mh.e0.d`.
 
-use plumage_wire::Value;
+use phoenix_wire::Value;
 
 use crate::{
    Prop,

@@ -2,7 +2,7 @@
 //! fetches.
 //!
 //! Every call goes through [`SAVED`], the JNI table as ART had it before the
-//! bridge swapped two of its slots, so plumage never sees its own calls.
+//! bridge swapped two of its slots, so phoenix never sees its own calls.
 
 use std::{
    ffi::{

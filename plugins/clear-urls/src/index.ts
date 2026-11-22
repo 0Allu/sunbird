@@ -2,7 +2,7 @@
 // @version 0.1.0
 // @author amaanq
 
-const { gateway } = plumage;
+const { gateway } = phoenix;
 
 const TRACKERS = [
   /^utm_/,
@@ -39,6 +39,6 @@ const rewrite = (message: { content?: string }) => {
   message.content = cleanLinks(message.content);
 };
 
-plumage.hook(gateway.messageCreate, { before: rewrite });
-plumage.hook(gateway.messageUpdate, { before: rewrite });
-plumage.messages.onSend((text) => (text.includes("?") ? cleanLinks(text) : undefined));
+phoenix.hook(gateway.messageCreate, { before: rewrite });
+phoenix.hook(gateway.messageUpdate, { before: rewrite });
+phoenix.messages.onSend((text) => (text.includes("?") ? cleanLinks(text) : undefined));

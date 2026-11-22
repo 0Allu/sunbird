@@ -1,20 +1,20 @@
 [package]
-name = "plumage-loader"
-description = "The injected library, a constructor that starts plumage inside the host"
+name = "phoenix-loader"
+description = "The injected library, a constructor that starts phoenix inside the host"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
 
 [lib]
 crate-type = [ "cdylib" ]
-name       = "plumage"
+name       = "phoenix"
 
 [dependencies]
 libc            = { workspace = true }
 log             = { workspace = true }
 misstep         = { workspace = true }
-plumage-runtime = { workspace = true }
-plumage-sigs    = { workspace = true }
+phoenix-runtime = { workspace = true }
+phoenix-sigs    = { workspace = true }
 serde_json      = { workspace = true }
 zip             = { workspace = true }
 

@@ -3,14 +3,14 @@ use std::sync::atomic::{
    Ordering,
 };
 
-use plumage_ui::{
+use phoenix_ui::{
    Node,
    Op,
    Prop,
    Props,
    ViewKind,
 };
-use plumage_wire::{
+use phoenix_wire::{
    Key,
    Value,
    encode_view_event,
@@ -198,7 +198,7 @@ impl Patches {
       );
       row.set(
          Prop::ACCESSIBILITY_ID,
-         Some(Value::Str(format!("plumage.command.{name}"))),
+         Some(Value::Str(format!("phoenix.command.{name}"))),
       );
       if let [image, middle, right] = row.kids.as_mut_slice() {
          image.set(Prop::URI, Some(Value::Str(icon.to_owned())));

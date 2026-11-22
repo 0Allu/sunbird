@@ -64,7 +64,7 @@ fn main() {
          &out.join("shadowhook.rs"),
       );
    }
-   build.files(&sources).compile("plumage_native_hooks");
+   build.files(&sources).compile("phoenix_native_hooks");
    println!("cargo:rustc-link-lib=log");
    println!("cargo:rustc-link-lib=dl");
    bind(
@@ -76,7 +76,7 @@ fn main() {
 
 /// `shadowhook_init` dlopens `libshadowhook_nothing.so` by name to learn the
 /// linker's soinfo layout, and fails without it. It has to ship next to
-/// `libplumage.so`, in the APK's native library directory, where the linker
+/// `libphoenix.so`, in the APK's native library directory, where the linker
 /// searches.
 fn probe_library(shadowhook: &Path, out: &Path) {
    let library = out.join("libshadowhook_nothing.so");

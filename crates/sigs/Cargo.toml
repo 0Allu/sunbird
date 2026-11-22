@@ -1,5 +1,5 @@
 [package]
-name              = "plumage-sigs"
+name              = "phoenix-sigs"
 description       = "Typed hook-point rules and the per-build signature table"
 edition.workspace = true
 license.workspace = true
@@ -12,7 +12,7 @@ file = [ "dep:object" ]
 [dependencies]
 flub         = { workspace = true }
 object       = { optional = true, workspace = true }
-plumage-hook = { workspace = true }
+phoenix-hook = { workspace = true }
 
 [lints]
 workspace = true

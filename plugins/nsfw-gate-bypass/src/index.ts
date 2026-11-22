@@ -2,7 +2,7 @@
 // @version 0.1.0
 // @author amaanq
 
-const { gateway } = plumage;
+const { gateway } = phoenix;
 
 const VERIFIED_ADULT = 3;
 
@@ -17,9 +17,9 @@ const unlock = (user: Gated | undefined) => {
   user.age_verification_status = VERIFIED_ADULT;
 };
 
-const ready = gateway.ready as Plumage.Sig<{ user?: Gated }> | undefined;
-const userUpdate = gateway.userUpdate as Plumage.Sig<Gated> | undefined;
+const ready = gateway.ready as Phoenix.Sig<{ user?: Gated }> | undefined;
+const userUpdate = gateway.userUpdate as Phoenix.Sig<Gated> | undefined;
 
-if (ready) plumage.hook(ready, { before: (payload) => unlock(payload.user) });
-else plumage.log.warn("this build has no READY handler");
-if (userUpdate) plumage.hook(userUpdate, { before: unlock });
+if (ready) phoenix.hook(ready, { before: (payload) => unlock(payload.user) });
+else phoenix.log.warn("this build has no READY handler");
+if (userUpdate) phoenix.hook(userUpdate, { before: unlock });

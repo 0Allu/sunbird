@@ -2,9 +2,9 @@
 // @version 0.1.0
 // @author amaanq
 
-const { gateway } = plumage;
+const { gateway } = phoenix;
 
-const settings = plumage.settings.define({
+const settings = phoenix.settings.define({
   threshold: {
     type: "number",
     title: "Threshold",
@@ -24,7 +24,7 @@ const DAY = 86_400_000;
 
 const sentAt = (snowflake: string) => Number((BigInt(snowflake) >> 22n) + DISCORD_EPOCH);
 
-plumage.hook(gateway.messageCreate, {
+phoenix.hook(gateway.messageCreate, {
   before(message) {
     if (!settings.showBots && message.author?.bot) return;
     const nonce = typeof message.nonce === "number" ? String(message.nonce) : message.nonce;

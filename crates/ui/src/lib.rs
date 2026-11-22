@@ -2,7 +2,7 @@
 //! Phoenix's own settings layouts.
 //!
 //! A batch is a version byte followed by ops until the end of the buffer. Op
-//! values use the bridge's tagged format from `plumage_wire`.
+//! values use the bridge's tagged format from `phoenix_wire`.
 
 use std::{
    fmt,
@@ -10,7 +10,7 @@ use std::{
    sync::OnceLock,
 };
 
-use plumage_wire::{
+use phoenix_wire::{
    DecodeError as WireError,
    Key,
    Reader,

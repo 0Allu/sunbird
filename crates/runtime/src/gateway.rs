@@ -19,8 +19,8 @@ use std::{
    },
 };
 
-use plumage_hook::Image;
-use plumage_sigs::{
+use phoenix_hook::Image;
+use phoenix_sigs::{
    Abi,
    EventId,
    GATEWAY_HANDLER_FIELD,
@@ -122,7 +122,7 @@ pub fn swap(
    for ((_, entry), found) in gateway.registry.iter().zip(previous) {
       if found != entry.handler {
          return Err(
-            plumage_sigs::Error::Conflict {
+            phoenix_sigs::Error::Conflict {
                sig: entry.name.clone(),
                anchor: "registry swap".into(),
                expected: entry.handler,

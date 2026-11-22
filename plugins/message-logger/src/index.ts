@@ -2,9 +2,9 @@
 // @version 0.1.0
 // @author amaanq
 
-const { gateway } = plumage;
+const { gateway } = phoenix;
 
-const settings = plumage.settings.define({
+const settings = phoenix.settings.define({
   keepDeleted: {
     type: "switch",
     title: "Keep deleted messages",
@@ -53,7 +53,7 @@ interface Seen {
   channelId: string;
   guildId?: string;
   content: string;
-  attachments: Plumage.Attachment[];
+  attachments: Phoenix.Attachment[];
   history: string[];
   deleted: boolean;
 }
@@ -64,14 +64,14 @@ const seen = new Map<string, Seen>();
 
 const ids = (list: string) => list.split(/[\s,]+/).filter(Boolean);
 
-const ignored = (message: Plumage.GatewayMessage) =>
+const ignored = (message: Phoenix.GatewayMessage) =>
   (message.flags & EPHEMERAL) !== 0 ||
   (settings.ignoreBots && message.author?.bot === true) ||
   ids(settings.ignoreUsers).includes(message.author?.id) ||
   ids(settings.ignoreChannels).includes(message.channel_id) ||
   (message.guild_id !== undefined && ids(settings.ignoreGuilds).includes(message.guild_id));
 
-const remember = (message: Plumage.GatewayMessage) => {
+const remember = (message: Phoenix.GatewayMessage) => {
   let entry = seen.get(message.id);
   if (!entry) {
     entry = {
@@ -100,7 +100,7 @@ const subtext = (text: string, suffix: string) =>
     .map((line) => `-# ${line}`)
     .join("\n") + suffix;
 
-plumage.hook(gateway.messageCreate, {
+phoenix.hook(gateway.messageCreate, {
   before(message) {
     if (!message.id || typeof message.content !== "string" || ignored(message)) return;
     // A create whose nonce names an existing message replaces that message in
@@ -111,7 +111,7 @@ plumage.hook(gateway.messageCreate, {
   },
 });
 
-plumage.hook(gateway.messageUpdate, {
+phoenix.hook(gateway.messageUpdate, {
   before(message) {
     // Embed-only updates carry no content.
     if (!message.id || !message.channel_id || typeof message.content !== "string") return;
@@ -147,7 +147,7 @@ const markDeleted = (id: string) => {
   let content = entry.content ? `\`\`\`diff\n${lines.join("\n")}\n\`\`\`\n` : "";
   if (entry.history.length) content += `${entry.history.join("\n")}\n`;
   content += `-# (deleted <t:${unix(undefined)}:R>)`;
-  plumage.dispatch(gateway.messageUpdate, {
+  phoenix.dispatch(gateway.messageUpdate, {
     id,
     channel_id: entry.channelId,
     ...(entry.guildId ? { guild_id: entry.guildId } : {}),
@@ -156,13 +156,13 @@ const markDeleted = (id: string) => {
   return true;
 };
 
-plumage.hook(gateway.messageDelete, {
+phoenix.hook(gateway.messageDelete, {
   before(deleted) {
     if (settings.keepDeleted && markDeleted(deleted.id)) return false;
   },
 });
 
-plumage.hook(gateway.messageDeleteBulk, {
+phoenix.hook(gateway.messageDeleteBulk, {
   before(deleted) {
     if (!settings.keepDeleted) return;
     deleted.ids = deleted.ids.filter((id) => !markDeleted(id));

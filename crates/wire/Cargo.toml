@@ -1,5 +1,5 @@
 [package]
-name              = "plumage-wire"
+name              = "phoenix-wire"
 description       = "Codec for the tagged values and frames on Phoenix's guest/host bridge"
 edition.workspace = true
 license.workspace = true

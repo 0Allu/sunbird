@@ -17,7 +17,7 @@ use misstep::{
    ResultExt,
    bail,
 };
-use plumage_sigs::{
+use phoenix_sigs::{
    Build,
    GatewayRegistry,
    Image,
@@ -91,7 +91,7 @@ fn main() -> misstep::Result<()> {
    Ok(())
 }
 
-fn report<A: plumage_sigs::Abi>(kind: &str, sig: &Sig<'_, A>, image: &Image<'_>) -> bool {
+fn report<A: phoenix_sigs::Abi>(kind: &str, sig: &Sig<'_, A>, image: &Image<'_>) -> bool {
    match sig.resolve(image) {
       Ok(located) => {
          let prologue = image

@@ -2,9 +2,9 @@
 // @version 0.1.0
 // @author amaanq
 
-const { gateway } = plumage;
+const { gateway } = phoenix;
 
-const settings = plumage.settings.define({
+const settings = phoenix.settings.define({
   keepOwn: {
     type: "switch",
     title: "Keep my own",
@@ -40,9 +40,9 @@ const strip = (value: unknown) => {
   }
 };
 
-const ready = gateway.ready as Plumage.Sig<{ user?: { id: string } }> | undefined;
+const ready = gateway.ready as Phoenix.Sig<{ user?: { id: string } }> | undefined;
 if (ready) {
-  plumage.hook(ready, {
+  phoenix.hook(ready, {
     before(payload) {
       self = payload.user?.id;
       strip(payload);
@@ -69,5 +69,5 @@ const events = [
 ];
 for (const event of events) {
   const sig = gateway[event];
-  if (sig) plumage.hook(sig, { before: strip });
+  if (sig) phoenix.hook(sig, { before: strip });
 }

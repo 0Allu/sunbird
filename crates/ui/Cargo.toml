@@ -1,5 +1,5 @@
 [package]
-name              = "plumage-ui"
+name              = "phoenix-ui"
 description       = "Codec for Phoenix UI-op batches and view-event dispatch frames"
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ version.workspace = true
 
 [dependencies]
 flub         = { workspace = true }
-plumage-wire = { workspace = true }
+phoenix-wire = { workspace = true }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
 

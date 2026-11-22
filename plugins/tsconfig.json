@@ -9,5 +9,5 @@
     "types": [],
     "moduleDetection": "force"
   },
-  "include": ["*/src", "../crates/runtime/plumage.d.ts"]
+  "include": ["*/src", "../crates/runtime/phoenix.d.ts"]
 }

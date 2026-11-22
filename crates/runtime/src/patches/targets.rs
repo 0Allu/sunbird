@@ -1,10 +1,10 @@
-use plumage_ui::{
+use phoenix_ui::{
    Node,
    Prop,
    Props,
    ViewKind,
 };
-use plumage_wire::Value;
+use phoenix_wire::Value;
 
 use crate::patches::{
    Contribution,
@@ -296,7 +296,7 @@ impl Templates {
             button.set(
                Prop::ACCESSIBILITY_ID,
                Some(Value::Str(format!(
-                  "plumage.{}.{}",
+                  "phoenix.{}.{}",
                   contribution.plugin, contribution.id.0
                ))),
             );
@@ -358,7 +358,7 @@ impl Templates {
          draft.set(
             Prop::ACCESSIBILITY_ID,
             Some(Value::Str(format!(
-               "plumage.{}.{}",
+               "phoenix.{}.{}",
                contribution.plugin, contribution.id.0
             ))),
          );

@@ -1,5 +1,5 @@
 //! HTTP through the platform's own stack, so requests follow the system's
-//! certificates, proxy and VPN, and plumage ships no TLS code.
+//! certificates, proxy and VPN, and phoenix ships no TLS code.
 
 use std::{
    ffi::CString,

@@ -1,6 +1,6 @@
 //! Read-only SQL over Phoenix's own cache,
 //! `files/store/<account>/cache.sqlite`, through Android's `SQLiteDatabase` so
-//! plumage ships no SQLite.
+//! phoenix ships no SQLite.
 
 use std::{
    ffi::CString,

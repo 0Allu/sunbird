@@ -1,4 +1,4 @@
-//! A "Plumage" row in Discord's Settings that opens plumage's own pages.
+//! A "Phoenix" row in Discord's Settings that opens phoenix's own pages.
 //!
 //! Phoenix builds its UI as a stream of UI-op batches from Rust to Java. This
 //! module rewrites those batches to splice in nodes built from Phoenix's own
@@ -29,7 +29,7 @@ use std::{
 };
 
 use memchr::memmem;
-use plumage_ui::{
+use phoenix_ui::{
    ChildEdit,
    Node,
    Op,
@@ -46,7 +46,7 @@ use plumage_ui::{
    set_prop,
    templates,
 };
-use plumage_wire::{
+use phoenix_wire::{
    DispatchEvent,
    Value,
    decode_dispatch,
@@ -66,7 +66,7 @@ use crate::{
 
 const FIRST_ID: i32 = 0x5000_0000;
 /// The host drops motion slots at or above 65536, and Rust counts its own up
-/// from 0, so plumage takes them downward from the top.
+/// from 0, so phoenix takes them downward from the top.
 const SLOT_END: i32 = 1 << 16;
 const LOGOUT_ROW: &str = "settings.row.logout";
 const ICON_PLUGIN: &str = "res://ic_mana_puzzle_piece_plus";
@@ -74,7 +74,7 @@ const ICON_CHECK: &str = "res://ic_mana_checkmark_large";
 const ICON_RELOAD: &str = "res://ic_mana_puzzle_piece_retry";
 const ICON_UNINSTALL: &str = "res://ic_mana_puzzle_piece_minus";
 const ICON_CONSOLE: &str = "res://ic_mana_angle_brackets";
-/// Ids Phoenix's captured page layout uses for the parts plumage fills in.
+/// Ids Phoenix's captured page layout uses for the parts phoenix fills in.
 const PAGE_HEADER_SPACER: u32 = 0x4E1;
 const PAGE_CONTENT: u32 = 0x4E4;
 const PAGE_HEADER: u32 = 0x562;
@@ -245,7 +245,7 @@ impl SlotPool {
    }
 }
 
-/// The "Plumage" row in the Settings list.
+/// The "Phoenix" row in the Settings list.
 struct Entry {
    root: i32,
    ids:  Vec<i32>,
@@ -260,7 +260,7 @@ struct Page {
    slots:    Vec<(i32, Slot)>,
 }
 
-/// The open Settings screen and what plumage added to it.
+/// The open Settings screen and what phoenix added to it.
 struct Screen {
    list:       i32,
    /// Rust's own rows in the list and pages on the navigator, kept current
@@ -467,7 +467,7 @@ pub fn log_changed() {
    }
 }
 
-/// Splices plumage's nodes into a Rust-to-Java UI batch.
+/// Splices phoenix's nodes into a Rust-to-Java UI batch.
 fn rewrite_ops(batch: &[u8]) -> Action {
    // Most batches carry neither the Settings list nor a navigator, so they
    // pass without being decoded.
@@ -489,7 +489,7 @@ fn rewrite_ops(batch: &[u8]) -> Action {
       .map_or(Action::Pass, |ops| Action::Replace(encode(&ops)))
 }
 
-/// Takes view events on plumage's nodes out of a Java-to-Rust dispatch.
+/// Takes view events on phoenix's nodes out of a Java-to-Rust dispatch.
 fn filter_dispatch(frame: &[u8]) -> Action {
    let Ok(items) = decode_dispatch(frame) else {
       return Action::Pass;
@@ -734,7 +734,7 @@ impl Settings {
 
    fn render(&self, kind: PageKind) -> (String, Vec<Tree>) {
       match kind {
-         PageKind::Main => ("Plumage".to_owned(), main_sections(&self.plugins)),
+         PageKind::Main => ("Phoenix".to_owned(), main_sections(&self.plugins)),
          PageKind::Console => ("Console".to_owned(), console_sections()),
          PageKind::Plugin(index) => {
             self.plugins.get(index).map_or_else(
@@ -876,7 +876,7 @@ impl Settings {
    }
 
    fn entry_ops(&mut self) -> (Entry, Vec<Op>) {
-      let row = button_row("Plumage", ICON_PLUGIN, Some(Press::OpenMain), true);
+      let row = button_row("Phoenix", ICON_PLUGIN, Some(Press::OpenMain), true);
       let mut section = section("", vec![row]);
       let mut ops = Vec::new();
       let root = self.build(&mut section, None, &mut ops);
@@ -952,7 +952,7 @@ impl Settings {
                if ids.contains(&list)
                   || navigator.is_some_and(|navigator| ids.contains(&navigator)) =>
             {
-               // Java's delete does not recurse, so plumage's nodes are listed
+               // Java's delete does not recurse, so phoenix's nodes are listed
                // here.
                let screen = self.screen.take().expect("checked above");
                let ours = screen
@@ -1069,7 +1069,7 @@ impl Settings {
       });
    }
 
-   /// Records Rust's pages on the navigator. While plumage has pages open,
+   /// Records Rust's pages on the navigator. While phoenix has pages open,
    /// they stay on top of Rust's.
    fn navigator_changed(&mut self, original: Op, ids: Vec<i32>, out: &mut Vec<Op>) -> bool {
       let Some(screen) = &mut self.screen else {
@@ -1138,7 +1138,7 @@ fn button_row(title: &str, icon: &str, press: Option<Press>, chevron: bool) -> T
    root.set(Prop::ACCESSIBILITY_LABEL, Some(text(title)));
    root.set(
       Prop::ACCESSIBILITY_ID,
-      Some(text(&format!("plumage-{title}"))),
+      Some(text(&format!("phoenix-{title}"))),
    );
    if let Some(row) = root.kids.first_mut() {
       if let Some(icon_node) = row.kids.get_mut(0) {
@@ -1225,7 +1225,7 @@ fn switch_row(
    root.set(Prop::ACCESSIBILITY_CHECKED, Some(Value::Bool(on)));
    root.set(
       Prop::ACCESSIBILITY_ID,
-      Some(text(&format!("plumage-{title}"))),
+      Some(text(&format!("phoenix-{title}"))),
    );
    root.press = Some(press);
    let Some(row) = root.kids.first_mut() else {
@@ -1373,7 +1373,7 @@ fn text_field(
       input.set(Prop::ROLE, None);
       input.set(
          Prop::ACCESSIBILITY_ID,
-         Some(text(&format!("plumage-{placeholder}"))),
+         Some(text(&format!("phoenix-{placeholder}"))),
       );
       input.slot = Some(Slot::Input(field));
    }

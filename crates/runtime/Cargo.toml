@@ -1,6 +1,6 @@
 [package]
-name              = "plumage-runtime"
-description       = "QuickJS plugin runtime that drives plumage's gateway hooks"
+name              = "phoenix-runtime"
+description       = "QuickJS plugin runtime that drives phoenix's gateway hooks"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -8,8 +8,8 @@ version.workspace = true
 [dependencies]
 flub         = { workspace = true }
 log          = { workspace = true }
-plumage-hook = { workspace = true }
-plumage-sigs = { workspace = true }
+phoenix-hook = { workspace = true }
+phoenix-sigs = { workspace = true }
 rquickjs     = { workspace = true }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
@@ -22,8 +22,8 @@ rquickjs = { features = [ "bindgen" ], workspace = true }
 jni-sys      = { workspace = true }
 libc         = { workspace = true }
 memchr       = { workspace = true }
-plumage-ui   = { workspace = true }
-plumage-wire = { workspace = true }
+phoenix-ui   = { workspace = true }
+phoenix-wire = { workspace = true }
 
 [lints]
 workspace = true

@@ -3,7 +3,7 @@ use std::collections::{
    HashSet,
 };
 
-use plumage_ui::{
+use phoenix_ui::{
    ChildEdit,
    Node,
    Op,
@@ -11,7 +11,7 @@ use plumage_ui::{
    Props,
    ViewKind,
 };
-use plumage_wire::Value;
+use phoenix_wire::Value;
 
 const FIRST: Prop = Prop::named("first");
 

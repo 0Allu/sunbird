@@ -1,4 +1,4 @@
-//! Function hooks and signature scanning for plumage.
+//! Function hooks and signature scanning for phoenix.
 //!
 //! - [`Hook`] is the inline-hook interface. [`Inline`] picks the backend for
 //!   the target, `ShadowHook` on Android ARM and Dobby everywhere else (iOS,

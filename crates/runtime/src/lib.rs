@@ -1,8 +1,8 @@
 //! The plugin runtime the loader starts.
 //!
 //! [`start`] picks the target library among the loaded images, boots `QuickJS`
-//! with the `plumage` API, and evaluates every bundle in `<home>/plugins`.
-//! Every gateway registry entry points at plumage's detour from the start, and
+//! with the `phoenix` API, and evaluates every bundle in `<home>/plugins`.
+//! Every gateway registry entry points at phoenix's detour from the start, and
 //! a plugin's hook turns its event on.
 
 use std::{
@@ -16,8 +16,8 @@ use std::{
    },
 };
 
-use plumage_hook::Image;
-use plumage_sigs::{
+use phoenix_hook::Image;
+use phoenix_sigs::{
    Build,
    GatewayRegistry,
    LIBRARIES,
@@ -52,9 +52,9 @@ pub enum Error {
    #[error("javascript: {0}")]
    Js(String),
    #[error(transparent)]
-   Sig(#[from] plumage_sigs::Error),
+   Sig(#[from] phoenix_sigs::Error),
    #[error(transparent)]
-   Hook(#[from] plumage_hook::Error),
+   Hook(#[from] phoenix_hook::Error),
    #[error("{url}: plugins install from https:// URLs ending in a name like plugin.js")]
    PluginUrl { url: String },
    #[error("{url}: the download is not UTF-8 text")]
@@ -73,7 +73,7 @@ struct State {
 
 static STATE: OnceLock<State> = OnceLock::new();
 
-/// A plugin bundle, an esbuild IIFE that receives the `plumage` API.
+/// A plugin bundle, an esbuild IIFE that receives the `phoenix` API.
 pub struct Plugin {
    pub name:   String,
    pub source: String,
@@ -284,7 +284,7 @@ pub struct Started {
    pub plugins: Vec<String>,
 }
 
-/// Starts plumage against the first loaded library that matches a known build
+/// Starts phoenix against the first loaded library that matches a known build
 /// ID.
 ///
 /// Falls back to the first library named in [`LIBRARIES`]. `bundled` plugins
@@ -342,7 +342,7 @@ impl State {
       self.home.join("plugins.json")
    }
 
-   /// The app's `files` directory, which holds plumage's home and Phoenix's
+   /// The app's `files` directory, which holds phoenix's home and Phoenix's
    /// store.
    #[cfg(target_os = "android")]
    fn files_dir(&self) -> PathBuf {

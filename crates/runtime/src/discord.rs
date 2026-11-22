@@ -30,7 +30,7 @@ use std::{
    time::Duration,
 };
 
-use plumage_wire::{
+use phoenix_wire::{
    DispatchEvent,
    HostCall,
    Key,
@@ -171,7 +171,7 @@ pub fn observe_call(frame: &[u8]) {
    });
 }
 
-/// Takes the `@http` replies to plumage's requests out of a `nativeDispatch`
+/// Takes the `@http` replies to phoenix's requests out of a `nativeDispatch`
 /// call.
 pub fn filter(bytes: &[u8]) -> Action {
    if PENDING

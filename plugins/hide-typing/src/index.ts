@@ -2,7 +2,7 @@
 // @version 0.1.0
 // @author amaanq
 
-const typing = plumage.gateway.typingStart;
+const typing = phoenix.gateway.typingStart;
 
-if (typing) plumage.hook(typing, { before: () => false });
-else plumage.log.warn("this build has no TYPING_START handler");
+if (typing) phoenix.hook(typing, { before: () => false });
+else phoenix.log.warn("this build has no TYPING_START handler");

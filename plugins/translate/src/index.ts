@@ -2,9 +2,9 @@
 // @version 0.1.0
 // @author amaanq
 
-const { gateway } = plumage;
+const { gateway } = phoenix;
 
-const settings = plumage.settings.define({
+const settings = phoenix.settings.define({
   channels: {
     type: "text",
     title: "Channels",
@@ -53,7 +53,7 @@ const google: Translator = async (text, target) => {
   })
     .map(([name, value]) => `${name}=${encodeURIComponent(value)}`)
     .join("&");
-  const response = await plumage.fetch(`https://translate-pa.googleapis.com/v1/translate?${query}`);
+  const response = await phoenix.fetch(`https://translate-pa.googleapis.com/v1/translate?${query}`);
   if (!response.ok) throw new Error(`Google answered ${response.status}`);
 
   const { translation, sourceLanguage } = response.json<{ translation: string; sourceLanguage: string }>();
@@ -63,7 +63,7 @@ const google: Translator = async (text, target) => {
 const kagi =
   (token: string, best: boolean): Translator =>
   async (text, target) => {
-    const response = await plumage.fetch(
+    const response = await phoenix.fetch(
       `https://translate.kagi.com/api/translate?token=${encodeURIComponent(token)}`,
       {
         method: "POST",
@@ -80,7 +80,7 @@ const kagi =
       case 200:
         break;
       case 429:
-        plumage.log.warn("Kagi quota exceeded, using Google");
+        phoenix.log.warn("Kagi quota exceeded, using Google");
         return google(text, target);
       case 401:
       case 403:
@@ -101,7 +101,7 @@ const withToken =
   (text, target) => {
     const token = settings.kagiToken.trim();
     if (token) return kagi(token, best)(text, target);
-    plumage.log.warn("Kagi is selected without a session token, using Google");
+    phoenix.log.warn("Kagi is selected without a session token, using Google");
     return google(text, target);
   };
 
@@ -119,7 +119,7 @@ const subtext = (text: string) =>
     .map((line) => `-# ${line}`)
     .join("\n");
 
-plumage.on(gateway.messageCreate, async (message) => {
+phoenix.on(gateway.messageCreate, async (message) => {
   const original = message.content?.trim();
   const channels = settings.channels.split(",").map((id) => id.trim());
   if (!original || !channels.includes(message.channel_id)) return;
@@ -131,13 +131,13 @@ plumage.on(gateway.messageCreate, async (message) => {
   try {
     translation = await translate(original, target);
   } catch (err) {
-    plumage.log.warn(`translating ${message.id}: ${err}`);
+    phoenix.log.warn(`translating ${message.id}: ${err}`);
     return;
   }
   if (baseLanguage(translation.from) === baseLanguage(target)) return;
   if (translation.text.trim() === original) return;
 
-  plumage.enqueue(gateway.messageUpdate, {
+  phoenix.enqueue(gateway.messageUpdate, {
     id: message.id,
     channel_id: message.channel_id,
     ...(message.guild_id ? { guild_id: message.guild_id } : {}),

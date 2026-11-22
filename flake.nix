@@ -1,5 +1,5 @@
 {
-  description = "plumage, a plugin framework for Discord's Rust mobile client";
+  description = "phoenix, a plugin framework for Discord's Rust mobile client";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

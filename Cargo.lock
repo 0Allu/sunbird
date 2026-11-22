@@ -395,14 +395,14 @@ dependencies = [
  "adler2",
  "misstep",
  "object",
- "plumage-sigs",
+ "phoenix-sigs",
  "serde_json",
  "sha1_smol",
  "zip",
 ]
 
 [[package]]
-name = "plumage-hook"
+name = "phoenix-hook"
 version = "0.1.0"
 dependencies = [
  "bindgen 0.73.2",
@@ -414,21 +414,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "plumage-loader"
+name = "phoenix-loader"
 version = "0.1.0"
 dependencies = [
  "android_logger",
  "libc",
  "log",
  "misstep",
- "plumage-runtime",
- "plumage-sigs",
+ "phoenix-runtime",
+ "phoenix-sigs",
  "serde_json",
  "zip",
 ]
 
 [[package]]
-name = "plumage-runtime"
+name = "phoenix-runtime"
 version = "0.1.0"
 dependencies = [
  "flub",
@@ -436,36 +436,36 @@ dependencies = [
  "libc",
  "log",
  "memchr",
- "plumage-hook",
- "plumage-sigs",
- "plumage-ui",
- "plumage-wire",
+ "phoenix-hook",
+ "phoenix-sigs",
+ "phoenix-ui",
+ "phoenix-wire",
  "rquickjs",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "plumage-sigs"
+name = "phoenix-sigs"
 version = "0.1.0"
 dependencies = [
  "flub",
  "object",
- "plumage-hook",
+ "phoenix-hook",
 ]
 
 [[package]]
-name = "plumage-ui"
+name = "phoenix-ui"
 version = "0.1.0"
 dependencies = [
  "flub",
- "plumage-wire",
+ "phoenix-wire",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "plumage-wire"
+name = "phoenix-wire"
 version = "0.1.0"
 dependencies = [
  "flub",
@@ -686,7 +686,7 @@ name = "sigscan"
 version = "0.1.0"
 dependencies = [
  "misstep",
- "plumage-sigs",
+ "phoenix-sigs",
 ]
 
 [[package]]

@@ -2,9 +2,9 @@
 // @version 0.1.0
 // @author amaanq
 
-const { gateway } = plumage;
+const { gateway } = phoenix;
 
-const settings = plumage.settings.define({
+const settings = phoenix.settings.define({
   titles: {
     type: "switch",
     title: "Replace titles",
@@ -40,7 +40,7 @@ const trusted = (entry: { original: boolean; votes: number; locked: boolean }) =
 const lookup = (id: string) => {
   let pending = cache.get(id);
   if (!pending) {
-    pending = plumage
+    pending = phoenix
       .fetch(`https://sponsor.ajay.app/api/branding?videoID=${id}`)
       .then((response) => {
         if (!response.ok) return {};
@@ -57,7 +57,7 @@ const lookup = (id: string) => {
       })
       .catch((err) => {
         cache.delete(id);
-        plumage.log.warn(`dearrow ${id}: ${err}`);
+        phoenix.log.warn(`dearrow ${id}: ${err}`);
         return {};
       });
     cache.set(id, pending);
@@ -65,7 +65,7 @@ const lookup = (id: string) => {
   return pending;
 };
 
-const rebrand = async (message: Plumage.GatewayMessage) => {
+const rebrand = async (message: Phoenix.GatewayMessage) => {
   const embeds = message.embeds;
   if (!embeds?.length) return;
   let changed = false;
@@ -83,7 +83,7 @@ const rebrand = async (message: Plumage.GatewayMessage) => {
     }
   }
   if (!changed) return;
-  plumage.enqueue(gateway.messageUpdate, {
+  phoenix.enqueue(gateway.messageUpdate, {
     id: message.id,
     channel_id: message.channel_id,
     ...(message.guild_id ? { guild_id: message.guild_id } : {}),
@@ -91,5 +91,5 @@ const rebrand = async (message: Plumage.GatewayMessage) => {
   });
 };
 
-plumage.on(gateway.messageCreate, rebrand);
-plumage.on(gateway.messageUpdate, rebrand);
+phoenix.on(gateway.messageCreate, rebrand);
+phoenix.on(gateway.messageUpdate, rebrand);

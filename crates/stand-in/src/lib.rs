@@ -1,6 +1,6 @@
 //! Phoenix stand-in.
 //!
-//! Mirrors the parts of `liblibdiscord_wasm_host.so` that plumage touches. The
+//! Mirrors the parts of `liblibdiscord_wasm_host.so` that phoenix touches. The
 //! gateway registry is a static array of `{name ptr, name len, handler}` in
 //! `.data.rel.ro`, and every handler is `extern "C" fn(store, &Event, ctx) ->
 //! Result`, where the 32-byte result travels through the hidden return pointer.

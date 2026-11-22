@@ -1,5 +1,5 @@
 [package]
-name              = "plumage-hook"
+name              = "phoenix-hook"
 description       = "Inline and PLT hooks plus an IDA-pattern scanner over loaded images"
 edition.workspace = true
 license.workspace = true

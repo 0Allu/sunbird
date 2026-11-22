@@ -1,11 +1,11 @@
-//! `libplumage.so`, injected through a `DT_NEEDED` entry on Android and as a
+//! `libphoenix.so`, injected through a `DT_NEEDED` entry on Android and as a
 //! dylib on iOS.
 //!
 //! The constructor runs once the host library is mapped and relocated, before
 //! the host's own constructors and before the app touches the gateway, so hooks
 //! are in place for the first dispatch. Plugins come from the bundle the
-//! patcher stores beside this library, then from `$PLUMAGE_HOME/plugins`.
-//! `$PLUMAGE_HOME` defaults to the app's `files/plumage` on Android.
+//! patcher stores beside this library, then from `$PHOENIX_HOME/plugins`.
+//! `$PHOENIX_HOME` defaults to the app's `files/phoenix` on Android.
 
 use std::{
    collections::BTreeMap,
@@ -33,11 +33,11 @@ use std::{
 };
 
 use misstep::ResultExt;
-use plumage_runtime::{
+use phoenix_runtime::{
    Plugin,
    console::Tee,
 };
-use plumage_sigs::PLUGIN_BUNDLE;
+use phoenix_sigs::PLUGIN_BUNDLE;
 use zip::{
    ZipArchive,
    result::ZipError,
@@ -56,23 +56,23 @@ extern "C" fn init() {
    // Unwinding out of a constructor aborts the host, so a bug here costs
    // plugins, not the app.
    match panic::catch_unwind(AssertUnwindSafe(|| {
-      plumage_runtime::start(home(), bundled())
+      phoenix_runtime::start(home(), bundled())
    })) {
       Ok(Ok(started)) => {
          log::info!(
-            "plumage started on {} ({}), plugins: {:?}",
+            "phoenix started on {} ({}), plugins: {:?}",
             started.target,
             started.build.unwrap_or("unknown build, portable rules"),
             started.plugins,
          );
       },
-      Ok(Err(err)) => log::error!("plumage did not start: {err}"),
-      Err(_) => log::error!("plumage panicked while starting"),
+      Ok(Err(err)) => log::error!("phoenix did not start: {err}"),
+      Err(_) => log::error!("phoenix panicked while starting"),
    }
 }
 
 fn home() -> PathBuf {
-   if let Some(home) = env::var_os("PLUMAGE_HOME") {
+   if let Some(home) = env::var_os("PHOENIX_HOME") {
       return PathBuf::from(home);
    }
    // /proc/self/cmdline starts with the package name, plus `:process` for
@@ -84,7 +84,7 @@ fn home() -> PathBuf {
          String::from_utf8(name).ok()
       })
       .map_or_default(|name| name.split(':').next().unwrap_or_default().to_owned());
-   PathBuf::from(format!("/data/data/{package}/files/plumage"))
+   PathBuf::from(format!("/data/data/{package}/files/phoenix"))
 }
 
 fn bundled() -> Vec<Plugin> {
@@ -144,7 +144,7 @@ fn read_bundle() -> misstep::Result<Vec<Plugin>> {
 #[cfg(target_os = "android")]
 fn logging() {
    let config = android_logger::Config::default()
-      .with_tag("plumage")
+      .with_tag("phoenix")
       .with_max_level(log::LevelFilter::Info);
    let logger = Tee(android_logger::AndroidLogger::new(config));
    if log::set_logger(Box::leak(Box::new(logger))).is_ok() {
@@ -163,7 +163,7 @@ fn logging() {
 
       fn log(&self, record: &log::Record<'_>) {
          if self.enabled(record.metadata()) {
-            eprintln!("[plumage {}] {}", record.level(), record.args());
+            eprintln!("[phoenix {}] {}", record.level(), record.args());
          }
       }
 

@@ -30,11 +30,11 @@ log             = "0.4"
 memchr          = "2"
 misstep         = { features = [ "panic-hook", "pretty" ], version = "0.4.1" }
 object          = { default-features = false, features = [ "elf", "read_core", "std" ], version = "0.41" }
-plumage-hook    = { path = "crates/hook" }
-plumage-runtime = { path = "crates/runtime" }
-plumage-sigs    = { path = "crates/sigs" }
-plumage-ui      = { path = "crates/ui" }
-plumage-wire    = { path = "crates/wire" }
+phoenix-hook    = { path = "crates/hook" }
+phoenix-runtime = { path = "crates/runtime" }
+phoenix-sigs    = { path = "crates/sigs" }
+phoenix-ui      = { path = "crates/ui" }
+phoenix-wire    = { path = "crates/wire" }
 rquickjs        = { features = [ "parallel" ], version = "0.14" }
 serde           = { features = [ "derive" ], version = "1" }
 serde_json      = { features = [ "raw_value" ], version = "1" }

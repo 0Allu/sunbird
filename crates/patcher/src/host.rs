@@ -16,7 +16,7 @@ use object::{
       SectionHeader,
    },
 };
-use plumage_sigs::file::{
+use phoenix_sigs::file::{
    ElfFile,
    Machine,
 };

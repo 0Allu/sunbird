@@ -3,7 +3,7 @@
 //! `stand-in-demo` builds the stand-in and the loader in release, bundles the
 //! example plugin with esbuild, then runs the scenario below in this process.
 //!
-//! `stand-in-demo run <libstand_in.so> <libplumage.so> <home>` runs the
+//! `stand-in-demo run <libstand_in.so> <libphoenix.so> <home>` runs the
 //! scenario alone, which is how it runs on a phone over adb. It loads the
 //! stand-in the way Android loads Phoenix, loads the loader after it the way a
 //! `DT_NEEDED` entry would, and feeds the stand-in two gateway frames.
@@ -45,7 +45,7 @@ fn main() -> misstep::Result<()> {
       [run, stand_in, loader, home] if run == "run" => {
          scenario(Path::new(stand_in), Path::new(loader), Path::new(home))
       },
-      _ => bail!("usage: stand-in-demo [run <libstand_in.so> <libplumage.so> <home>]"),
+      _ => bail!("usage: stand-in-demo [run <libstand_in.so> <libphoenix.so> <home>]"),
    }
 }
 
@@ -57,7 +57,7 @@ fn build_and_run() -> misstep::Result<()> {
    // Separate invocations, so feature unification with the loader's
    // dependencies cannot change the stand-in's bytes and with them the build ID
    // in the sigs table.
-   for package in ["stand-in", "plumage-loader"] {
+   for package in ["stand-in", "phoenix-loader"] {
       let status = Command::new(&cargo)
          .current_dir(&root)
          .args(["build", "--release", "-p", package])
@@ -69,7 +69,7 @@ fn build_and_run() -> misstep::Result<()> {
    }
 
    let target = root.join("target");
-   let home = target.join("plumage-home");
+   let home = target.join("phoenix-home");
    match fs::remove_dir_all(&home) {
       Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
          return Err(report!(err).context(format!("clearing {}", home.display())));
@@ -96,14 +96,14 @@ fn build_and_run() -> misstep::Result<()> {
    let release = target.join("release");
    scenario(
       &release.join("libstand_in.so"),
-      &release.join("libplumage.so"),
+      &release.join("libphoenix.so"),
       &home,
    )
 }
 
 fn scenario(stand_in: &Path, loader: &Path, home: &Path) -> misstep::Result<()> {
    // SAFETY: no other threads exist yet.
-   unsafe { env::set_var("PLUMAGE_HOME", home) };
+   unsafe { env::set_var("PHOENIX_HOME", home) };
 
    let host = open(stand_in)?;
    // SAFETY: the symbol is the stand-in's exported receive function with this

@@ -12,7 +12,7 @@ use std::{
 };
 
 use log::Level;
-use plumage_sigs::{
+use phoenix_sigs::{
    EventId,
    GatewayRegistry,
 };
@@ -94,7 +94,7 @@ struct Choices<'a> {
    settings: Cow<'a, ChosenMap>,
 }
 
-/// One setting a plugin defined with `plumage.settings.define`.
+/// One setting a plugin defined with `phoenix.settings.define`.
 struct Definition<'js> {
    key:         String,
    title:       String,
@@ -152,7 +152,7 @@ pub enum Before {
 
 /// What plugins registered. It lives in the runtime's userdata, so callbacks
 /// stay JS values owned by the runtime, and the only thing plugins can reach is
-/// their own `plumage` object.
+/// their own `phoenix` object.
 struct Registry<'js> {
    gateway:      Object<'js>,
    handles:      Vec<(EventId, Object<'js>)>,
@@ -160,7 +160,7 @@ struct Registry<'js> {
    defined:      RefCell<BTreeMap<String, Vec<Definition<'js>>>>,
    /// Kept across unloads, so a reloaded plugin sees what the user chose.
    chosen:       RefCell<ChosenMap>,
-   /// `plumage.onUnload` callbacks, run when the plugin is turned off,
+   /// `phoenix.onUnload` callbacks, run when the plugin is turned off,
    /// reloaded or removed.
    unloads:      RefCell<HashMap<String, Vec<Function<'js>>>>,
    /// The resolve and reject of each promise a worker thread will settle, by
@@ -172,7 +172,7 @@ struct Registry<'js> {
    /// Slash commands by lowercase name, with the plugin that registered each.
    #[cfg(target_os = "android")]
    commands:     RefCell<HashMap<String, (String, Function<'js>)>>,
-   /// `plumage.messages.onSend` interceptors in registration order, by id.
+   /// `phoenix.messages.onSend` interceptors in registration order, by id.
    #[cfg(target_os = "android")]
    interceptors: RefCell<Vec<(u64, String, Function<'js>)>>,
 }
@@ -475,16 +475,16 @@ impl Engine {
       sent
    }
 
-   /// Evaluates `name` with a fresh `plumage` object, recording any error.
+   /// Evaluates `name` with a fresh `phoenix` object, recording any error.
    fn eval(&mut self, name: &str) {
       let Some(loaded) = self.plugins.get_mut(name) else {
          return;
       };
       let outcome = self.context.with(|ctx| {
          let run = || -> rquickjs::Result<()> {
-            let plumage = api(&ctx, name)?;
-            let wrapped = format!("(function (plumage) {{\n{}\n}})", loaded.source);
-            ctx.eval::<Function<'_>, _>(wrapped)?.call((plumage,))
+            let phoenix = api(&ctx, name)?;
+            let wrapped = format!("(function (phoenix) {{\n{}\n}})", loaded.source);
+            ctx.eval::<Function<'_>, _>(wrapped)?.call((phoenix,))
          };
          run().catch(&ctx).map_err(js_error)
       });
@@ -635,12 +635,12 @@ impl Engine {
    }
 
    /// The result as JSON when it has a JSON form, else as `String(result)`.
-   /// The prompt sees a `plumage` object of its own, named "console".
+   /// The prompt sees a `phoenix` object of its own, named "console".
    pub fn evaluate(&self, code: &str) -> Result<String, Error> {
       let result = self.context.with(|ctx| {
          let run = || -> rquickjs::Result<String> {
-            if !ctx.globals().contains_key("plumage")? {
-               ctx.globals().set("plumage", api(&ctx, "console")?)?;
+            if !ctx.globals().contains_key("phoenix")? {
+               ctx.globals().set("phoenix", api(&ctx, "console")?)?;
             }
             let result = ctx.eval::<Value<'_>, _>(code)?;
             if let Some(text) = result.as_string() {
@@ -842,7 +842,7 @@ fn registry<'js>(ctx: &Ctx<'js>, events: &GatewayRegistry) -> rquickjs::Result<R
    })
 }
 
-/// `MESSAGE_CREATE` to `messageCreate`, the key plugins and `plumage.d.ts` use.
+/// `MESSAGE_CREATE` to `messageCreate`, the key plugins and `phoenix.d.ts` use.
 fn camel_case(name: &str) -> String {
    name
       .split('_')
@@ -865,7 +865,7 @@ fn event_of<'js>(ctx: &Ctx<'js>, sig: &Value<'js>) -> rquickjs::Result<EventId> 
       .iter()
       .find(|(_, handle)| handle.as_value() == sig)
       .map(|(event, _)| *event)
-      .ok_or_else(|| Exception::throw_type(ctx, "expected a hook point from plumage.gateway"))
+      .ok_or_else(|| Exception::throw_type(ctx, "expected a hook point from phoenix.gateway"))
 }
 
 fn register<'js>(
@@ -891,7 +891,7 @@ fn register<'js>(
    Ok(())
 }
 
-/// The `plumage` object one plugin receives.
+/// The `phoenix` object one plugin receives.
 fn api<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
    let api = Object::new(ctx.clone())?;
    let gateway = ctx
@@ -997,7 +997,7 @@ fn api<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
    Ok(api)
 }
 
-/// `plumage.messages`, local-only messages.
+/// `phoenix.messages`, local-only messages.
 fn messages_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
    let messages = Object::new(ctx.clone())?;
    messages.set(
@@ -1029,7 +1029,7 @@ fn messages_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
             let embeds = RawValue::from_string(embeds.unwrap_or_else(|| "[]".to_owned()))
                .map_err(|err| Exception::throw_type(&ctx, &format!("embeds: {err}")))?;
             let options = local::Options {
-               author:   author.as_deref().unwrap_or("Plumage"),
+               author:   author.as_deref().unwrap_or("Phoenix"),
                guild_id: guild_id.as_deref(),
                embeds:   &embeds,
             };
@@ -1057,7 +1057,7 @@ fn messages_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
    Ok(messages)
 }
 
-/// `plumage.ui`, `plumage.commands` and `plumage.messages.onSend`.
+/// `phoenix.ui`, `phoenix.commands` and `phoenix.messages.onSend`.
 #[cfg(target_os = "android")]
 fn patch_api<'js>(
    ctx: &Ctx<'js>,
@@ -1101,7 +1101,7 @@ fn context_object<'js>(ctx: &Ctx<'js>, context: &UiContext) -> rquickjs::Result<
          let embeds = RawValue::from_string("[]".to_owned())
             .map_err(|err| Exception::throw_internal(&ctx, &err.to_string()))?;
          let options = local::Options {
-            author:   "Plumage",
+            author:   "Phoenix",
             guild_id: None,
             embeds:   &embeds,
          };
@@ -1171,7 +1171,7 @@ fn remover<'js>(
    Ok(function)
 }
 
-/// `plumage.ui`, the UI patch targets.
+/// `phoenix.ui`, the UI patch targets.
 #[cfg(target_os = "android")]
 fn ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
    let ui = Object::new(ctx.clone())?;
@@ -1267,7 +1267,7 @@ fn add_contribution<'js>(
    )
 }
 
-/// `plumage.commands`, slash commands typed in the message box.
+/// `phoenix.commands`, slash commands typed in the message box.
 #[cfg(target_os = "android")]
 fn commands_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
    let commands = Object::new(ctx.clone())?;
@@ -1365,7 +1365,7 @@ fn on_send<'js>(
    )
 }
 
-/// `plumage.log`, whose lines carry the plugin's name.
+/// `phoenix.log`, whose lines carry the plugin's name.
 fn log_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
    let log = Object::new(ctx.clone())?;
    for (method, level) in [
@@ -1477,7 +1477,7 @@ fn start_fetch<'js>(
    in_background(ctx, move || Settlement::Fetch(fetch::send(&request)))
 }
 
-/// `plumage.discord`, Discord's API on the app's own client and session:
+/// `phoenix.discord`, Discord's API on the app's own client and session:
 /// `request(path, init)`, `get` and `delete(path, init)`, and `post`, `put` and
 /// `patch(path, body, init)`.
 #[cfg(target_os = "android")]
@@ -1573,7 +1573,7 @@ fn in_background<'js>(
    Ok(promise)
 }
 
-/// `plumage.stores`, read-only SQL over Phoenix's cache.
+/// `phoenix.stores`, read-only SQL over Phoenix's cache.
 #[cfg(target_os = "android")]
 fn stores_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
    let stores = Object::new(ctx.clone())?;

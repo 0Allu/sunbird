@@ -1,6 +1,6 @@
-// Types for the `plumage` object every plugin bundle receives.
+// Types for the `phoenix` object every plugin bundle receives.
 
-declare namespace Plumage {
+declare namespace Phoenix {
   /// Partial user structure, resources/user. `public_flags` is User Flags.
   interface User {
     id: string;
@@ -849,7 +849,7 @@ declare namespace Plumage {
     readonly [sig]: P;
   }
 
-  /// Payload types for gateway events, keyed like `plumage.gateway`.
+  /// Payload types for gateway events, keyed like `phoenix.gateway`.
   interface GatewayPayloads {
     messageCreate: GatewayMessage;
     /// A full message per the docs, with `tts` always false.
@@ -971,7 +971,7 @@ declare namespace Plumage {
   }
 
   interface LocalOptions {
-    /// Shown as the sender, "Plumage" by default.
+    /// Shown as the sender, "Phoenix" by default.
     author?: string;
     guildId?: string;
     embeds?: Embed[];
@@ -1096,4 +1096,4 @@ declare namespace Plumage {
   }
 }
 
-declare const plumage: Plumage.Api;
+declare const phoenix: Phoenix.Api;

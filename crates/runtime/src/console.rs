@@ -1,4 +1,4 @@
-//! The last lines plumage logged, kept for the Console page.
+//! The last lines phoenix logged, kept for the Console page.
 
 use std::{
    collections::VecDeque,
@@ -97,7 +97,7 @@ impl<L: Log> Log for Tee<L> {
       }
       // A warning from refreshing the page would refresh it again, forever.
       #[cfg(target_os = "android")]
-      if !record.target().starts_with("plumage_runtime::settings") {
+      if !record.target().starts_with("phoenix_runtime::settings") {
          crate::settings::log_changed();
       }
    }

@@ -41,7 +41,7 @@ use std::{
 };
 
 use memchr::memmem;
-use plumage_ui::{
+use phoenix_ui::{
    Node,
    Op,
    Prop,
@@ -51,7 +51,7 @@ use plumage_ui::{
    encode,
    set_prop,
 };
-use plumage_wire::{
+use phoenix_wire::{
    DispatchEvent,
    Key,
    Value,

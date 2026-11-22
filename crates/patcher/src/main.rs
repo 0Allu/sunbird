@@ -1,7 +1,7 @@
-//! `patcher --out <dir> --loader <libplumage.so> [--lib <extra.so>]...
+//! `patcher --out <dir> --loader <libphoenix.so> [--lib <extra.so>]...
 //! [--plugin <name.js>]... <split.apk>...`
 //!
-//! Rewrites Discord's split APKs so Phoenix starts with plumage inside it. The
+//! Rewrites Discord's split APKs so Phoenix starts with phoenix inside it. The
 //! base split's launcher always picks Phoenix, the host library's access gate
 //! returns true and loads the loader through a renamed `DT_NEEDED` entry, and
 //! the loader, any extra libraries and the plugin bundle land next to the host
@@ -35,7 +35,7 @@ use misstep::{
    bail,
    ensure,
 };
-use plumage_sigs::{
+use phoenix_sigs::{
    PLUGIN_BUNDLE,
    file::{
       ElfFile,
@@ -60,7 +60,7 @@ struct Args {
 impl Args {
    fn parse() -> misstep::Result<Self> {
       const USAGE: &str =
-         "usage: patcher --out <dir> --loader <libplumage.so> [--lib <extra.so>]... [--plugin <name.js>]... <split.apk>...";
+         "usage: patcher --out <dir> --loader <libphoenix.so> [--lib <extra.so>]... [--plugin <name.js>]... <split.apk>...";
       let (mut out, mut loader) = (None, None);
       let (mut extra, mut plugins, mut apks) = (Vec::new(), Vec::new(), Vec::new());
       let mut args = env::args_os().skip(1);

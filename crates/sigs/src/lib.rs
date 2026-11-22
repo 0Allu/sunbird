@@ -19,7 +19,7 @@ use std::{
    marker::PhantomData,
 };
 
-pub use plumage_hook::{
+pub use phoenix_hook::{
    BuildId,
    Image,
    Pattern,
@@ -279,7 +279,7 @@ pub struct Gateway {
    pub sig: Sig<'static, GatewayHandler>,
 }
 
-/// A build plumage has rules for.
+/// A build phoenix has rules for.
 pub struct Build {
    pub id:      BuildId,
    pub label:   &'static str,

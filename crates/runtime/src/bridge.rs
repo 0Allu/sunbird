@@ -9,7 +9,7 @@
 //!   with `RegisterNatives` to a filter around the library's own export.
 //!
 //! Everything here calls JNI through the saved original table, so the filters
-//! never see plumage's own calls.
+//! never see phoenix's own calls.
 
 use std::{
    ffi::{
@@ -184,7 +184,7 @@ pub fn attach() {
    // SAFETY: both slots are aligned function pointers in ART's table. Each is
    // swapped atomically, and SAVED already holds the originals, so a thread
    // that reads either pointer makes a valid call.
-   match unsafe { plumage_hook::swap_words(&writes) } {
+   match unsafe { phoenix_hook::swap_words(&writes) } {
       Ok(_) => log::info!("bridge: JNI table patched"),
       Err(err) => log::warn!("bridge: JNI table patch failed: {err}"),
    }
@@ -232,7 +232,7 @@ pub fn invoke(frame: &[u8]) -> bool {
       }
       jni!(env, DeleteLocalRef, array);
       if clear_exception(env) {
-         log::warn!("bridge: GuestHost.invoke threw on a plumage frame");
+         log::warn!("bridge: GuestHost.invoke threw on a phoenix frame");
          return false;
       }
    }
