@@ -1,0 +1,13 @@
+[package]
+name              = "plumage-sigs"
+description       = "Typed hook-point rules and the per-build signature table"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+plumage-hook = { workspace = true }
+thiserror    = { workspace = true }
+
+[lints]
+workspace = true

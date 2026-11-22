@@ -1,6 +1,7 @@
 [workspace]
 members  = [
   "crates/hook",
+  "crates/sigs",
 ]
 resolver = "3"
 
