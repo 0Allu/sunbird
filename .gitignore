@@ -11,3 +11,4 @@ node_modules/
 target/
 !web/plugins/*.so
 plugins/example/dist/
+!plugin/hook/java/picker.dex
