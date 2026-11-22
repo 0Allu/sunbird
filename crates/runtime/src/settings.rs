@@ -46,6 +46,8 @@ use plumage_ui::{
 };
 
 use crate::{
+   Chosen,
+   Control,
    PluginInfo,
    bridge::{
       self,
@@ -85,8 +87,8 @@ enum Press {
    Toggle(usize),
    Reload(usize),
    Uninstall(usize),
-   /// A plugin's switch, by its index in [`PluginInfo::switches`].
-   Switch(usize, usize),
+   /// A plugin's switch or button, by its index in [`PluginInfo::settings`].
+   Setting(usize, usize),
    Back,
 }
 
@@ -112,6 +114,8 @@ enum Job {
 enum Field {
    Eval,
    Install,
+   /// A text or number setting, indexed like [`Press::Setting`].
+   Setting(usize, usize),
 }
 
 /// Nodes updated in place, so typing is not interrupted.
@@ -267,56 +271,8 @@ pub fn start() {
    bridge::install(Box::new(SettingsSink));
    thread::spawn(move || {
       for job in receiver {
-         // Runtime calls take the engine lock, so they run before the
-         // settings lock is taken.
-         match &job {
-            Job::Log => LOG_QUEUED.store(false, Ordering::Relaxed),
-            Job::Submit(field) => {
-               let draft = settings().drafts.remove(field).unwrap_or_default();
-               let input = draft.trim();
-               if !input.is_empty() {
-                  match field {
-                     Field::Eval => crate::evaluate(input),
-                     Field::Install => {
-                        match crate::install(input) {
-                           Ok(name) => log::info!("installed {name}"),
-                           Err(err) => log::error!("install failed: {err}"),
-                        }
-                     },
-                  }
-               }
-            },
-            _ => {},
-         }
-         if let Job::Press(
-            press @ (Press::Toggle(index)
-            | Press::Reload(index)
-            | Press::Uninstall(index)
-            | Press::Switch(index, _)),
-         ) = job
-         {
-            let plugin = settings().plugins.get(index).cloned();
-            match (plugin, press) {
-               (Some(plugin), Press::Toggle(_)) => {
-                  crate::set_enabled(&plugin.name, !plugin.enabled);
-               },
-               (Some(plugin), Press::Switch(_, at)) => {
-                  if let Some(switch) = plugin.switches.get(at) {
-                     crate::set_switch(&plugin.name, &switch.key, !switch.on);
-                  }
-               },
-               (Some(plugin), Press::Uninstall(_)) => {
-                  match crate::uninstall(&plugin.name) {
-                     Ok(()) => log::info!("uninstalled {}", plugin.name),
-                     Err(err) => log::error!("uninstall failed: {err}"),
-                  }
-               },
-               (Some(plugin), _) => crate::reload(&plugin.name),
-               (None, _) => {},
-            }
-         }
-         let plugins =
-            matches!(job, Job::Press(_) | Job::Submit(Field::Install)).then(crate::plugins);
+         act(&job);
+         let plugins = matches!(job, Job::Press(_) | Job::Submit(_)).then(crate::plugins);
          let ops = {
             let mut state = settings();
             if let Some(plugins) = plugins {
@@ -329,6 +285,90 @@ pub fn start() {
          }
       }
    });
+}
+
+/// Makes the runtime calls `job` asks for. They take the engine lock, so they
+/// run before the settings lock is taken.
+fn act(job: &Job) {
+   let plugin = |index: usize| settings().plugins.get(index).cloned();
+   match *job {
+      Job::Log => LOG_QUEUED.store(false, Ordering::Relaxed),
+      Job::Submit(field) => {
+         let Some(draft) = settings().drafts.remove(&field) else {
+            return;
+         };
+         let input = draft.trim();
+         match field {
+            Field::Eval if !input.is_empty() => crate::evaluate(input),
+            Field::Install if !input.is_empty() => {
+               match crate::install(input) {
+                  Ok(name) => log::info!("installed {name}"),
+                  Err(err) => log::error!("install failed: {err}"),
+               }
+            },
+            Field::Setting(index, at) => {
+               let Some(plugin) = plugin(index) else {
+                  return;
+               };
+               let Some(setting) = plugin.settings.get(at) else {
+                  return;
+               };
+               let value = match setting.control {
+                  Control::Text(_) => Chosen::Text(draft.clone()),
+                  Control::Number(_) => {
+                     let Ok(number) = input.parse::<f64>() else {
+                        log::error!(
+                           "[{}] {}: {input:?} is not a number",
+                           plugin.name,
+                           setting.key
+                        );
+                        return;
+                     };
+                     Chosen::Number(number)
+                  },
+                  Control::Switch(_) | Control::Button => return,
+               };
+               crate::set_setting(&plugin.name, &setting.key, value);
+            },
+            Field::Eval | Field::Install => {},
+         }
+      },
+      Job::Press(Press::Toggle(index)) => {
+         if let Some(plugin) = plugin(index) {
+            crate::set_enabled(&plugin.name, !plugin.enabled);
+         }
+      },
+      Job::Press(Press::Reload(index)) => {
+         if let Some(plugin) = plugin(index) {
+            crate::reload(&plugin.name);
+         }
+      },
+      Job::Press(Press::Uninstall(index)) => {
+         if let Some(plugin) = plugin(index) {
+            match crate::uninstall(&plugin.name) {
+               Ok(()) => log::info!("uninstalled {}", plugin.name),
+               Err(err) => log::error!("uninstall failed: {err}"),
+            }
+         }
+      },
+      Job::Press(Press::Setting(index, at)) => {
+         let Some(plugin) = plugin(index) else {
+            return;
+         };
+         match plugin
+            .settings
+            .get(at)
+            .map(|setting| (&setting.key, &setting.control))
+         {
+            Some((key, Control::Switch(on))) => {
+               crate::set_setting(&plugin.name, key, Chosen::Switch(!on));
+            },
+            Some((key, Control::Button)) => crate::press(&plugin.name, key),
+            _ => {},
+         }
+      },
+      Job::Press(_) | Job::NavigateTo(_) | Job::Draft(..) => {},
+   }
 }
 
 /// Refreshes the console page's log, if one is open.
@@ -572,8 +612,8 @@ impl Settings {
          Job::Press(Press::OpenMain) => self.open_page(PageKind::Main),
          Job::Press(Press::OpenConsole) => self.open_page(PageKind::Console),
          Job::Press(Press::OpenPlugin(index)) => self.open_page(PageKind::Plugin(index)),
-         Job::Submit(Field::Install)
-         | Job::Press(Press::Toggle(_) | Press::Reload(_) | Press::Switch(..)) => {
+         Job::Submit(Field::Install | Field::Setting(..))
+         | Job::Press(Press::Toggle(_) | Press::Reload(_) | Press::Setting(..)) => {
             self.rerender_all()
          },
          Job::Press(Press::Back) => self.close_top(),
@@ -1130,8 +1170,10 @@ fn main_sections(plugins: &[PluginInfo]) -> Vec<Tree> {
       section("Plugins", rows),
       section("Install from URL", vec![text_field(
          Field::Install,
-         ICON_PLUGIN,
+         Some(ICON_PLUGIN),
          "https://example.com/plugin.js",
+         "",
+         false,
       )]),
       section("", vec![button_row(
          "Console",
@@ -1156,7 +1198,13 @@ fn log_text() -> String {
 }
 
 /// `root > frame > row > [icon wrap > icon, input]`, Phoenix's search box.
-fn text_field(field: Field, icon: &str, placeholder: &str) -> Tree {
+fn text_field(
+   field: Field,
+   icon: Option<&str>,
+   placeholder: &str,
+   value: &str,
+   number: bool,
+) -> Tree {
    let mut root = Tree::from_template(&templates().input);
    let Some(row) = root
       .kids
@@ -1166,10 +1214,12 @@ fn text_field(field: Field, icon: &str, placeholder: &str) -> Tree {
       return root;
    };
    if let Some(icon_node) = row.kids.first_mut().and_then(|wrap| wrap.kids.first_mut()) {
-      icon_node.set(Prop::URI, Some(text(icon)));
+      icon_node.set(Prop::URI, icon.map(text));
    }
    if let Some(input) = row.kids.get_mut(1) {
       input.set(Prop::PLACEHOLDER, Some(text(placeholder)));
+      input.set(Prop::VALUE, Some(text(value)));
+      input.set(Prop::KEYBOARD, number.then(|| text("number")));
       input.set(Prop::RETURN_KEY, Some(text("go")));
       input.set(Prop::ROLE, None);
       input.set(
@@ -1178,11 +1228,23 @@ fn text_field(field: Field, icon: &str, placeholder: &str) -> Tree {
       );
       input.slot = Some(Slot::Input(field));
    }
+   if icon.is_none() {
+      row.kids.remove(0);
+      if let Some(input) = row.kids.first_mut() {
+         input.set(Prop::MARGIN, None);
+      }
+   }
    root
 }
 
 fn console_sections() -> Vec<Tree> {
-   let input_row = text_field(Field::Eval, ICON_CONSOLE, "Evaluate JavaScript");
+   let input_row = text_field(
+      Field::Eval,
+      Some(ICON_CONSOLE),
+      "Evaluate JavaScript",
+      "",
+      false,
+   );
    let mut log = button_row(&log_text(), ICON_CONSOLE, None, false);
    if let Some(row) = log.kids.first_mut() {
       row.kids.remove(0);
@@ -1203,22 +1265,51 @@ fn plugin_sections(index: usize, plugin: &PluginInfo) -> Vec<Tree> {
       (None, true) => "running",
       (None, false) => "off",
    };
-   let switches = plugin
-      .switches
-      .iter()
-      .enumerate()
-      .map(|(at, switch)| {
-         let press = Press::Switch(index, at);
-         switch_row(
-            None,
-            &switch.title,
-            switch.description.as_deref(),
-            switch.on,
-            press,
-            press,
-         )
-      })
-      .collect::<Vec<Tree>>();
+   let mut rows = Vec::new();
+   let mut fields = Vec::new();
+   for (at, setting) in plugin.settings.iter().enumerate() {
+      let press = Press::Setting(index, at);
+      let description = setting.description.as_deref();
+      match &setting.control {
+         Control::Switch(on) => {
+            rows.push(switch_row(
+               None,
+               &setting.title,
+               description,
+               *on,
+               press,
+               press,
+            ));
+         },
+         Control::Button => {
+            let mut row = button_row(&setting.title, ICON_PLUGIN, Some(press), false);
+            if let Some(inner) = row.kids.first_mut() {
+               inner.kids.remove(0);
+            }
+            rows.push(row);
+         },
+         Control::Text(current) => {
+            let field = text_field(
+               Field::Setting(index, at),
+               None,
+               description.unwrap_or(""),
+               current,
+               false,
+            );
+            fields.push(section(&setting.title, vec![field]));
+         },
+         Control::Number(number) => {
+            let field = text_field(
+               Field::Setting(index, at),
+               None,
+               description.unwrap_or(""),
+               &number.to_string(),
+               true,
+            );
+            fields.push(section(&setting.title, vec![field]));
+         },
+      }
+   }
    let mut sections = vec![section("", vec![switch_row(
       Some(ICON_PLUGIN),
       "Enabled",
@@ -1227,9 +1318,10 @@ fn plugin_sections(index: usize, plugin: &PluginInfo) -> Vec<Tree> {
       Press::Toggle(index),
       Press::Toggle(index),
    )])];
-   if !switches.is_empty() {
-      sections.push(section("Settings", switches));
+   if !rows.is_empty() {
+      sections.push(section("Settings", rows));
    }
+   sections.extend(fields);
    let mut actions = vec![button_row(
       "Reload",
       ICON_RELOAD,

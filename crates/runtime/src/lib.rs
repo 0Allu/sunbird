@@ -82,16 +82,33 @@ pub struct PluginInfo {
    pub enabled:   bool,
    pub error:     Option<String>,
    pub installed: bool,
-   pub switches:  Vec<Switch>,
+   pub settings:  Vec<Setting>,
 }
 
 /// A plugin setting as the user currently has it.
 #[derive(Clone, Debug)]
-pub struct Switch {
+pub struct Setting {
    pub key:         String,
    pub title:       String,
    pub description: Option<String>,
-   pub on:          bool,
+   pub control:     Control,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Control {
+   Switch(bool),
+   Text(String),
+   Number(f64),
+   Button,
+}
+
+/// A value the user picked for a setting, as `plugins.json` stores it.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum Chosen {
+   Switch(bool),
+   Number(f64),
+   Text(String),
 }
 
 fn engine() -> Option<std::sync::MutexGuard<'static, js::Engine>> {
@@ -117,10 +134,17 @@ pub fn set_enabled(name: &str, enabled: bool) {
    }
 }
 
-/// Sets one of a plugin's switches and remembers it across restarts.
-pub fn set_switch(plugin: &str, key: &str, on: bool) {
+/// Sets one of a plugin's settings and remembers it across restarts.
+pub fn set_setting(plugin: &str, key: &str, value: Chosen) {
    if let Some(engine) = engine() {
-      engine.set_switch(plugin, key, on);
+      engine.set_setting(plugin, key, value);
+   }
+}
+
+/// Runs a button setting's `onPress`.
+pub fn press(plugin: &str, key: &str) {
+   if let Some(engine) = engine() {
+      engine.press(plugin, key);
    }
 }
 

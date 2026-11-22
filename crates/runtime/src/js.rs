@@ -23,6 +23,7 @@ use rquickjs::{
    Ctx,
    Exception,
    Function,
+   IntoJs,
    JsLifetime,
    Object,
    Runtime,
@@ -32,12 +33,14 @@ use rquickjs::{
 };
 
 use crate::{
+   Chosen,
+   Control,
    Error,
    Plugin,
    PluginInfo,
    STATE,
+   Setting,
    State,
-   Switch,
    gateway,
    io_error,
 };
@@ -56,22 +59,47 @@ struct Loaded {
    installed: bool,
 }
 
+type ChosenMap = BTreeMap<String, BTreeMap<String, Chosen>>;
+
 /// Which plugins the user turned off and how they set each plugin's
-/// switches, kept in `home/plugins.json`.
+/// settings, kept in `home/plugins.json`.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct Choices<'a> {
    #[serde(default)]
    disabled: BTreeSet<String>,
    #[serde(default)]
-   switches: Cow<'a, BTreeMap<String, BTreeMap<String, bool>>>,
+   settings: Cow<'a, ChosenMap>,
 }
 
-/// One switch a plugin defined with `plumage.settings.define`.
-struct Definition {
+/// One setting a plugin defined with `plumage.settings.define`.
+struct Definition<'js> {
    key:         String,
    title:       String,
    description: Option<String>,
-   default:     bool,
+   kind:        Kind<'js>,
+}
+
+/// A setting's type with its default, or a button's handler.
+enum Kind<'js> {
+   Switch(bool),
+   Text(String),
+   Number(f64),
+   Button(Function<'js>),
+}
+
+impl Kind<'_> {
+   /// The user's choice when it has this kind's type, else the default.
+   fn current(&self, chosen: Option<&Chosen>) -> Control {
+      match (self, chosen) {
+         (Self::Switch(_), Some(Chosen::Switch(on))) => Control::Switch(*on),
+         (Self::Switch(default), _) => Control::Switch(*default),
+         (Self::Text(_), Some(Chosen::Text(text))) => Control::Text(text.clone()),
+         (Self::Text(default), _) => Control::Text(default.clone()),
+         (Self::Number(_), Some(Chosen::Number(number))) => Control::Number(*number),
+         (Self::Number(default), _) => Control::Number(*default),
+         (Self::Button(_), _) => Control::Button,
+      }
+   }
 }
 
 pub enum Before {
@@ -87,9 +115,9 @@ struct Registry<'js> {
    gateway: Object<'js>,
    handles: Vec<(EventId, Object<'js>)>,
    hooks:   RefCell<HashMap<EventId, Vec<Hook<'js>>>>,
-   defined: RefCell<BTreeMap<String, Vec<Definition>>>,
+   defined: RefCell<BTreeMap<String, Vec<Definition<'js>>>>,
    /// Kept across unloads, so a reloaded plugin sees what the user chose.
-   chosen:  RefCell<BTreeMap<String, BTreeMap<String, bool>>>,
+   chosen:  RefCell<ChosenMap>,
 }
 
 // SAFETY: every field is bound to 'js, and Changed swaps exactly that lifetime.
@@ -146,21 +174,20 @@ impl Engine {
             .plugins
             .iter()
             .map(|(name, loaded)| {
-               let switches = defined
+               let settings = defined
                   .as_ref()
                   .and_then(|defined| defined.get(name))
                   .into_iter()
                   .flatten()
                   .map(|definition| {
-                     let on = chosen
+                     let picked = chosen
                         .as_ref()
-                        .and_then(|chosen| chosen.get(name)?.get(&definition.key).copied())
-                        .unwrap_or(definition.default);
-                     Switch {
-                        key: definition.key.clone(),
-                        title: definition.title.clone(),
+                        .and_then(|chosen| chosen.get(name)?.get(&definition.key));
+                     Setting {
+                        key:         definition.key.clone(),
+                        title:       definition.title.clone(),
                         description: definition.description.clone(),
-                        on,
+                        control:     definition.kind.current(picked),
                      }
                   })
                   .collect();
@@ -169,14 +196,14 @@ impl Engine {
                   enabled: loaded.enabled,
                   error: loaded.error.clone(),
                   installed: loaded.installed,
-                  switches,
+                  settings,
                }
             })
             .collect()
       })
    }
 
-   pub fn set_switch(&self, plugin: &str, key: &str, on: bool) {
+   pub fn set_setting(&self, plugin: &str, key: &str, value: Chosen) {
       self.context.with(|ctx| {
          if let Some(registry) = ctx.userdata::<Registry<'_>>() {
             registry
@@ -184,10 +211,34 @@ impl Engine {
                .borrow_mut()
                .entry(plugin.to_owned())
                .or_default()
-               .insert(key.to_owned(), on);
+               .insert(key.to_owned(), value);
          }
       });
       self.save_choices();
+   }
+
+   pub fn press(&self, plugin: &str, key: &str) {
+      self.context.with(|ctx| {
+         let handler = ctx.userdata::<Registry<'_>>().and_then(|registry| {
+            registry
+               .defined
+               .borrow()
+               .get(plugin)?
+               .iter()
+               .find(|definition| definition.key == key)
+               .and_then(|definition| {
+                  match &definition.kind {
+                     Kind::Button(handler) => Some(handler.clone()),
+                     _ => None,
+                  }
+               })
+         });
+         if let Some(handler) = handler
+            && let Err(err) = handler.call::<_, ()>(()).catch(&ctx)
+         {
+            log::error!("[{plugin}] {key}: {err}");
+         }
+      });
    }
 
    /// Evaluates `name` with a fresh `plumage` object, recording any error.
@@ -308,7 +359,7 @@ impl Engine {
          let empty = BTreeMap::new();
          serde_json::to_vec(&Choices {
             disabled,
-            switches: Cow::Borrowed(chosen.as_deref().unwrap_or(&empty)),
+            settings: Cow::Borrowed(chosen.as_deref().unwrap_or(&empty)),
          })
       });
       let path = state().choices_path();
@@ -573,8 +624,8 @@ fn api<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
    Ok(api)
 }
 
-/// Records `schema` as the plugin's switches and returns an object with one
-/// getter per key that reads the user's current choice.
+/// Records `schema` as the plugin's settings and returns an object with one
+/// getter per non-button key that reads the user's current choice.
 fn define<'js>(
    ctx: &Ctx<'js>,
    plugin: &str,
@@ -583,25 +634,59 @@ fn define<'js>(
    let mut definitions = Vec::new();
    for entry in schema.props::<String, Object<'js>>() {
       let (key, spec) = entry?;
+      let kind = match spec.get::<_, String>("type")?.as_str() {
+         "switch" => Kind::Switch(spec.get::<_, Option<bool>>("default")?.unwrap_or_default()),
+         "text" => {
+            Kind::Text(
+               spec
+                  .get::<_, Option<String>>("default")?
+                  .unwrap_or_default(),
+            )
+         },
+         "number" => Kind::Number(spec.get::<_, Option<f64>>("default")?.unwrap_or_default()),
+         "button" => Kind::Button(spec.get("onPress")?),
+         other => {
+            return Err(Exception::throw_type(
+               ctx,
+               &format!(
+                  "setting {key}: unknown type {other:?}, expected switch, text, number or button"
+               ),
+            ));
+         },
+      };
       definitions.push(Definition {
          title: spec.get("title")?,
          description: spec.get("description")?,
-         default: spec.get("default")?,
+         kind,
          key,
       });
    }
 
    let values = Object::new(ctx.clone())?;
    for definition in &definitions {
-      let (plugin, key, default) = (
-         plugin.to_owned(),
-         definition.key.clone(),
-         definition.default,
-      );
-      let read = move |ctx: Ctx<'js>| {
-         ctx.userdata::<Registry<'js>>()
-            .and_then(|registry| registry.chosen.borrow().get(&plugin)?.get(&key).copied())
-            .unwrap_or(default)
+      if matches!(definition.kind, Kind::Button(_)) {
+         continue;
+      }
+      let (plugin, key) = (plugin.to_owned(), definition.key.clone());
+      let read = move |ctx: Ctx<'js>| -> rquickjs::Result<Value<'js>> {
+         let registry = ctx
+            .userdata::<Registry<'js>>()
+            .ok_or_else(|| Exception::throw_internal(&ctx, "no registry"))?;
+         let defined = registry.defined.borrow();
+         let chosen = registry.chosen.borrow();
+         let Some(definition) = defined
+            .get(&plugin)
+            .and_then(|list| list.iter().find(|definition| definition.key == key))
+         else {
+            return Ok(Value::new_undefined(ctx.clone()));
+         };
+         let picked = chosen.get(&plugin).and_then(|values| values.get(&key));
+         match definition.kind.current(picked) {
+            Control::Switch(on) => on.into_js(&ctx),
+            Control::Text(text) => text.into_js(&ctx),
+            Control::Number(number) => number.into_js(&ctx),
+            Control::Button => Ok(Value::new_undefined(ctx.clone())),
+         }
       };
       values.prop(
          definition.key.as_str(),
@@ -727,7 +812,7 @@ pub fn load_plugins(state: &State, bundled: Vec<Plugin>) -> Result<Vec<String>, 
       .unwrap_or_else(std::sync::PoisonError::into_inner);
    engine.context.with(|ctx| {
       if let Some(registry) = ctx.userdata::<Registry<'_>>() {
-         *registry.chosen.borrow_mut() = choices.switches.into_owned();
+         *registry.chosen.borrow_mut() = choices.settings.into_owned();
       }
    });
    engine.plugins = sources

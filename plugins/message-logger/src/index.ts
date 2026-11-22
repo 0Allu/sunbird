@@ -1,8 +1,18 @@
 const { gateway } = plumage;
 
 const settings = plumage.settings.define({
-  keepDeleted: { title: "Keep deleted messages", description: "Show deleted messages struck out", default: true },
-  keepEdits: { title: "Keep edit history", description: "Show earlier versions under edited messages", default: true },
+  keepDeleted: {
+    type: "switch",
+    title: "Keep deleted messages",
+    description: "Show deleted messages struck out",
+    default: true,
+  },
+  keepEdits: {
+    type: "switch",
+    title: "Keep edit history",
+    description: "Show earlier versions under edited messages",
+    default: true,
+  },
 });
 
 interface Seen {

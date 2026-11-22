@@ -890,16 +890,35 @@ declare namespace Plumage {
     keys(): string[];
   }
 
-  interface SwitchSpec {
+  interface SpecBase {
     title: string;
     description?: string;
-    default: boolean;
   }
 
+  type SettingSpec =
+    | (SpecBase & { type: "switch"; default?: boolean })
+    | (SpecBase & { type: "text"; default?: string })
+    | (SpecBase & { type: "number"; default?: number })
+    | (SpecBase & { type: "button"; onPress(): void });
+
+  /// The value a setting reads as. Buttons have none.
+  type SettingValue<S> = S extends { type: "switch" }
+    ? boolean
+    : S extends { type: "text" }
+      ? string
+      : S extends { type: "number" }
+        ? number
+        : never;
+
+  type SettingValues<S> = {
+    readonly [K in keyof S as S[K] extends { type: "button" } ? never : K]: SettingValue<S[K]>;
+  };
+
   interface Settings {
-    /// Shows one switch per key on the plugin's page in Settings. Each property of the result reads
-    /// the user's current choice, so read it when needed instead of caching it.
-    define<S extends Record<string, SwitchSpec>>(schema: S): { readonly [K in keyof S]: boolean };
+    /// Shows the settings on the plugin's page in Settings. Each property of the result reads
+    /// the user's current choice, so read it when needed instead of caching it. Text and number
+    /// fields save when the keyboard's go key is pressed.
+    define<const S extends Record<string, SettingSpec>>(schema: S): SettingValues<S>;
   }
 
   interface Api {
