@@ -36,6 +36,7 @@ mod local;
 #[cfg(target_os = "android")] mod picker;
 #[cfg(target_os = "android")] mod settings;
 #[cfg(target_os = "android")] mod store;
+#[cfg(target_os = "android")] mod update;
 
 #[derive(Debug, flub::Error)]
 pub enum Error {

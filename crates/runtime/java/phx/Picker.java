@@ -50,6 +50,19 @@ public final class Picker extends Fragment {
         });
     }
 
+    /** Opens `url` in the browser from the Activity held by `owner`. */
+    public static void open(final Object owner, final String url) {
+        new Handler(Looper.getMainLooper()).post(new Runnable() {
+            public void run() {
+                try {
+                    findActivity(owner).startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                } catch (Throwable t) {
+                    android.util.Log.e("phoenix", "opening " + url + ": " + t);
+                }
+            }
+        });
+    }
+
     static Activity findActivity(Object owner) throws IllegalAccessException {
         for (Class<?> c = owner.getClass(); c != null; c = c.getSuperclass())
             for (Field f : c.getDeclaredFields())

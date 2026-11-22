@@ -28,14 +28,14 @@ Discord's client; our tool is "Phoenix Unlock" (the code calls its runtime `phoe
 | Path | What |
 |---|---|
 | `crates/loader` | `libphoenix.so`, injected as `libplm.so`: a constructor that starts the runtime inside the host. |
-| `crates/runtime` | rquickjs plugin runtime and the `phoenix` API: gateway hooks, UI bridge, Settings → Phoenix pages (`settings.rs`), UI patch targets (`patches/`), console, file picker (`picker.rs` + `java/phx/Picker.java` → `java/picker.dex`, rebuild with `java/build.sh`). `phoenix.d.ts` is the plugin API reference. |
+| `crates/runtime` | rquickjs plugin runtime and the `phoenix` API: gateway hooks, UI bridge, Settings → Phoenix Unlocker pages (`settings.rs`), UI patch targets (`patches/`), console, file picker (`picker.rs` + `java/phx/Picker.java` → `java/picker.dex`, rebuild with `java/build.sh`). `phoenix.d.ts` is the plugin API reference. |
 | `crates/hook` | ShadowHook (arm) / Dobby (elsewhere) inline hooks, bytehook PLT hooks, image scanner. |
 | `crates/sigs`, `crates/sigscan` | Hook-point rules and the per-build table; `sigscan` evaluates them against a library file. |
 | `crates/ui`, `crates/wire` | Codecs for Phoenix's UI-op batches and bridge values/frames. `ui/src/props.in` is Phoenix's prop table, `templates.json` captured layouts. |
 | `crates/patcher` | CLI that patches the split APKs (dex launcher, host access check, `liblog.so` → `libplm.so`, adds the loader, shadowhook probe and plugin bundle) and signs them. |
 | `crates/stand-in*` | A fake Phoenix gateway library and an end-to-end demo, to test hooks without Discord. |
 | `plugins/*/src/index.ts` | Bundled plugins (TypeScript; `// @` header lines are kept as the bundle banner). |
-| `web/` | The browser patcher (GitHub Pages, `.github/workflows/pages.yml`), a JS port of `crates/patcher` that must stay byte-identical to it: `lib/apk.js`, `host.js`, `dex.js`, `sign.js`, `zip.js`, `axml.js`, `arsc.js`, `frida.js`. `tools/node-build.mjs` is the same pipeline as a CLI, `tools/bundle-plugins.mjs` builds `web/plugins/*.js` + `index.json` (build output, not committed; CI runs it). `web/plugins/libphoenix-arm64.so` is copied from a loader build. |
+| `web/` | The browser patcher (GitHub Pages, `.github/workflows/pages.yml`), a JS port of `crates/patcher` that must stay byte-identical to it: `lib/apk.js`, `host.js`, `dex.js`, `sign.js`, `zip.js`, `axml.js`, `arsc.js`, `frida.js`. `tools/node-build.mjs` is the same pipeline as a CLI, `tools/bundle-plugins.mjs` builds `web/plugins/*.js` + `index.json`, and `web/version.json` for the runtime's update check (`crates/runtime/src/update.rs`) from the loader's baked version and the bundles' CRC-32s (build output, not committed; CI runs it). `web/plugins/libphoenix-arm64.so` is copied from a loader build. |
 | `frida/` | The optional Frida gadget bootstrap (`build.sh` → `web/plugins/frida-bootstrap.js`). |
 | `flake.nix`, `nix/`, `scripts/*.nu` | The Linux devshell and build/install scripts (`scripts/phoenix.nu` patches and installs on a phone). |
 

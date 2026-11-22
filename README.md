@@ -3,7 +3,7 @@
 Patches Phoenix, the native Rust client in Discord's Android alpha builds (356.7, versionCode
 356207), so it opens without the access gate. It also adds a plugin runtime: TypeScript plugins
 that hook gateway events, add buttons, rows and slash commands to Discord's own UI, and get their
-own pages under Settings → Phoenix.
+own pages under Settings → Phoenix Unlocker.
 
 No root and no Xposed: the APK itself is patched and re-signed.
 
@@ -72,7 +72,7 @@ deploys (`web/tools/bundle-plugins.mjs`).
 | Path | What |
 |---|---|
 | `crates/loader` | The injected library (`libplm.so`). |
-| `crates/runtime` | The QuickJS plugin runtime, the `phoenix` API and the Settings → Phoenix pages. |
+| `crates/runtime` | The QuickJS plugin runtime, the `phoenix` API and the Settings → Phoenix Unlocker pages. |
 | `crates/hook`, `crates/sigs`, `crates/sigscan` | Native hooks, hook-point rules, the per-build table. |
 | `crates/ui`, `crates/wire` | Codecs for Phoenix's UI ops and bridge frames. |
 | `crates/patcher` | The command-line patcher. |

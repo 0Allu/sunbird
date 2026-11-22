@@ -19,6 +19,7 @@ serde_json   = { workspace = true }
 rquickjs = { features = [ "bindgen" ], workspace = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
+crc32fast    = { workspace = true }
 jni-sys      = { workspace = true }
 libc         = { workspace = true }
 memchr       = { workspace = true }

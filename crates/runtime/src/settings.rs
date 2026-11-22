@@ -1,4 +1,4 @@
-//! A "Phoenix" row in Discord's Settings that opens phoenix's own pages.
+//! A "Phoenix Unlocker" row in Discord's Settings that opens phoenix's own pages.
 //!
 //! Phoenix builds its UI as a stream of UI-op batches from Rust to Java. This
 //! module rewrites those batches to splice in nodes built from Phoenix's own
@@ -73,6 +73,8 @@ const FIRST_ID: i32 = 0x5000_0000;
 /// from 0, so phoenix takes them downward from the top.
 const SLOT_END: i32 = 1 << 16;
 const LOGOUT_ROW: &str = "settings.row.logout";
+/// The Settings row and the page it opens.
+const TITLE: &str = "Phoenix Unlocker";
 const ICON_PLUGIN: &str = "res://ic_mana_puzzle_piece_plus";
 const ICON_CHECK: &str = "res://ic_mana_checkmark_large";
 const ICON_RELOAD: &str = "res://ic_mana_puzzle_piece_retry";
@@ -135,6 +137,8 @@ enum Press {
    Setting(usize, usize),
    /// Option `option` of a plugin's select setting.
    Choose(usize, usize, usize),
+   /// The site, to get the update [`crate::update`] found.
+   OpenSite,
    Back,
 }
 
@@ -158,6 +162,8 @@ enum Job {
    Log,
    /// The file picker's answer.
    Picked(crate::picker::Picked),
+   /// Something the open pages show changed.
+   Refresh,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -298,7 +304,7 @@ impl SlotPool {
    }
 }
 
-/// The "Phoenix" row in the Settings list.
+/// The "Phoenix Unlocker" row in the Settings list.
 struct Entry {
    root: i32,
    ids:  Vec<i32>,
@@ -419,6 +425,14 @@ pub fn start() {
          }
       }
    });
+   crate::update::check();
+}
+
+/// Rebuilds the open pages, for state that changed outside them.
+pub fn refresh() {
+   if let Some(worker) = WORKER.get() {
+      let _ = worker.send(Job::Refresh);
+   }
 }
 
 /// Makes the runtime calls `job` asks for. They take the engine lock, so they
@@ -548,7 +562,12 @@ fn act(job: &Job) {
             );
          }
       },
-      Job::Press(_) | Job::NavigateTo(_) | Job::Draft(..) => {},
+      Job::Press(Press::OpenSite) => {
+         if let Err(err) = crate::picker::open(crate::update::SITE) {
+            log::error!("opening {}: {err}", crate::update::SITE);
+         }
+      },
+      Job::Press(_) | Job::NavigateTo(_) | Job::Draft(..) | Job::Refresh => {},
    }
 }
 
@@ -557,7 +576,7 @@ fn installed(result: Result<String, crate::Error>, from: &str) {
    let status = match result {
       Ok(name) => {
          log::info!("installed {name} from {from}");
-         (format!("Installed {name}. It is on the Phoenix page now."), COLOR_STRING)
+         (format!("Installed {name}. It is on the {TITLE} page now."), COLOR_STRING)
       },
       Err(err) => {
          log::error!("install failed: {err}");
@@ -875,7 +894,8 @@ impl Settings {
             ops.extend(self.clear_ops(Field::Eval));
             ops
          },
-         Job::Submit(Field::Code(_)) | Job::Press(Press::PickFile) => Vec::new(),
+         Job::Submit(Field::Code(_)) | Job::Press(Press::PickFile | Press::OpenSite) => Vec::new(),
+         Job::Refresh => self.rerender_all(None),
          Job::Press(Press::OpenMain) => self.open_page(PageKind::Main),
          Job::Press(Press::OpenConsole) => {
             let mut ops = self.open_page(PageKind::Console);
@@ -918,7 +938,7 @@ impl Settings {
 
    fn render(&self, kind: PageKind) -> (String, Vec<Tree>) {
       match kind {
-         PageKind::Main => ("Phoenix".to_owned(), main_sections(&self.plugins)),
+         PageKind::Main => (TITLE.to_owned(), main_sections(&self.plugins)),
          PageKind::Console => ("Console".to_owned(), console_sections()),
          PageKind::Install => ("Install plugin".to_owned(), install_sections(self.install_status.as_ref())),
          PageKind::Code(index) => {
@@ -1116,7 +1136,7 @@ impl Settings {
    }
 
    fn entry_ops(&mut self) -> (Entry, Vec<Op>) {
-      let row = button_row("Phoenix", ICON_PLUGIN, Some(Press::OpenMain), true);
+      let row = button_row(TITLE, ICON_PLUGIN, Some(Press::OpenMain), true);
       let mut section = section("", vec![row]);
       let mut ops = Vec::new();
       let root = self.build(&mut section, None, &mut ops);
@@ -1540,19 +1560,32 @@ fn main_sections(plugins: &[PluginInfo]) -> Vec<Tree> {
          .collect()
    };
    let enabled = plugins.iter().filter(|plugin| plugin.enabled).count();
-   vec![
+   let update = crate::update::found().map(|update| {
+      let what = update.loader.as_ref().map_or_else(
+         || format!("New plugin code: {}", update.plugins.join(", ")),
+         |version| format!("Phoenix Unlock {version}"),
+      );
+      let mut row = button_row(&what, ICON_RELOAD, Some(Press::OpenSite), true);
+      if let Some(label) = row.kids.first_mut().and_then(|row| row.kids.get_mut(1)) {
+         label.set(Prop::COLOR, Some(Value::I64(COLOR_STRING)));
+      }
+      section("Update available", vec![row])
+   });
+   update.into_iter().chain([
       section("Plugins", rows),
       section("", vec![
          button_row("Install plugin", ICON_FILE, Some(Press::OpenInstall), true),
          button_row("Console", ICON_CONSOLE, Some(Press::OpenConsole), true),
       ]),
       section("About", vec![
+         value_row("Version", crate::update::VERSION),
          value_row("Runtime", "rquickjs"),
          value_row("Gateway hooks", "registry pointer swap"),
          value_row("Hook library", HOOK_LIBRARY),
          value_row("Enabled", &format!("{enabled} of {}", plugins.len())),
       ]),
-   ]
+   ])
+   .collect()
 }
 
 /// A colored piece of a text's `spans`.

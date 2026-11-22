@@ -40,3 +40,6 @@ web/plugins/index.json
 !frida/
 !frida/**
 frida/node_modules/
+
+# written by web/tools/bundle-plugins.mjs
+web/version.json

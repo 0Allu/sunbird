@@ -1,4 +1,4 @@
-//! Android's document picker, through `phx.Picker` (`java/phx/Picker.java`),
+//! Android's document picker and opening links, through `phx.Picker` (`java/phx/Picker.java`),
 //! loaded from an in-memory dex under Phoenix's class loader. The chosen file
 //! arrives on a Java thread and goes to [`crate::settings::picked`].
 
@@ -50,6 +50,51 @@ pub fn pick() -> Result<(), String> {
       let result = call_pick(env);
       jni!(env, PopLocalFrame, ptr::null_mut());
       result
+   }
+}
+
+/// Opens `url` in the browser over Phoenix's activity.
+pub fn open(url: &str) -> Result<(), String> {
+   let env = jvm::env().ok_or("no JNI env")?;
+   let url = std::ffi::CString::new(url).map_err(|err| err.to_string())?;
+   // SAFETY: as in `pick`.
+   unsafe {
+      if jni!(env, PushLocalFrame, 8) != 0 {
+         return Err(failure(env, "out of local references"));
+      }
+      let result = call_open(env, &url);
+      jni!(env, PopLocalFrame, ptr::null_mut());
+      result
+   }
+}
+
+unsafe fn call_open(env: *mut JNIEnv, url: &core::ffi::CStr) -> Result<(), String> {
+   // SAFETY: forwarded from `open`.
+   unsafe {
+      let class = class(env)?;
+      let method = jni!(
+         env,
+         GetStaticMethodID,
+         class,
+         c"open".as_ptr(),
+         c"(Ljava/lang/Object;Ljava/lang/String;)V".as_ptr(),
+      );
+      if method.is_null() {
+         return Err(failure(env, "phx.Picker.open is missing"));
+      }
+      let args = [
+         jvalue {
+            l: bridge::guest_host(),
+         },
+         jvalue {
+            l: jni!(env, NewStringUTF, url.as_ptr()),
+         },
+      ];
+      jni!(env, CallStaticVoidMethodA, class, method, args.as_ptr());
+      if jni!(env, ExceptionCheck) {
+         return Err(failure(env, "phx.Picker.open threw"));
+      }
+      Ok(())
    }
 }
 
