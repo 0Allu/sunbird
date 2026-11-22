@@ -78,10 +78,11 @@ pub struct Plugin {
 /// A plugin as the settings page shows it.
 #[derive(Clone, Debug)]
 pub struct PluginInfo {
-   pub name:     String,
-   pub enabled:  bool,
-   pub error:    Option<String>,
-   pub switches: Vec<Switch>,
+   pub name:      String,
+   pub enabled:   bool,
+   pub error:     Option<String>,
+   pub installed: bool,
+   pub switches:  Vec<Switch>,
 }
 
 /// A plugin setting as the user currently has it.
@@ -175,6 +176,18 @@ pub fn install(url: &str) -> Result<String, Error> {
       engine.install(name, source);
    }
    Ok(name.to_owned())
+}
+
+/// Deletes a plugin installed into `home/plugins` and unloads it.
+#[cfg(target_os = "android")]
+pub fn uninstall(name: &str) -> Result<(), Error> {
+   let state = STATE.get().ok_or(Error::NotStarted)?;
+   let file = state.plugins_dir().join(format!("{name}.js"));
+   std::fs::remove_file(&file).map_err(io_error(&file))?;
+   if let Some(mut engine) = engine() {
+      engine.uninstall(name);
+   }
+   Ok(())
 }
 
 /// Evaluates an enabled plugin again with its hooks cleared.

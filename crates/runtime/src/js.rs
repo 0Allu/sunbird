@@ -49,9 +49,11 @@ pub struct Engine {
 }
 
 struct Loaded {
-   source:  String,
-   enabled: bool,
-   error:   Option<String>,
+   source:    String,
+   enabled:   bool,
+   error:     Option<String>,
+   /// Read from `home/plugins`, so the user can delete it.
+   installed: bool,
 }
 
 /// Which plugins the user turned off and how they set each plugin's
@@ -166,6 +168,7 @@ impl Engine {
                   name: name.clone(),
                   enabled: loaded.enabled,
                   error: loaded.error.clone(),
+                  installed: loaded.installed,
                   switches,
                }
             })
@@ -254,12 +257,14 @@ impl Engine {
    pub fn install(&mut self, name: &str, source: String) {
       let enabled = if let Some(loaded) = self.plugins.get_mut(name) {
          loaded.source = source;
+         loaded.installed = true;
          loaded.enabled
       } else {
          self.plugins.insert(name.to_owned(), Loaded {
             source,
             enabled: true,
             error: None,
+            installed: true,
          });
          true
       };
@@ -267,6 +272,20 @@ impl Engine {
          self.unload(name);
          self.eval(name);
       }
+   }
+
+   /// Drops `name` and what the user chose for it. A bundled plugin it
+   /// replaced comes back at the next start.
+   #[cfg(target_os = "android")]
+   pub fn uninstall(&mut self, name: &str) {
+      self.unload(name);
+      self.plugins.remove(name);
+      self.context.with(|ctx| {
+         if let Some(registry) = ctx.userdata::<Registry<'_>>() {
+            registry.chosen.borrow_mut().remove(name);
+         }
+      });
+      self.save_choices();
    }
 
    pub fn reload(&mut self, name: &str) {
@@ -665,9 +684,9 @@ fn storage<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
 )]
 pub fn load_plugins(state: &State, bundled: Vec<Plugin>) -> Result<Vec<String>, Error> {
    let dir = state.plugins_dir();
-   let mut sources: BTreeMap<String, String> = bundled
+   let mut sources: BTreeMap<String, (String, bool)> = bundled
       .into_iter()
-      .map(|plugin| (plugin.name, plugin.source))
+      .map(|plugin| (plugin.name, (plugin.source, false)))
       .collect();
    let paths = match fs::read_dir(&dir) {
       Ok(entries) => {
@@ -687,7 +706,7 @@ pub fn load_plugins(state: &State, bundled: Vec<Plugin>) -> Result<Vec<String>, 
          continue;
       };
       let source = fs::read_to_string(&path).map_err(io_error(&path))?;
-      sources.insert(name.to_owned(), source);
+      sources.insert(name.to_owned(), (source, true));
    }
 
    let choices_path = state.choices_path();
@@ -713,12 +732,13 @@ pub fn load_plugins(state: &State, bundled: Vec<Plugin>) -> Result<Vec<String>, 
    });
    engine.plugins = sources
       .into_iter()
-      .map(|(name, source)| {
+      .map(|(name, (source, installed))| {
          let enabled = !choices.disabled.contains(&name);
          (name, Loaded {
             source,
             enabled,
             error: None,
+            installed,
          })
       })
       .collect();

@@ -58,6 +58,7 @@ const FIRST_ID: i32 = 0x5000_0000;
 const LOGOUT_ROW: &str = "settings.row.logout";
 const ICON_PLUGIN: &str = "res://ic_mana_puzzle_piece_plus";
 const ICON_RELOAD: &str = "res://ic_mana_puzzle_piece_retry";
+const ICON_UNINSTALL: &str = "res://ic_mana_puzzle_piece_minus";
 const ICON_CONSOLE: &str = "res://ic_mana_angle_brackets";
 /// Ids Phoenix's captured page layout uses for the parts plumage fills in.
 const PAGE_HEADER_SPACER: u32 = 0x4E1;
@@ -83,6 +84,7 @@ enum Press {
    OpenPlugin(usize),
    Toggle(usize),
    Reload(usize),
+   Uninstall(usize),
    /// A plugin's switch, by its index in [`PluginInfo::switches`].
    Switch(usize, usize),
    Back,
@@ -287,7 +289,10 @@ pub fn start() {
             _ => {},
          }
          if let Job::Press(
-            press @ (Press::Toggle(index) | Press::Reload(index) | Press::Switch(index, _)),
+            press @ (Press::Toggle(index)
+            | Press::Reload(index)
+            | Press::Uninstall(index)
+            | Press::Switch(index, _)),
          ) = job
          {
             let plugin = settings().plugins.get(index).cloned();
@@ -298,6 +303,12 @@ pub fn start() {
                (Some(plugin), Press::Switch(_, at)) => {
                   if let Some(switch) = plugin.switches.get(at) {
                      crate::set_switch(&plugin.name, &switch.key, !switch.on);
+                  }
+               },
+               (Some(plugin), Press::Uninstall(_)) => {
+                  match crate::uninstall(&plugin.name) {
+                     Ok(()) => log::info!("uninstalled {}", plugin.name),
+                     Err(err) => log::error!("uninstall failed: {err}"),
                   }
                },
                (Some(plugin), _) => crate::reload(&plugin.name),
@@ -566,6 +577,11 @@ impl Settings {
             self.rerender_all()
          },
          Job::Press(Press::Back) => self.close_top(),
+         Job::Press(Press::Uninstall(_)) => {
+            let mut ops = self.close_top();
+            ops.extend(self.rerender_all());
+            ops
+         },
          Job::NavigateTo(index) => {
             let mut ops = Vec::new();
             while self
@@ -1214,12 +1230,21 @@ fn plugin_sections(index: usize, plugin: &PluginInfo) -> Vec<Tree> {
    if !switches.is_empty() {
       sections.push(section("Settings", switches));
    }
-   sections.push(section("", vec![button_row(
+   let mut actions = vec![button_row(
       "Reload",
       ICON_RELOAD,
       Some(Press::Reload(index)),
       false,
-   )]));
+   )];
+   if plugin.installed {
+      actions.push(button_row(
+         "Uninstall",
+         ICON_UNINSTALL,
+         Some(Press::Uninstall(index)),
+         false,
+      ));
+   }
+   sections.push(section("", actions));
    sections.push(section("Info", vec![
       value_row("Name", &plugin.name),
       value_row("Status", status),
