@@ -380,7 +380,7 @@ fn act(job: &Job) {
                   return;
                };
                let value = match setting.control {
-                  Control::Text(_) => Chosen::Text(draft.clone()),
+                  Control::Text(_) | Control::Secret(_) => Chosen::Text(draft.clone()),
                   Control::Number(_) => {
                      let Ok(number) = input.parse::<f64>() else {
                         log::error!(
@@ -1271,7 +1271,7 @@ fn main_sections(plugins: &[PluginInfo]) -> Vec<Tree> {
          Some(ICON_PLUGIN),
          "https://example.com/plugin.js",
          "",
-         false,
+         InputKind::Text,
       )]),
       section("", vec![button_row(
          "Console",
@@ -1295,13 +1295,21 @@ fn log_text() -> String {
    lines.join("\n")
 }
 
+/// What a text field takes, which picks its keyboard.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputKind {
+   Text,
+   Number,
+   Secret,
+}
+
 /// `root > frame > row > [icon wrap > icon, input]`, Phoenix's search box.
 fn text_field(
    field: Field,
    icon: Option<&str>,
    placeholder: &str,
    value: &str,
-   number: bool,
+   entry: InputKind,
 ) -> Tree {
    let mut root = Tree::from_template(&templates().input);
    let Some(row) = root
@@ -1317,7 +1325,14 @@ fn text_field(
    if let Some(input) = row.kids.get_mut(1) {
       input.set(Prop::PLACEHOLDER, Some(text(placeholder)));
       input.set(Prop::VALUE, Some(text(value)));
-      input.set(Prop::KEYBOARD, number.then(|| text("number")));
+      input.set(
+         Prop::KEYBOARD,
+         (entry == InputKind::Number).then(|| text("number")),
+      );
+      input.set(
+         Prop::SECURE,
+         (entry == InputKind::Secret).then_some(Value::Bool(true)),
+      );
       input.set(Prop::RETURN_KEY, Some(text("go")));
       input.set(Prop::ROLE, None);
       input.set(
@@ -1341,7 +1356,7 @@ fn console_sections() -> Vec<Tree> {
       Some(ICON_CONSOLE),
       "Evaluate JavaScript",
       "",
-      false,
+      InputKind::Text,
    );
    let mut log = button_row(&log_text(), ICON_CONSOLE, None, false);
    if let Some(row) = log.kids.first_mut() {
@@ -1368,6 +1383,16 @@ fn plugin_sections(index: usize, plugin: &PluginInfo) -> Vec<Tree> {
    for (at, setting) in plugin.settings.iter().enumerate() {
       let press = Press::Setting(index, at);
       let description = setting.description.as_deref();
+      let field = |value: &str, entry| {
+         let input = text_field(
+            Field::Setting(index, at),
+            None,
+            description.unwrap_or(""),
+            value,
+            entry,
+         );
+         section(&setting.title, vec![input])
+      };
       match &setting.control {
          Control::Switch(on) => {
             rows.push(switch_row(
@@ -1386,26 +1411,9 @@ fn plugin_sections(index: usize, plugin: &PluginInfo) -> Vec<Tree> {
             }
             rows.push(row);
          },
-         Control::Text(current) => {
-            let field = text_field(
-               Field::Setting(index, at),
-               None,
-               description.unwrap_or(""),
-               current,
-               false,
-            );
-            fields.push(section(&setting.title, vec![field]));
-         },
-         Control::Number(number) => {
-            let field = text_field(
-               Field::Setting(index, at),
-               None,
-               description.unwrap_or(""),
-               &number.to_string(),
-               true,
-            );
-            fields.push(section(&setting.title, vec![field]));
-         },
+         Control::Text(current) => fields.push(field(current, InputKind::Text)),
+         Control::Secret(current) => fields.push(field(current, InputKind::Secret)),
+         Control::Number(number) => fields.push(field(&number.to_string(), InputKind::Number)),
       }
    }
    let mut sections = vec![section("", vec![switch_row(

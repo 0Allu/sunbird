@@ -18,15 +18,15 @@ const settings = plumage.settings.define({
     default: "en",
   },
   kagiToken: {
-    type: "text",
+    type: "secret",
     title: "Kagi session token",
     description: "The token from the Session Link in kagi.com/settings/user_details. Empty uses Google",
     default: "",
   },
   kagiBest: {
     type: "switch",
-    title: "Kagi best model",
-    description: "Slower, higher quality translations",
+    title: "Kagi best quality",
+    description: "Better translations for about 10 times the Kagi usage of standard",
     default: false,
   },
 });

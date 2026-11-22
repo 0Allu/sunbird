@@ -29,8 +29,8 @@ pub mod console;
 #[cfg(target_os = "android")] mod fetch;
 mod gateway;
 mod js;
-mod local;
 #[cfg(target_os = "android")] mod jvm;
+mod local;
 #[cfg(target_os = "android")] mod patches;
 #[cfg(target_os = "android")] mod settings;
 #[cfg(target_os = "android")] mod store;
@@ -141,6 +141,8 @@ pub struct Setting {
 pub enum Control {
    Switch(bool),
    Text(String),
+   /// Text shown masked, and redacted from the plugin's log lines.
+   Secret(String),
    Number(f64),
    Button,
 }

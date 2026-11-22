@@ -14,9 +14,52 @@ use log::{
    Record,
 };
 
+const REDACTED: &str = "[redacted]";
+
 const CAPACITY: usize = 200;
 
 static LINES: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+static SECRETS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Sets the values every later line is scrubbed of, each also in its
+/// URL-encoded form, since plugins put tokens in query strings.
+pub fn redact(secrets: impl IntoIterator<Item = String>) {
+   let mut all = Vec::new();
+   for secret in secrets.into_iter().filter(|secret| !secret.is_empty()) {
+      let encoded = url_encoded(&secret);
+      if encoded != secret {
+         all.push(encoded);
+      }
+      all.push(secret);
+   }
+   *SECRETS.lock().unwrap_or_else(PoisonError::into_inner) = all;
+}
+
+fn url_encoded(text: &str) -> String {
+   text
+      .bytes()
+      .map(|byte| {
+         if byte.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&byte) {
+            char::from(byte).to_string()
+         } else {
+            format!("%{byte:02X}")
+         }
+      })
+      .collect()
+}
+
+fn scrub(mut line: String) -> String {
+   for secret in SECRETS
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .iter()
+   {
+      if line.contains(secret.as_str()) {
+         line = line.replace(secret.as_str(), REDACTED);
+      }
+   }
+   line
+}
 
 /// Logs through `L` and keeps a copy of each line.
 pub struct Tee<L>(pub L);
@@ -30,12 +73,20 @@ impl<L: Log> Log for Tee<L> {
       if !self.enabled(record.metadata()) {
          return;
       }
-      self.0.log(record);
+      let text = scrub(record.args().to_string());
+      self.0.log(
+         &Record::builder()
+            .args(format_args!("{text}"))
+            .metadata(record.metadata().clone())
+            .module_path(record.module_path())
+            .file(record.file())
+            .line(record.line())
+            .build(),
+      );
 
       let line = format!(
-         "{} {}",
+         "{} {text}",
          record.level().as_str().chars().next().unwrap_or('?'),
-         record.args()
       );
       {
          let mut lines = LINES.lock().unwrap_or_else(PoisonError::into_inner);

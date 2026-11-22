@@ -65,6 +65,7 @@ impl Prop {
    pub const RADIUS_TOP_RIGHT: Self = Self::named("radiusTopRight");
    pub const RETURN_KEY: Self = Self::named("returnKey");
    pub const ROLE: Self = Self::named("role");
+   pub const SECURE: Self = Self::named("secure");
    pub const SELECTABLE: Self = Self::named("selectable");
    pub const STACK_HEADER: Self = Self::named("stackHeader");
    pub const SUBMIT: Self = Self::named("submit");

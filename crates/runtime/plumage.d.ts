@@ -898,13 +898,15 @@ declare namespace Plumage {
   type SettingSpec =
     | (SpecBase & { type: "switch"; default?: boolean })
     | (SpecBase & { type: "text"; default?: string })
+    /// Text shown masked, and replaced with `[redacted]` in the plugin's log lines.
+    | (SpecBase & { type: "secret"; default?: string })
     | (SpecBase & { type: "number"; default?: number })
     | (SpecBase & { type: "button"; onPress(): void });
 
   /// The value a setting reads as. Buttons have none.
   type SettingValue<S> = S extends { type: "switch" }
     ? boolean
-    : S extends { type: "text" }
+    : S extends { type: "text" | "secret" }
       ? string
       : S extends { type: "number" }
         ? number

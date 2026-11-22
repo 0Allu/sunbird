@@ -105,6 +105,7 @@ struct Definition<'js> {
 enum Kind<'js> {
    Switch(bool),
    Text(String),
+   Secret(String),
    Number(f64),
    Button(Function<'js>),
 }
@@ -117,6 +118,8 @@ impl Kind<'_> {
          (Self::Switch(default), _) => Control::Switch(*default),
          (Self::Text(_), Some(Chosen::Text(text))) => Control::Text(text.clone()),
          (Self::Text(default), _) => Control::Text(default.clone()),
+         (Self::Secret(_), Some(Chosen::Text(text))) => Control::Secret(text.clone()),
+         (Self::Secret(default), _) => Control::Secret(default.clone()),
          (Self::Number(_), Some(Chosen::Number(number))) => Control::Number(*number),
          (Self::Number(default), _) => Control::Number(*default),
          (Self::Button(_), _) => Control::Button,
@@ -260,6 +263,7 @@ impl Engine {
                .entry(plugin.to_owned())
                .or_default()
                .insert(key.to_owned(), value);
+            redact_secrets(&registry);
          }
       });
       self.save_choices();
@@ -1584,6 +1588,29 @@ fn stores_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
    Ok(stores)
 }
 
+/// Hands every secret setting's current value to the logger to scrub.
+fn redact_secrets(registry: &Registry<'_>) {
+   let chosen = registry.chosen.borrow();
+   let secrets = registry
+      .defined
+      .borrow()
+      .iter()
+      .flat_map(|(plugin, definitions)| {
+         let picked = chosen.get(plugin);
+         definitions.iter().filter_map(move |definition| {
+            match definition
+               .kind
+               .current(picked.and_then(|values| values.get(&definition.key)))
+            {
+               Control::Secret(value) => Some(value),
+               _ => None,
+            }
+         })
+      })
+      .collect::<Vec<String>>();
+   crate::console::redact(secrets);
+}
+
 /// Records `schema` as the plugin's settings and returns an object with one
 /// getter per non-button key that reads the user's current choice.
 fn define<'js>(
@@ -1603,13 +1630,21 @@ fn define<'js>(
                   .unwrap_or_default(),
             )
          },
+         "secret" => {
+            Kind::Secret(
+               spec
+                  .get::<_, Option<String>>("default")?
+                  .unwrap_or_default(),
+            )
+         },
          "number" => Kind::Number(spec.get::<_, Option<f64>>("default")?.unwrap_or_default()),
          "button" => Kind::Button(spec.get("onPress")?),
          other => {
             return Err(Exception::throw_type(
                ctx,
                &format!(
-                  "setting {key}: unknown type {other:?}, expected switch, text, number or button"
+                  "setting {key}: unknown type {other:?}, expected switch, text, secret, number \
+                   or button"
                ),
             ));
          },
@@ -1643,7 +1678,7 @@ fn define<'js>(
          let picked = chosen.get(&plugin).and_then(|values| values.get(&key));
          match definition.kind.current(picked) {
             Control::Switch(on) => on.into_js(&ctx),
-            Control::Text(text) => text.into_js(&ctx),
+            Control::Text(text) | Control::Secret(text) => text.into_js(&ctx),
             Control::Number(number) => number.into_js(&ctx),
             Control::Button => Ok(Value::new_undefined(ctx.clone())),
          }
@@ -1658,6 +1693,9 @@ fn define<'js>(
       .defined
       .borrow_mut()
       .insert(plugin.to_owned(), definitions);
+   if let Some(registry) = ctx.userdata::<Registry<'js>>() {
+      redact_secrets(&registry);
+   }
    Ok(values)
 }
 
