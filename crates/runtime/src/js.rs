@@ -210,6 +210,16 @@ fn camel_case(name: &str) -> String {
       .collect()
 }
 
+fn event_of<'js>(ctx: &Ctx<'js>, sig: &Value<'js>) -> rquickjs::Result<EventId> {
+   ctx.userdata::<Registry<'js>>()
+      .ok_or_else(|| Exception::throw_internal(ctx, "no registry"))?
+      .handles
+      .iter()
+      .find(|(_, handle)| handle.as_value() == sig)
+      .map(|(event, _)| *event)
+      .ok_or_else(|| Exception::throw_type(ctx, "expected a hook point from plumage.gateway"))
+}
+
 fn register<'js>(
    ctx: &Ctx<'js>,
    plugin: &str,
@@ -217,17 +227,10 @@ fn register<'js>(
    before: Option<Function<'js>>,
    after: Option<Function<'js>>,
 ) -> rquickjs::Result<()> {
-   let registry = ctx
-      .userdata::<Registry<'js>>()
-      .ok_or_else(|| Exception::throw_internal(ctx, "no registry"))?;
-   let event = registry
-      .handles
-      .iter()
-      .find(|(_, handle)| handle.as_value() == sig)
-      .map(|(event, _)| *event)
-      .ok_or_else(|| Exception::throw_type(ctx, "expected a hook point from plumage.gateway"))?;
+   let event = event_of(ctx, sig)?;
    gateway::install(event);
-   registry
+   ctx.userdata::<Registry<'js>>()
+      .ok_or_else(|| Exception::throw_internal(ctx, "no registry"))?
       .hooks
       .borrow_mut()
       .entry(event)
@@ -266,6 +269,22 @@ fn api<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
          ctx.clone(),
          move |ctx: Ctx<'js>, sig: Value<'js>, hooks: Object<'js>| {
             register(&ctx, &name, &sig, hooks.get("before")?, hooks.get("after")?)
+         },
+      )?,
+   )?;
+   api.set(
+      "dispatch",
+      Function::new(
+         ctx.clone(),
+         |ctx: Ctx<'js>, sig: Value<'js>, payload: Value<'js>| {
+            let event = event_of(&ctx, &sig)?;
+            let json = ctx
+               .json_stringify(payload)?
+               .ok_or_else(|| Exception::throw_type(&ctx, "dispatch needs a JSON payload"))?
+               .to_string()?;
+            gateway::dispatch(event, &json).ok_or_else(|| {
+               Exception::throw_message(&ctx, "dispatch runs only inside a gateway hook")
+            })
          },
       )?,
    )?;
@@ -375,7 +394,11 @@ pub fn load_plugins(state: &State, bundled: Vec<Plugin>) -> Result<Vec<String>, 
       .map(|plugin| (plugin.name, plugin.source))
       .collect();
    let paths = match fs::read_dir(&dir) {
-      Ok(entries) => entries.collect::<Result<Vec<_>, _>>().map_err(io_error(&dir))?,
+      Ok(entries) => {
+         entries
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(io_error(&dir))?
+      },
       Err(err) if err.kind() == ErrorKind::NotFound => Vec::new(),
       Err(err) => return Err(io_error(&dir)(err)),
    };

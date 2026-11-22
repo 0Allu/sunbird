@@ -53,6 +53,20 @@ thread_local! {
       reason = "fires on Android only, where the initializer is already const"
    )]
    static IN_JS: Cell<bool> = const { Cell::new(false) };
+   #[allow(
+      clippy::missing_const_for_thread_local,
+      reason = "fires on Android only, where the initializer is already const"
+   )]
+   static HANDLING: Cell<Option<Handling>> = const { Cell::new(None) };
+}
+
+/// The host's handler arguments for the event whose hooks are running, so a
+/// hook can feed Phoenix another event on the same store thread.
+#[derive(Clone, Copy)]
+struct Handling {
+   store: *mut c_void,
+   ctx:   *mut c_void,
+   rest:  [u64; 4],
 }
 
 /// Points every registry entry at [`detour`]. Phoenix looks handlers up in the
@@ -131,6 +145,25 @@ pub fn verify(state: &State) {
    }
 }
 
+/// Runs `data` through Phoenix's own handler for `event`, skipping the
+/// plugins. Returns whether the handler accepted it.
+pub fn dispatch(event: EventId, data: &str) -> Option<bool> {
+   let gateway = GATEWAY.get().expect("start swaps the registry before plugins load");
+   let handling = HANDLING.get()?;
+   let name = &gateway.registry.entry(event).name;
+   let synthetic = GatewayEvent {
+      name: RawStr { ptr: name.as_ptr(), len: name.len() },
+      data: RawStr { ptr: data.as_ptr(), len: data.len() },
+      rest: handling.rest,
+   };
+
+   // SAFETY: `handling` holds the arguments of a handler call still on this
+   // thread's stack, and the event borrows strings that outlive the call.
+   let original = gateway.originals[event.index()];
+   let result = unsafe { original(handling.store, &raw const synthetic, handling.ctx) };
+   Some(result.is_ok())
+}
+
 /// Routes `event` through the plugins.
 pub fn install(event: EventId) {
    let gateway = GATEWAY.get().expect("start swaps the registry before plugins load");
@@ -162,9 +195,13 @@ unsafe extern "C" fn detour(
    let (true, Some(state), Some(data), false) = (listened, STATE.get(), data, IN_JS.get()) else {
       return call(event);
    };
+   HANDLING.set(Some(Handling { store, ctx, rest: event.rest }));
    let before = run_js(state, |engine| engine.before(id, name, data)).unwrap_or(Before::Keep);
    let (result, data) = match &before {
-      Before::Drop => return HandlerResult::OK,
+      Before::Drop => {
+         HANDLING.set(None);
+         return HandlerResult::OK;
+      },
       Before::Keep => (call(event), data),
       Before::Replace(json) => {
          let replaced = GatewayEvent {
@@ -178,6 +215,7 @@ unsafe extern "C" fn detour(
       },
    };
    run_js(state, |engine| engine.after(id, name, data, result.is_ok()));
+   HANDLING.set(None);
    result
 }
 

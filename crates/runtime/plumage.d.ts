@@ -895,6 +895,9 @@ declare namespace Plumage {
     /// Observes a hook point after the client handled it.
     on<P>(sig: Sig<P>, listener: (payload: P) => void): void;
     hook<P>(sig: Sig<P>, hooks: Hooks<P>): void;
+    /// Feeds `payload` to the client's own handler for `sig`, skipping every plugin. Works only
+    /// while a gateway hook runs, and throws elsewhere. Returns whether the handler accepted it.
+    dispatch<P>(sig: Sig<P>, payload: Partial<P>): boolean;
     readonly log: Log;
     readonly storage: Storage;
   }
