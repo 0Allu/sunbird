@@ -439,6 +439,7 @@ dependencies = [
  "plumage-hook",
  "plumage-sigs",
  "plumage-ui",
+ "plumage-wire",
  "rquickjs",
  "serde",
  "serde_json",
@@ -458,8 +459,16 @@ name = "plumage-ui"
 version = "0.1.0"
 dependencies = [
  "flub",
+ "plumage-wire",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "plumage-wire"
+version = "0.1.0"
+dependencies = [
+ "flub",
 ]
 
 [[package]]

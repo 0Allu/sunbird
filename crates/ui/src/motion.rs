@@ -6,10 +6,11 @@
 //!   target.
 //! - Channel numbers are the cases of the host's setter, `mh.e0.d`.
 
+use plumage_wire::Value;
+
 use crate::{
    Prop,
    Props,
-   Value,
 };
 
 const MAGIC: i32 = -1_792_780_819;

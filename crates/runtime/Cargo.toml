@@ -19,10 +19,11 @@ serde_json   = { workspace = true }
 rquickjs = { features = [ "bindgen" ], workspace = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
-jni-sys    = { workspace = true }
-libc       = { workspace = true }
-memchr     = { workspace = true }
-plumage-ui = { workspace = true }
+jni-sys      = { workspace = true }
+libc         = { workspace = true }
+memchr       = { workspace = true }
+plumage-ui   = { workspace = true }
+plumage-wire = { workspace = true }
 
 [lints]
 workspace = true

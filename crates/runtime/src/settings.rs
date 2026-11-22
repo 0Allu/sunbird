@@ -31,15 +31,12 @@ use std::{
 use memchr::memmem;
 use plumage_ui::{
    ChildEdit,
-   DispatchEvent,
    Node,
    Op,
    Prop,
    Props,
-   Value,
    ViewKind,
    decode,
-   decode_dispatch,
    encode,
    motion::{
       self,
@@ -47,6 +44,11 @@ use plumage_ui::{
       Worklet,
    },
    templates,
+};
+use plumage_wire::{
+   DispatchEvent,
+   Value,
+   decode_dispatch,
    without_frames,
 };
 
@@ -501,22 +503,25 @@ fn filter_dispatch(frame: &[u8]) -> Action {
          else {
             continue;
          };
-         let job = if *event == Prop::NAVIGATE
+         let job = if *event == Prop::NAVIGATE.key()
             && !screen.stack.is_empty()
             && Some(*node) == screen.navigator
          {
-            let index = obj_i32(payload, Prop::INDEX).and_then(|index| usize::try_from(index).ok());
+            let index = payload
+               .field(Prop::INDEX.key())
+               .and_then(Value::as_i32)
+               .and_then(|index| usize::try_from(index).ok());
             Some(Job::NavigateTo(
                index.unwrap_or_else(|| state.page_index().saturating_sub(1)),
             ))
          } else if let Some(field) = state.field(*node) {
-            if *event == Prop::CHANGE_TEXT {
+            if *event == Prop::CHANGE_TEXT.key() {
                text_of(payload).map(|text| Job::Draft(field, text))
             } else {
-               (*event == Prop::SUBMIT).then_some(Job::Submit(field))
+               (*event == Prop::SUBMIT.key()).then_some(Job::Submit(field))
             }
          } else if let Some(press) = state.handlers.get(node) {
-            (*event == Prop::PRESS).then_some(Job::Press(*press))
+            (*event == Prop::PRESS.key()).then_some(Job::Press(*press))
          } else {
             continue;
          };
@@ -545,33 +550,16 @@ fn filter_dispatch(frame: &[u8]) -> Action {
 fn text_of(payload: &Value) -> Option<String> {
    match payload {
       Value::Str(text) => Some(text.clone()),
-      Value::Obj(fields) => {
-         fields.iter().find_map(|(field, value)| {
-            match value {
-               Value::Str(text) if *field == Prop::TEXT || *field == Prop::VALUE => {
-                  Some(text.clone())
-               },
-               _ => None,
-            }
-         })
+      Value::Obj(_) => {
+         [Prop::TEXT, Prop::VALUE]
+            .into_iter()
+            .find_map(|prop| payload.field(prop.key())?.as_str().map(str::to_owned))
       },
       _ => {
          log::warn!("settings: unexpected changeText payload {payload:?}");
          None
       },
    }
-}
-
-fn obj_i32(payload: &Value, key: Prop) -> Option<i32> {
-   let Value::Obj(fields) = payload else {
-      return None;
-   };
-   fields.iter().find_map(|(field, value)| {
-      match value {
-         Value::I32(found) if *field == key => Some(*found),
-         _ => None,
-      }
-   })
 }
 
 impl Settings {
