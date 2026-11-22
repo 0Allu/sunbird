@@ -16,6 +16,10 @@ use std::{
 
 use serde::Deserialize;
 
+use crate::motion::Worklet;
+
+pub mod motion;
+
 /// The prop and event name table (`lh/c2.a`, versionCode 356207). The index is
 /// the wire key.
 pub const PROPS: [&str; 855] = include!("props.in");
@@ -789,33 +793,37 @@ pub struct Node {
 /// Phoenix's own settings layouts, captured from versionCode 356207.
 #[derive(Debug)]
 pub struct Templates {
-   pub section:    Node,
-   pub header:     Node,
-   pub group:      Node,
-   pub switch_row: Node,
-   pub divider:    Node,
-   pub button_row: Node,
-   pub value_row:  Node,
-   pub input:      Node,
-   pub page:       Node,
-   pub track_off:  Props,
-   pub knob_off:   Props,
+   pub section:       Node,
+   pub header:        Node,
+   pub group:         Node,
+   pub switch_row:    Node,
+   pub divider:       Node,
+   pub button_row:    Node,
+   pub value_row:     Node,
+   pub input:         Node,
+   pub page:          Node,
+   pub track_off:     Props,
+   pub knob_off:      Props,
+   pub track_worklet: Worklet,
+   pub knob_worklet:  Worklet,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RawTemplates {
-   section:    RawNode,
-   header:     RawNode,
-   group:      RawNode,
-   switch_row: RawNode,
-   divider:    RawNode,
-   button_row: RawNode,
-   value_row:  RawNode,
-   input:      RawNode,
-   page:       RawNode,
-   track_off:  Vec<RawEntry>,
-   knob_off:   Vec<RawEntry>,
+   section:       RawNode,
+   header:        RawNode,
+   group:         RawNode,
+   switch_row:    RawNode,
+   divider:       RawNode,
+   button_row:    RawNode,
+   value_row:     RawNode,
+   input:         RawNode,
+   page:          RawNode,
+   track_off:     Vec<RawEntry>,
+   knob_off:      Vec<RawEntry>,
+   track_worklet: Vec<i32>,
+   knob_worklet:  Vec<i32>,
 }
 
 #[derive(Deserialize)]
@@ -924,21 +932,25 @@ impl From<RawNode> for Node {
 pub fn templates() -> &'static Templates {
    static TEMPLATES: OnceLock<Templates> = OnceLock::new();
    TEMPLATES.get_or_init(|| {
-      let raw: RawTemplates = serde_json::from_str(include_str!("templates.json"))
+      let raw = serde_json::from_str::<RawTemplates>(include_str!("templates.json"))
          .unwrap_or_else(|err| panic!("templates.json: {err}"));
 
       Templates {
-         section:    raw.section.into(),
-         header:     raw.header.into(),
-         group:      raw.group.into(),
-         switch_row: raw.switch_row.into(),
-         divider:    raw.divider.into(),
-         button_row: raw.button_row.into(),
-         value_row:  raw.value_row.into(),
-         input:      raw.input.into(),
-         page:       raw.page.into(),
-         track_off:  props(raw.track_off),
-         knob_off:   props(raw.knob_off),
+         section:       raw.section.into(),
+         header:        raw.header.into(),
+         group:         raw.group.into(),
+         switch_row:    raw.switch_row.into(),
+         divider:       raw.divider.into(),
+         button_row:    raw.button_row.into(),
+         value_row:     raw.value_row.into(),
+         input:         raw.input.into(),
+         page:          raw.page.into(),
+         track_off:     props(raw.track_off),
+         knob_off:      props(raw.knob_off),
+         track_worklet: Worklet::try_from(raw.track_worklet)
+            .unwrap_or_else(|err| panic!("templates.json trackWorklet: {err}")),
+         knob_worklet:  Worklet::try_from(raw.knob_worklet)
+            .unwrap_or_else(|err| panic!("templates.json knobWorklet: {err}")),
       }
    })
 }

@@ -41,6 +41,11 @@ use plumage_ui::{
    decode,
    decode_dispatch,
    encode,
+   motion::{
+      self,
+      Spring,
+      Worklet,
+   },
    templates,
    without_frames,
 };
@@ -57,6 +62,9 @@ use crate::{
 };
 
 const FIRST_ID: i32 = 0x5000_0000;
+/// The host drops motion slots at or above 65536, and Rust counts its own up
+/// from 0, so plumage takes them downward from the top.
+const SLOT_END: i32 = 1 << 16;
 const LOGOUT_ROW: &str = "settings.row.logout";
 const ICON_PLUGIN: &str = "res://ic_mana_puzzle_piece_plus";
 const ICON_RELOAD: &str = "res://ic_mana_puzzle_piece_retry";
@@ -79,7 +87,7 @@ const RADII: [Prop; 5] = [
 
 /// Plugins are named by their index in [`crate::plugins`] as of the last
 /// render, which every install follows with a fresh one.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Press {
    OpenMain,
    OpenConsole,
@@ -126,25 +134,36 @@ enum Slot {
 }
 
 struct Tree {
-   id:    i32,
-   kind:  ViewKind,
-   props: Props,
-   kids:  Vec<Self>,
-   src:   Option<u32>,
-   press: Option<Press>,
-   slot:  Option<Slot>,
+   id:      i32,
+   kind:    ViewKind,
+   props:   Props,
+   kids:    Vec<Self>,
+   src:     Option<u32>,
+   press:   Option<Press>,
+   slot:    Option<Slot>,
+   animate: Option<Animate>,
+}
+
+/// A node the host animates between two prop sets, like a switch's knob.
+struct Animate {
+   worklet: &'static Worklet,
+   /// The props of the other state.
+   other:   Props,
+   /// Set when the node starts at `other` and springs to its own props.
+   flipped: bool,
 }
 
 impl Tree {
    fn from_template(node: &Node) -> Self {
       Self {
-         id:    0,
-         kind:  node.kind.clone(),
-         props: node.props.clone(),
-         kids:  node.kids.iter().map(Self::from_template).collect(),
-         src:   node.src,
-         press: None,
-         slot:  None,
+         id:      0,
+         kind:    node.kind.clone(),
+         props:   node.props.clone(),
+         kids:    node.kids.iter().map(Self::from_template).collect(),
+         src:     node.src,
+         press:   None,
+         slot:    None,
+         animate: None,
       }
    }
 
@@ -169,6 +188,17 @@ impl Tree {
       slots
    }
 
+   /// Marks the animated nodes under the one `press` targets as just flipped.
+   fn flip(&mut self, press: Press, inside: bool) {
+      let inside = inside || (self.press == Some(press) && self.animate.is_some());
+      if inside && let Some(animate) = &mut self.animate {
+         animate.flipped = true;
+      }
+      for kid in &mut self.kids {
+         kid.flip(press, inside);
+      }
+   }
+
    fn ids(&self) -> Vec<i32> {
       let mut ids = vec![self.id];
       ids.extend(self.kids.iter().flat_map(Self::ids));
@@ -190,6 +220,35 @@ fn set_prop(props: &mut Props, key: Prop, value: Option<Value>) {
 
 fn text(value: &str) -> Value {
    Value::Str(value.to_owned())
+}
+
+/// Motion slots for animated nodes, reused once a node is deleted.
+struct SlotPool {
+   next:  i32,
+   free:  Vec<(i32, i32)>,
+   owned: HashMap<i32, (i32, i32)>,
+}
+
+impl SlotPool {
+   /// The first of `count` slots for `node`, and whether they were used
+   /// before.
+   fn take(&mut self, node: i32, count: i32) -> (i32, bool) {
+      let (first, reused) = match self.free.iter().position(|&(_, size)| size == count) {
+         Some(at) => (self.free.swap_remove(at).0, true),
+         None => {
+            self.next -= count;
+            (self.next, false)
+         },
+      };
+      self.owned.insert(node, (first, count));
+      (first, reused)
+   }
+
+   fn release(&mut self, node: i32) {
+      if let Some(block) = self.owned.remove(&node) {
+         self.free.push(block);
+      }
+   }
 }
 
 /// The "Plumage" row in the Settings list.
@@ -223,6 +282,10 @@ struct Screen {
 
 struct Settings {
    next_id:    i32,
+   slots:      SlotPool,
+   /// Motion words for nodes built since the last batch went out. They run
+   /// after the batch attaches those nodes.
+   motion:     Vec<i32>,
    navigators: HashSet<i32>,
    screen:     Option<Screen>,
    handlers:   HashMap<i32, Press>,
@@ -233,6 +296,12 @@ struct Settings {
 static SETTINGS: LazyLock<Mutex<Settings>> = LazyLock::new(|| {
    Mutex::new(Settings {
       next_id:    FIRST_ID,
+      slots:      SlotPool {
+         next:  SLOT_END,
+         free:  Vec::new(),
+         owned: HashMap::new(),
+      },
+      motion:     Vec::new(),
       navigators: HashSet::new(),
       screen:     None,
       handlers:   HashMap::new(),
@@ -278,7 +347,13 @@ pub fn start() {
             if let Some(plugins) = plugins {
                state.plugins = plugins;
             }
-            state.run(job)
+            let mut ops = state.run(job);
+            if !state.motion.is_empty() {
+               ops.push(Op::Motion {
+                  words: std::mem::take(&mut state.motion),
+               });
+            }
+            ops
          };
          if !ops.is_empty() && !bridge::apply_ops(&encode(&ops)) {
             log::warn!("settings: the UI update did not apply");
@@ -518,11 +593,33 @@ impl Settings {
       if let Some(press) = press {
          self.handlers.insert(tree.id, press);
       }
-      ops.push(Op::Create {
-         id:    tree.id,
-         kind:  tree.kind.clone(),
-         props: tree.props.clone(),
+      let mut props = tree.props.clone();
+      let motion = tree.animate.as_ref().map(|animate| {
+         let (first, reused) = self.slots.take(tree.id, animate.worklet.slot_count());
+         let bound = animate.worklet.bind(first);
+         props.push(bound.prop());
+         let start = if animate.flipped {
+            &animate.other
+         } else {
+            &tree.props
+         };
+         let mut commands = bound.rest(start);
+         if reused {
+            commands.extend(bound.pin(start, Spring::SWITCH));
+         }
+         if animate.flipped {
+            commands.extend(bound.spring(start, &tree.props, Spring::SWITCH));
+         }
+         commands
       });
+      ops.push(Op::Create {
+         id: tree.id,
+         kind: tree.kind.clone(),
+         props,
+      });
+      if let Some(commands) = motion {
+         self.motion.extend(motion::words(&commands));
+      }
       if !kids.is_empty() {
          ops.push(Op::Children {
             id:  tree.id,
@@ -535,6 +632,7 @@ impl Settings {
    fn forget(&mut self, ids: &[i32]) {
       for id in ids {
          self.handlers.remove(id);
+         self.slots.release(*id);
       }
    }
 
@@ -612,14 +710,16 @@ impl Settings {
          Job::Press(Press::OpenMain) => self.open_page(PageKind::Main),
          Job::Press(Press::OpenConsole) => self.open_page(PageKind::Console),
          Job::Press(Press::OpenPlugin(index)) => self.open_page(PageKind::Plugin(index)),
-         Job::Submit(Field::Install | Field::Setting(..))
-         | Job::Press(Press::Toggle(_) | Press::Reload(_) | Press::Setting(..)) => {
-            self.rerender_all()
+         Job::Press(press @ (Press::Toggle(_) | Press::Setting(..))) => {
+            self.rerender_all(Some(press))
+         },
+         Job::Submit(Field::Install | Field::Setting(..)) | Job::Press(Press::Reload(_)) => {
+            self.rerender_all(None)
          },
          Job::Press(Press::Back) => self.close_top(),
          Job::Press(Press::Uninstall(_)) => {
             let mut ops = self.close_top();
-            ops.extend(self.rerender_all());
+            ops.extend(self.rerender_all(None));
             ops
          },
          Job::NavigateTo(index) => {
@@ -659,7 +759,9 @@ impl Settings {
       (roots, ids)
    }
 
-   fn rerender_all(&mut self) -> Vec<Op> {
+   /// Rebuilds every open page. The switches `flipped` targets spring from
+   /// their old state.
+   fn rerender_all(&mut self, flipped: Option<Press>) -> Vec<Op> {
       let kinds = self.screen.as_ref().map_or_default(|screen| {
          screen
             .stack
@@ -673,6 +775,11 @@ impl Settings {
             continue;
          }
          let (_, mut sections) = self.render(kind);
+         if let Some(press) = flipped {
+            for section in &mut sections {
+               section.flip(press, false);
+            }
+         }
          let (roots, ids) = self.build_sections(&mut sections, &mut ops);
          let Some(page) = self
             .screen
@@ -1129,17 +1236,30 @@ fn switch_row(
    }
    if let Some(track) = row.kids.get_mut(2).and_then(|wrap| wrap.kids.get_mut(0)) {
       track.press = Some(toggle);
-      if !on {
-         track.props.clone_from(&layouts.track_off);
-         if let Some(knob) = track.kids.get_mut(0) {
-            knob.props.clone_from(&layouts.knob_off);
-         }
+      animate(track, &layouts.track_worklet, &layouts.track_off, on);
+      if let Some(knob) = track.kids.get_mut(0) {
+         animate(knob, &layouts.knob_worklet, &layouts.knob_off, on);
       }
    }
    if icon.is_none() {
       row.kids.remove(0);
    }
    root
+}
+
+/// Gives a switch part built from the "on" template the props for `on` and a
+/// worklet to spring between both states.
+fn animate(node: &mut Tree, worklet: &'static Worklet, off: &Props, on: bool) {
+   let other = if on {
+      off.clone()
+   } else {
+      std::mem::replace(&mut node.props, off.clone())
+   };
+   node.animate = Some(Animate {
+      worklet,
+      other,
+      flipped: false,
+   });
 }
 
 fn main_sections(plugins: &[PluginInfo]) -> Vec<Tree> {
