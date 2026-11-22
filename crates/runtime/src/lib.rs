@@ -19,6 +19,7 @@ use std::{
 use plumage_hook::Image;
 use plumage_sigs::{
    Build,
+   GatewayRegistry,
    LIBRARIES,
 };
 
@@ -48,11 +49,12 @@ pub enum Error {
 }
 
 struct State {
-   image:   Image<'static>,
-   build:   Option<&'static Build>,
-   home:    PathBuf,
-   js:      Mutex<js::Engine>,
-   gateway: Mutex<gateway::Installed>,
+   image:    Image<'static>,
+   build:    Option<&'static Build>,
+   registry: GatewayRegistry,
+   home:     PathBuf,
+   js:       Mutex<js::Engine>,
+   gateway:  Mutex<gateway::Installed>,
 }
 
 static STATE: OnceLock<State> = OnceLock::new();
@@ -82,11 +84,14 @@ pub fn start(home: PathBuf) -> Result<Started, Error> {
    }
    .ok_or(Error::NoTarget)?;
    let build = image.build_id.and_then(Build::find);
+   let registry = GatewayRegistry::locate(&image)?;
+   log::info!("gateway registry: {} events", registry.iter().count());
 
-   let engine = js::Engine::new()?;
+   let engine = js::Engine::new(&registry)?;
    let state = State {
       image,
       build,
+      registry,
       home,
       js: Mutex::new(engine),
       gateway: Mutex::new(gateway::Installed::default()),

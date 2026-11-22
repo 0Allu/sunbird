@@ -1,12 +1,14 @@
-//! `sigscan <library.so> [EVENT...]`
+//! `sigscan <library.so>`
 //!
 //! Loads an ELF file the way the dynamic linker would see it, with relative
-//! relocations applied, then evaluates the build table's rules (when the build
-//! ID is known) and the portable gateway rules. The output ends with a `Build`
-//! entry to paste into `builds.rs`.
+//! relocations applied. It walks the gateway registry, checks the build table's
+//! rules when the build ID is known, and ends with a `Build` entry for
+//! `builds.rs`. Code patterns go into that entry by hand from the printed
+//! prologues, wildcarding PC-relative operands.
 
 use std::{
    borrow::Cow,
+   collections::HashMap,
    env,
    fs,
 };
@@ -32,7 +34,7 @@ use object::{
 use plumage_sigs::{
    Build,
    BuildId,
-   Dispatch,
+   GatewayRegistry,
    Image,
    Segment,
    Sig,
@@ -40,17 +42,9 @@ use plumage_sigs::{
 
 fn main() -> eyre::Result<()> {
    color_eyre::install()?;
-   let mut args = env::args().skip(1);
-   let path = args
-      .next()
-      .ok_or_eyre("usage: sigscan <library.so> [EVENT...]")?;
-   let mut events = args
-      .map(|name| name.parse::<Dispatch>())
-      .collect::<Result<Vec<_>, _>>()?;
-   if events.is_empty() {
-      events = Dispatch::ALL.to_vec();
-   }
-
+   let path = env::args()
+      .nth(1)
+      .ok_or_eyre("usage: sigscan <library.so>")?;
    let data = fs::read(&path).wrap_err_with(|| format!("reading {path}"))?;
    let image = load(&path, &data)?;
    let build_id = image.build_id.ok_or_eyre("no NT_GNU_BUILD_ID note")?;
@@ -61,25 +55,50 @@ fn main() -> eyre::Result<()> {
       known.map_or("not in BUILDS", |build| build.label)
    );
 
+   let registry = GatewayRegistry::locate(&image)?;
+   let mut sharing: HashMap<usize, Vec<&str>> = HashMap::new();
+   for (_, entry) in registry.iter() {
+      sharing.entry(entry.handler).or_default().push(&entry.name);
+   }
+   println!(
+      "registry: {} events, {} handlers",
+      registry.iter().count(),
+      sharing.len()
+   );
+
+   for (_, entry) in registry.iter() {
+      let shared = sharing[&entry.handler]
+         .iter()
+         .filter(|name| **name != entry.name)
+         .collect::<Vec<&&str>>();
+
+      let note = if shared.is_empty() {
+         String::new()
+      } else {
+         format!(" shared with {shared:?}")
+      };
+
+      println!("   {:<40} {:#010x}{note}", entry.name, entry.handler);
+   }
+
    let mut failed = false;
    if let Some(build) = known {
       for rule in build.gateway {
          failed |= report("table", &rule.sig, &image);
       }
    }
-   for event in &events {
-      failed |= report("portable", &Sig::gateway(*event), &image);
+   if let Some((_, seed)) = registry
+      .iter()
+      .find(|(_, entry)| entry.name == "MESSAGE_CREATE")
+   {
+      failed |= report("portable", &Sig::gateway(&seed.name), &image);
    }
 
    println!("\n   Build {{");
    println!("      id: BuildId::hex(\"{build_id}\"),");
    println!("      label: \"TODO\",");
    println!("      library: \"{}\",", image.file_name());
-   println!("      gateway: &[");
-   for event in &events {
-      println!("         gateway!({event:?}),");
-   }
-   println!("      ],");
+   println!("      gateway: &[],");
    println!("   }},");
    if failed {
       bail!("some rules did not resolve");

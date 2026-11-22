@@ -849,14 +849,21 @@ declare namespace Plumage {
     readonly [sig]: P;
   }
 
-  /// Gateway dispatch handlers, one per event plumage knows the payload of.
-  interface Gateway {
-    readonly messageCreate: Sig<GatewayMessage>;
+  /// Payload types for gateway events, keyed like `plumage.gateway`.
+  interface GatewayPayloads {
+    messageCreate: GatewayMessage;
     /// A full message per the docs, with `tts` always false.
-    readonly messageUpdate: Sig<GatewayMessage>;
-    readonly messageDelete: Sig<MessageDelete>;
-    readonly messageDeleteBulk: Sig<MessageDeleteBulk>;
+    messageUpdate: GatewayMessage;
+    messageDelete: MessageDelete;
+    messageDeleteBulk: MessageDeleteBulk;
   }
+
+  /// One handle per entry in the client's gateway registry, read from the
+  /// running binary. Events without a payload type here are `Sig<unknown>`, and
+  /// any event can be missing from a given build.
+  type Gateway = { readonly [E in keyof GatewayPayloads]: Sig<GatewayPayloads[E]> } & {
+    readonly [event: string]: Sig<unknown> | undefined;
+  };
 
   interface Hooks<P> {
     /// Runs before the client's handler. Return a payload to replace it, `false` to drop the

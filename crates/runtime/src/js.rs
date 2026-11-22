@@ -7,7 +7,10 @@ use std::{
 };
 
 use log::Level;
-use plumage_sigs::Dispatch;
+use plumage_sigs::{
+   EventId,
+   GatewayRegistry,
+};
 use rquickjs::{
    CatchResultExt,
    CaughtError,
@@ -46,8 +49,8 @@ pub enum Before {
 /// their own `plumage` object.
 struct Registry<'js> {
    gateway: Object<'js>,
-   handles: Vec<(Dispatch, Object<'js>)>,
-   hooks:   RefCell<HashMap<Dispatch, Vec<Hook<'js>>>>,
+   handles: Vec<(EventId, Object<'js>)>,
+   hooks:   RefCell<HashMap<EventId, Vec<Hook<'js>>>>,
 }
 
 // SAFETY: every field is bound to 'js, and Changed swaps exactly that lifetime.
@@ -78,12 +81,12 @@ fn state() -> &'static State {
 }
 
 impl Engine {
-   pub fn new() -> Result<Self, Error> {
+   pub fn new(events: &GatewayRegistry) -> Result<Self, Error> {
       let runtime = Runtime::new().map_err(|err| Error::Js(err.to_string()))?;
       runtime.set_max_stack_size(512 * 1024);
       let context = Context::full(&runtime).map_err(|err| Error::Js(err.to_string()))?;
       context.with(|ctx| {
-         let registry = registry(&ctx).catch(&ctx).map_err(js_error)?;
+         let registry = registry(&ctx, events).catch(&ctx).map_err(js_error)?;
          ctx.store_userdata(registry)
             .map_err(|err| Error::Js(err.to_string()))?;
          Ok::<_, Error>(())
@@ -96,7 +99,7 @@ impl Engine {
 
    /// Runs the `before` hooks for `event`. Each sees the previous hook's
    /// payload.
-   pub fn before(&self, event: Dispatch, json: &str) -> Result<Before, Error> {
+   pub fn before(&self, event: EventId, name: &str, json: &str) -> Result<Before, Error> {
       self.context.with(|ctx| {
          let hooks = registered(&ctx, event, |hook| hook.before.as_ref());
          if hooks.is_empty() {
@@ -108,21 +111,21 @@ impl Engine {
                Ok(result) if result.as_bool() == Some(false) => return Ok(Before::Drop),
                Ok(result) if result.is_undefined() => {},
                Ok(result) => payload = result,
-               Err(err) => log::error!("[{plugin}] before {event}: {err}"),
+               Err(err) => log::error!("[{plugin}] before {name}: {err}"),
             }
          }
          let json = ctx
             .json_stringify(payload)
             .catch(&ctx)
             .map_err(js_error)?
-            .ok_or_else(|| Error::Js(format!("a before {event} hook returned no JSON value")))?;
+            .ok_or_else(|| Error::Js(format!("a before {name} hook returned no JSON value")))?;
          Ok(Before::Replace(
             json.to_string().map_err(|err| Error::Js(err.to_string()))?,
          ))
       })
    }
 
-   pub fn after(&self, event: Dispatch, json: &str, ok: bool) -> Result<(), Error> {
+   pub fn after(&self, event: EventId, name: &str, json: &str, ok: bool) -> Result<(), Error> {
       self.context.with(|ctx| {
          let hooks = registered(&ctx, event, |hook| hook.after.as_ref());
          if hooks.is_empty() {
@@ -131,7 +134,7 @@ impl Engine {
          let payload = ctx.json_parse(json).catch(&ctx).map_err(js_error)?;
          for (plugin, after) in hooks {
             if let Err(err) = after.call::<_, ()>((payload.clone(), ok)).catch(&ctx) {
-               log::error!("[{plugin}] after {event}: {err}");
+               log::error!("[{plugin}] after {name}: {err}");
             }
          }
          Ok(())
@@ -143,7 +146,7 @@ impl Engine {
 /// not run into the borrow held while iterating.
 fn registered<'js>(
    ctx: &Ctx<'js>,
-   event: Dispatch,
+   event: EventId,
    phase: impl for<'hook> Fn(&'hook Hook<'js>) -> Option<&'hook Function<'js>>,
 ) -> Vec<(String, Function<'js>)> {
    let Some(registry) = ctx.userdata::<Registry<'js>>() else {
@@ -158,25 +161,26 @@ fn registered<'js>(
       .collect()
 }
 
-/// One frozen handle per [`Dispatch`]. Plugins compare nothing and parse
+/// One frozen handle per live registry entry. Plugins compare nothing and parse
 /// nothing, the runtime recognizes a handle by identity.
-fn registry<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Registry<'js>> {
+fn registry<'js>(ctx: &Ctx<'js>, events: &GatewayRegistry) -> rquickjs::Result<Registry<'js>> {
    let freeze: Function<'js> = ctx
       .globals()
       .get::<_, Object<'js>>("Object")?
       .get("freeze")?;
    let gateway = Object::new(ctx.clone())?;
    let mut handles = Vec::new();
-   for event in Dispatch::ALL {
+   for (event, entry) in events.iter() {
+      let key = camel_case(&entry.name);
       let handle = Object::new(ctx.clone())?;
-      let label = format!("gateway.{}", event.js_name());
+      let label = format!("gateway.{key}");
       handle.set(
          "toString",
          Function::new(ctx.clone(), move || label.clone())?,
       )?;
-      let handle: Object<'js> = freeze.call((handle,))?;
-      gateway.set(event.js_name(), handle.clone())?;
-      handles.push((*event, handle));
+      let handle = freeze.call::<_, Object<'js>>((handle,))?;
+      gateway.set(key, handle.clone())?;
+      handles.push((event, handle));
    }
    let gateway = freeze.call((gateway,))?;
    Ok(Registry {
@@ -184,6 +188,22 @@ fn registry<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Registry<'js>> {
       handles,
       hooks: RefCell::default(),
    })
+}
+
+/// `MESSAGE_CREATE` to `messageCreate`, the key plugins and `plumage.d.ts` use.
+fn camel_case(name: &str) -> String {
+   name
+      .split('_')
+      .enumerate()
+      .map(|(index, word)| {
+         let lower = word.to_ascii_lowercase();
+         let mut chars = lower.chars();
+         match chars.next() {
+            Some(first) if index > 0 => first.to_ascii_uppercase().to_string() + chars.as_str(),
+            _ => lower,
+         }
+      })
+      .collect()
 }
 
 fn register<'js>(

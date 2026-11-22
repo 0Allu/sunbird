@@ -6,17 +6,17 @@
 //! build-specific byte pattern and a portable table lookup can sit in one rule,
 //! so a stale pattern is caught instead of hooked.
 //!
-//! Porting to a new Discord build is `cargo run -p sigscan --
-//! liblibdiscord_wasm_host.so`. It evaluates the portable rules against the
-//! file and prints a [`Build`] entry for [`BUILDS`]. Unknown builds still load
-//! at runtime through [`Sig::gateway`].
+//! The event set is never compiled in. [`GatewayRegistry`] walks the target's
+//! registry at load time, so a new Discord build brings its own events. Porting
+//! the build table is `cargo run -p sigscan -- liblibdiscord_wasm_host.so`,
+//! which dumps the registry and checks every rule. Unknown builds still load
+//! through [`Sig::gateway`].
 
 use std::{
    borrow::Cow,
    ffi::c_void,
    fmt,
    marker::PhantomData,
-   str::FromStr,
 };
 
 pub use plumage_hook::{
@@ -27,8 +27,14 @@ pub use plumage_hook::{
 };
 
 mod builds;
+mod registry;
 
 pub use builds::BUILDS;
+pub use registry::{
+   EventId,
+   GatewayEntry,
+   GatewayRegistry,
+};
 
 /// Libraries that carry the gateway registry, Phoenix's and the stand-in's.
 pub const LIBRARIES: &[&str] = &["liblibdiscord_wasm_host.so", "libstand_in.so"];
@@ -36,71 +42,6 @@ pub const LIBRARIES: &[&str] = &["liblibdiscord_wasm_host.so", "libstand_in.so"]
 /// Offset of the handler pointer in a gateway registry entry `{name ptr, name
 /// len, handler}`.
 pub const GATEWAY_HANDLER_FIELD: usize = 2 * size_of::<usize>();
-
-/// Gateway dispatch events plumage knows the payload of.
-///
-/// The wire name is the registry key inside the target, so it only meets text
-/// there and in sigscan's arguments. Plugins hold an opaque handle per event,
-/// `plumage.gateway[js_name]`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum Dispatch {
-   MessageCreate,
-   MessageUpdate,
-   MessageDelete,
-   MessageDeleteBulk,
-}
-
-impl Dispatch {
-   pub const ALL: &[Self] = &[
-      Self::MessageCreate,
-      Self::MessageUpdate,
-      Self::MessageDelete,
-      Self::MessageDeleteBulk,
-   ];
-
-   #[must_use]
-   pub const fn js_name(self) -> &'static str {
-      match self {
-         Self::MessageCreate => "messageCreate",
-         Self::MessageUpdate => "messageUpdate",
-         Self::MessageDelete => "messageDelete",
-         Self::MessageDeleteBulk => "messageDeleteBulk",
-      }
-   }
-
-   #[must_use]
-   pub const fn wire(self) -> &'static str {
-      match self {
-         Self::MessageCreate => "MESSAGE_CREATE",
-         Self::MessageUpdate => "MESSAGE_UPDATE",
-         Self::MessageDelete => "MESSAGE_DELETE",
-         Self::MessageDeleteBulk => "MESSAGE_DELETE_BULK",
-      }
-   }
-}
-
-impl fmt::Display for Dispatch {
-   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-      formatter.write_str(self.wire())
-   }
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("`{0}` is not a gateway event plumage knows")]
-pub struct UnknownDispatch(String);
-
-impl FromStr for Dispatch {
-   type Err = UnknownDispatch;
-
-   fn from_str(name: &str) -> Result<Self, Self::Err> {
-      Self::ALL
-         .iter()
-         .copied()
-         .find(|event| event.wire() == name)
-         .ok_or_else(|| UnknownDispatch(name.to_owned()))
-   }
-}
 
 /// One way to find a hook point.
 #[derive(Clone, Debug)]
@@ -197,14 +138,14 @@ impl<'a, A: Abi> Sig<'a, A> {
 }
 
 impl Sig<'static, GatewayHandler> {
-   /// The portable rule for a gateway event, a registry lookup by its wire
-   /// name.
+   /// The portable rule for a gateway event, a registry lookup by the name
+   /// the target keys it under.
    #[must_use]
-   pub fn gateway(event: Dispatch) -> Self {
+   pub fn gateway(event: &str) -> Self {
       Self {
-         name:    Cow::Borrowed(event.wire()),
+         name:    Cow::Owned(event.to_owned()),
          anchors: Cow::Owned(vec![Anchor::Table {
-            key:   Cow::Borrowed(event.wire()),
+            key:   Cow::Owned(event.to_owned()),
             field: GATEWAY_HANDLER_FIELD,
          }]),
          abi:     PhantomData,
@@ -251,7 +192,8 @@ fn hex_list(addrs: &[usize]) -> String {
 
 impl<A: Abi> Sig<'_, A> {
    pub fn resolve(&self, image: &Image<'_>) -> Result<Located, Error> {
-      let mut located: Option<Located> = None;
+      let mut located = Option::<Located>::None;
+
       for (index, anchor) in self.anchors.iter().enumerate() {
          let mut hits = evaluate(anchor, image);
          hits.sort_unstable();
@@ -286,6 +228,7 @@ impl<A: Abi> Sig<'_, A> {
             Some(first) => first.agreeing += 1,
          }
       }
+
       located.ok_or_else(|| {
          Error::NotFound {
             sig: self.name.to_string(),
@@ -304,22 +247,30 @@ fn evaluate(anchor: &Anchor<'_>, image: &Image<'_>) -> Vec<usize> {
             .collect()
       },
       Anchor::Table { key, field } => {
-         image
-            .find_bytes(key.as_bytes())
+         table_entries(image, key, *field)
             .into_iter()
-            .flat_map(|string| image.pointers_to(string))
-            .filter(|slot| image.read_usize(slot + size_of::<usize>()) == Some(key.len()))
-            .filter_map(|slot| image.read_usize(slot + field))
-            .filter(|code| image.is_function(*code))
+            .map(|(_, code)| code)
             .collect()
       },
    }
 }
 
-/// A gateway handler rule in a [`Build`].
+/// `(slot, code)` for every `{name ptr, name len, ...}` entry named `key` whose
+/// pointer `field` bytes in starts a function.
+fn table_entries(image: &Image<'_>, key: &str, field: usize) -> Vec<(usize, usize)> {
+   image
+      .find_bytes(key.as_bytes())
+      .into_iter()
+      .flat_map(|string| image.pointers_to(string))
+      .filter(|slot| image.read_usize(slot + size_of::<usize>()) == Some(key.len()))
+      .filter_map(|slot| Some((slot, image.read_usize(slot + field)?)))
+      .filter(|(_, code)| image.is_function(*code))
+      .collect()
+}
+
+/// A gateway handler rule in a [`Build`], named by the event's registry key.
 pub struct Gateway {
-   pub event: Dispatch,
-   pub sig:   Sig<'static, GatewayHandler>,
+   pub sig: Sig<'static, GatewayHandler>,
 }
 
 /// A build plumage has rules for.
@@ -339,9 +290,9 @@ impl Build {
    /// The table rule for `event`, or the portable registry lookup when the
    /// table has none.
    #[must_use]
-   pub fn gateway_sig(build: Option<&Self>, event: Dispatch) -> Sig<'static, GatewayHandler> {
+   pub fn gateway_sig(build: Option<&Self>, event: &str) -> Sig<'static, GatewayHandler> {
       build
-         .and_then(|build| build.gateway.iter().find(|rule| rule.event == event))
+         .and_then(|build| build.gateway.iter().find(|rule| rule.sig.name == event))
          .map_or_else(|| Sig::gateway(event), |rule| rule.sig.clone())
    }
 }

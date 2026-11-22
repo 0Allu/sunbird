@@ -26,7 +26,7 @@ use plumage_hook::{
 use plumage_sigs::{
    Abi,
    Build,
-   Dispatch,
+   EventId,
    GatewayEvent,
    GatewayHandler,
    HandlerResult,
@@ -67,7 +67,7 @@ thread_local! {
 
 #[derive(Default)]
 pub struct Installed {
-   by_event: HashMap<Dispatch, usize>,
+   by_event: HashMap<EventId, usize>,
    by_addr:  HashMap<usize, usize>,
    hooks:    Vec<Inline>,
 }
@@ -77,7 +77,7 @@ pub struct Installed {
    clippy::significant_drop_tightening,
    reason = "the lock spans resolve and attach so two plugins cannot hook one handler twice"
 )]
-pub fn install(state: &State, event: Dispatch) -> Result<(), Error> {
+pub fn install(state: &State, event: EventId) -> Result<(), Error> {
    let mut installed = state
       .gateway
       .lock()
@@ -86,12 +86,25 @@ pub fn install(state: &State, event: Dispatch) -> Result<(), Error> {
       return Ok(());
    }
 
-   let sig = Build::gateway_sig(state.build, event);
+   let entry = state.registry.entry(event);
+   let name = &entry.name;
+   let sig = Build::gateway_sig(state.build, name);
    let located = sig.resolve(&state.image)?;
    let anchor = &sig.anchors[located.anchor];
+   if located.addr != entry.handler {
+      return Err(
+         plumage_sigs::Error::Conflict {
+            sig:      name.clone(),
+            anchor:   "registry walk".into(),
+            expected: located.addr,
+            found:    entry.handler,
+         }
+         .into(),
+      );
+   }
    if let Some(&slot) = installed.by_addr.get(&located.addr) {
       log::info!(
-         "{event} shares the handler at {:#x} with slot {slot}",
+         "{name} shares the handler at {:#x} with slot {slot}",
          located.addr
       );
       installed.by_event.insert(event, slot);
@@ -109,7 +122,7 @@ pub fn install(state: &State, event: Dispatch) -> Result<(), Error> {
    let hook = unsafe { Inline::attach(target, detour) }?;
    ORIGINALS[slot].store(hook.original().as_ptr(), Ordering::Release);
    log::info!(
-      "hooked {event} at {:#x} (image offset {:#x}) via `{anchor}`, {}/{} anchors agree",
+      "hooked {name} at {:#x} (image offset {:#x}) via `{anchor}`, {}/{} anchors agree",
       located.addr,
       located.addr
          - state
@@ -154,10 +167,10 @@ unsafe extern "C" fn detour<const SLOT: usize>(
       return call(event);
    };
 
-   let Ok(dispatch) = name.parse::<Dispatch>() else {
+   let Some(id) = state.registry.id(name) else {
       return call(event);
    };
-   let before = run_js(state, |engine| engine.before(dispatch, data)).unwrap_or(Before::Keep);
+   let before = run_js(state, |engine| engine.before(id, name, data)).unwrap_or(Before::Keep);
    let (result, data) = match &before {
       Before::Drop => return HandlerResult::OK,
       Before::Keep => (call(event), data),
@@ -172,7 +185,7 @@ unsafe extern "C" fn detour<const SLOT: usize>(
          (call(&replaced), json.as_str())
       },
    };
-   run_js(state, |engine| engine.after(dispatch, data, result.is_ok()));
+   run_js(state, |engine| engine.after(id, name, data, result.is_ok()));
    result
 }
 
