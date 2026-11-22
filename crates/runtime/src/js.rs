@@ -16,6 +16,7 @@ use plumage_sigs::{
    EventId,
    GatewayRegistry,
 };
+#[cfg(target_os = "android")] use rquickjs::function::Opt;
 use rquickjs::{
    CatchResultExt,
    CaughtError,
@@ -47,6 +48,7 @@ use crate::{
 };
 #[cfg(target_os = "android")]
 use crate::{
+   discord,
    fetch,
    store,
 };
@@ -486,7 +488,7 @@ impl Engine {
             return;
          };
          let value: rquickjs::Result<Result<Value<'_>, String>> = match settlement {
-            Settlement::Fetch(Ok(response)) => {
+            Settlement::Fetch(Ok(response)) | Settlement::Discord(Ok(response)) => {
                response_object(&ctx, &response).map(|object| Ok(object.into_value()))
             },
             Settlement::Rows(Ok(rows)) => {
@@ -496,6 +498,7 @@ impl Engine {
                   .map(Ok)
             },
             Settlement::Fetch(Err(err)) => Ok(Err(err.to_string())),
+            Settlement::Discord(Err(err)) => Ok(Err(err.to_string())),
             Settlement::Rows(Err(err)) => Ok(Err(err.to_string())),
          };
          let outcome = value.and_then(|value| {
@@ -739,13 +742,13 @@ fn api<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
    #[cfg(target_os = "android")]
    api.set("stores", stores_object(ctx)?)?;
    #[cfg(target_os = "android")]
+   api.set("discord", discord_object(ctx)?)?;
+   #[cfg(target_os = "android")]
    api.set(
       "fetch",
       Function::new(
          ctx.clone(),
-         |ctx: Ctx<'js>, url: String, init: rquickjs::function::Opt<Object<'js>>| {
-            start_fetch(&ctx, url, init.0)
-         },
+         |ctx: Ctx<'js>, url: String, init: Opt<Object<'js>>| start_fetch(&ctx, url, init.0),
       )?,
    )?;
    Ok(api)
@@ -783,6 +786,64 @@ fn log_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>
    Ok(log)
 }
 
+/// A fetch-style `{method, headers, body}`. A body that is not a string is
+/// sent as JSON.
+#[cfg(target_os = "android")]
+struct Init {
+   method:  String,
+   headers: Vec<(String, String)>,
+   body:    Option<Vec<u8>>,
+}
+
+#[cfg(target_os = "android")]
+impl Init {
+   fn read<'js>(ctx: &Ctx<'js>, init: Option<Object<'js>>) -> rquickjs::Result<Self> {
+      let mut out = Self {
+         method:  "GET".to_owned(),
+         headers: Vec::new(),
+         body:    None,
+      };
+      let Some(init) = init else {
+         return Ok(out);
+      };
+      if let Some(method) = init.get::<_, Option<String>>("method")? {
+         out.method = method.to_ascii_uppercase();
+      }
+      if let Some(headers) = init.get::<_, Option<Object<'js>>>("headers")? {
+         out.headers = headers
+            .props::<String, String>()
+            .collect::<rquickjs::Result<_>>()?;
+      }
+      out.set_body(ctx, init.get("body")?)?;
+      Ok(out)
+   }
+
+   fn set_body<'js>(&mut self, ctx: &Ctx<'js>, body: Value<'js>) -> rquickjs::Result<()> {
+      if body.is_undefined() || body.is_null() {
+         return Ok(());
+      }
+      if let Some(text) = body.as_string() {
+         self.body = Some(text.to_string()?.into_bytes());
+         return Ok(());
+      }
+      if !self
+         .headers
+         .iter()
+         .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+      {
+         self
+            .headers
+            .push(("Content-Type".to_owned(), "application/json".to_owned()));
+      }
+      self.body = ctx
+         .json_stringify(body)?
+         .map(|json| json.to_string())
+         .transpose()?
+         .map(String::into_bytes);
+      Ok(())
+   }
+}
+
 /// Sends the request on its own thread, so neither the gateway nor the UI
 /// waits on the network, and returns a promise that settles when it answers.
 #[cfg(target_os = "android")]
@@ -791,33 +852,87 @@ fn start_fetch<'js>(
    url: String,
    init: Option<Object<'js>>,
 ) -> rquickjs::Result<rquickjs::Promise<'js>> {
-   let mut request = fetch::Request {
+   let Init {
+      method,
+      headers,
+      body,
+   } = Init::read(ctx, init)?;
+   let request = fetch::Request {
       url,
-      method: "GET".to_owned(),
-      headers: Vec::new(),
-      body: None,
+      method,
+      headers,
+      body,
    };
-   if let Some(init) = init {
-      if let Some(method) = init.get::<_, Option<String>>("method")? {
-         request.method = method.to_ascii_uppercase();
-      }
-      if let Some(headers) = init.get::<_, Option<Object<'js>>>("headers")? {
-         request.headers = headers
-            .props::<String, String>()
-            .collect::<rquickjs::Result<_>>()?;
-      }
-      request.body = init
-         .get::<_, Option<String>>("body")?
-         .map(String::into_bytes);
+   in_background(ctx, move || Settlement::Fetch(fetch::send(&request)))
+}
+
+/// `plumage.discord`, Discord's API on the app's own client and session:
+/// `request(path, init)`, `get` and `delete(path, init)`, and `post`, `put` and
+/// `patch(path, body, init)`.
+#[cfg(target_os = "android")]
+fn discord_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+   fn send<'js>(
+      ctx: &Ctx<'js>,
+      path: String,
+      init: Init,
+   ) -> rquickjs::Result<rquickjs::Promise<'js>> {
+      in_background(ctx, move || {
+         Settlement::Discord(discord::send(
+            &init.method,
+            &path,
+            init.headers,
+            init.body.unwrap_or_default(),
+         ))
+      })
    }
 
-   in_background(ctx, move || Settlement::Fetch(fetch::send(&request)))
+   let object = Object::new(ctx.clone())?;
+   object.set(
+      "request",
+      Function::new(
+         ctx.clone(),
+         |ctx: Ctx<'js>, path: String, init: Opt<Object<'js>>| {
+            send(&ctx, path, Init::read(&ctx, init.0)?)
+         },
+      )?,
+   )?;
+   for verb in ["GET", "DELETE"] {
+      object.set(
+         verb.to_ascii_lowercase(),
+         Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, path: String, init: Opt<Object<'js>>| {
+               let mut init = Init::read(&ctx, init.0)?;
+               verb.clone_into(&mut init.method);
+               send(&ctx, path, init)
+            },
+         )?,
+      )?;
+   }
+   for verb in ["POST", "PUT", "PATCH"] {
+      object.set(
+         verb.to_ascii_lowercase(),
+         Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, path: String, body: Opt<Value<'js>>, init: Opt<Object<'js>>| {
+               let mut init = Init::read(&ctx, init.0)?;
+               verb.clone_into(&mut init.method);
+               if let Some(body) = body.0 {
+                  init.set_body(&ctx, body)?;
+               }
+               send(&ctx, path, init)
+            },
+         )?,
+      )?;
+   }
+   Ok(object)
 }
 
 /// What a worker thread hands back to settle a promise with.
 #[cfg(target_os = "android")]
 pub enum Settlement {
    Fetch(Result<fetch::Response, fetch::FetchError>),
+   Discord(Result<fetch::Response, discord::DiscordError>),
    Rows(Result<Vec<serde_json::Map<String, serde_json::Value>>, store::StoreError>),
 }
 

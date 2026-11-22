@@ -53,17 +53,20 @@ use jni_sys::{
    jvalue,
 };
 
-use crate::jvm::{
-   SAVED,
-   Table,
-   clear_exception,
-   env,
-   jni,
-   new_bytes,
-   read_bytes,
-   read_string,
-   table,
-   vm,
+use crate::{
+   discord,
+   jvm::{
+      SAVED,
+      Table,
+      clear_exception,
+      env,
+      jni,
+      new_bytes,
+      read_bytes,
+      read_string,
+      table,
+      vm,
+   },
 };
 
 /// What to do with an observed frame.
@@ -173,6 +176,15 @@ pub fn attach() {
 /// `GuestHost`. Never call it on the main thread, Rust may hold the UI lock
 /// while it waits on that thread.
 pub fn apply_ops(batch: &[u8]) -> bool {
+   let mut frame = vec![0; 4];
+   frame.extend_from_slice(batch);
+   let _guard = UI_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+   invoke(&frame)
+}
+
+/// Passes `frame` to `GuestHost.invoke` as if the guest had sent it, and
+/// drops whatever it returns. Same conditions as [`apply_ops`].
+pub fn invoke(frame: &[u8]) -> bool {
    let guest_host = GUEST_HOST.load(Ordering::Acquire);
    if guest_host.is_null() {
       return false;
@@ -180,32 +192,27 @@ pub fn apply_ops(batch: &[u8]) -> bool {
    let Some(env) = env() else {
       return false;
    };
-   let mut frame = vec![0; 4];
-   frame.extend_from_slice(batch);
 
    // SAFETY: `env` belongs to this thread, `guest_host` is a global ref, and
    // the method is `GuestHost.invoke([B)[B`, which takes the one byte array.
    unsafe {
-      let Some((array, _)) = new_bytes(env, &frame) else {
+      let Some((array, _)) = new_bytes(env, frame) else {
          return false;
       };
       let method = INVOKE_METHOD.load(Ordering::Acquire);
-      let result = {
-         let _guard = UI_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-         jni!(
-            env,
-            CallObjectMethodA,
-            guest_host,
-            method,
-            [jvalue { l: array }].as_ptr()
-         )
-      };
+      let result = jni!(
+         env,
+         CallObjectMethodA,
+         guest_host,
+         method,
+         [jvalue { l: array }].as_ptr()
+      );
       if !result.is_null() {
          jni!(env, DeleteLocalRef, result);
       }
       jni!(env, DeleteLocalRef, array);
       if clear_exception(env) {
-         log::warn!("bridge: GuestHost.invoke threw on a plumage batch");
+         log::warn!("bridge: GuestHost.invoke threw on a plumage frame");
          return false;
       }
    }
@@ -353,7 +360,11 @@ unsafe extern "system" fn call_object_method_a(
 
       remember_guest_host(env, obj, method);
       let request = (*args).l;
-      if read_bytes(env, request, Some(4)) != [0; 4] {
+      let head = read_bytes(env, request, Some(6));
+      if !head.starts_with(&[0; 4]) {
+         if discord::wants(&head) {
+            discord::observe_call(&read_bytes(env, request, None));
+         }
          return original(env, obj, method, args);
       }
       let frame = read_bytes(env, request, None);
@@ -405,22 +416,28 @@ unsafe extern "system" fn native_dispatch(
    // SAFETY: ART calls this with the current thread's env and the arguments of
    // `nativeDispatch(J[B)Z`, forwarded unchanged or with a replacement array.
    unsafe {
-      if SINK.get().is_none() {
-         return original(env, class, handle, frame);
-      }
       let payload = read_bytes(env, frame, None);
-      match consult(|sink| sink.dispatch(&payload)) {
-         Action::Drop => JNI_TRUE,
-         Action::Pass => original(env, class, handle, frame),
-         Action::Replace(replaced) => {
-            let Some((array, _)) = new_bytes(env, &replaced) else {
-               return original(env, class, handle, frame);
-            };
-            let handled = original(env, class, handle, array);
-            jni!(env, DeleteLocalRef, array);
-            handled
-         },
+      let mut replaced = match discord::filter(&payload) {
+         Action::Drop => return JNI_TRUE,
+         Action::Pass => None,
+         Action::Replace(rest) => Some(rest),
+      };
+      if SINK.get().is_some() {
+         match consult(|sink| sink.dispatch(replaced.as_deref().unwrap_or(&payload))) {
+            Action::Drop => return JNI_TRUE,
+            Action::Pass => {},
+            Action::Replace(rest) => replaced = Some(rest),
+         }
       }
+      let Some(replaced) = replaced else {
+         return original(env, class, handle, frame);
+      };
+      let Some((array, _)) = new_bytes(env, &replaced) else {
+         return original(env, class, handle, frame);
+      };
+      let handled = original(env, class, handle, array);
+      jni!(env, DeleteLocalRef, array);
+      handled
    }
 }
 

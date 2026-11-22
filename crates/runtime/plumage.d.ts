@@ -942,6 +942,19 @@ declare namespace Plumage {
     /// own, anything else the plugin started is its to undo here.
     onUnload(cleanup: () => void): void;
     fetch(url: string, init?: FetchInit): Promise<FetchResponse>;
+    /// Discord's API through the app's own HTTP client, with the app's session headers. Paths are
+    /// relative to the API base, like `/users/@me`. Rejects until the app has made a request of its
+    /// own.
+    readonly discord: Discord;
+  }
+
+  interface Discord {
+    request(path: string, init?: FetchInit): Promise<FetchResponse>;
+    get(path: string, init?: FetchInit): Promise<FetchResponse>;
+    delete(path: string, init?: FetchInit): Promise<FetchResponse>;
+    post(path: string, body?: string | object, init?: FetchInit): Promise<FetchResponse>;
+    put(path: string, body?: string | object, init?: FetchInit): Promise<FetchResponse>;
+    patch(path: string, body?: string | object, init?: FetchInit): Promise<FetchResponse>;
   }
 
   interface Stores {
@@ -951,7 +964,8 @@ declare namespace Plumage {
   interface FetchInit {
     method?: string;
     headers?: Record<string, string>;
-    body?: string;
+    /// Anything but a string is sent as JSON.
+    body?: string | object;
   }
 
   interface FetchResponse {

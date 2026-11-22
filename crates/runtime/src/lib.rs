@@ -25,6 +25,7 @@ use plumage_sigs::{
 
 #[cfg(target_os = "android")] mod bridge;
 pub mod console;
+#[cfg(target_os = "android")] mod discord;
 #[cfg(target_os = "android")] mod fetch;
 mod gateway;
 mod js;
