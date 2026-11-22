@@ -248,6 +248,27 @@ impl Engine {
       self.save_choices();
    }
 
+   /// Adds `name` or replaces its source, then runs it unless the user turned
+   /// it off.
+   #[cfg(target_os = "android")]
+   pub fn install(&mut self, name: &str, source: String) {
+      let enabled = if let Some(loaded) = self.plugins.get_mut(name) {
+         loaded.source = source;
+         loaded.enabled
+      } else {
+         self.plugins.insert(name.to_owned(), Loaded {
+            source,
+            enabled: true,
+            error: None,
+         });
+         true
+      };
+      if enabled {
+         self.unload(name);
+         self.eval(name);
+      }
+   }
+
    pub fn reload(&mut self, name: &str) {
       if self.plugins.get(name).is_some_and(|loaded| loaded.enabled) {
          self.unload(name);

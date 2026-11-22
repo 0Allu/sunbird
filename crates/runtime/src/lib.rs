@@ -25,6 +25,7 @@ use plumage_sigs::{
 
 #[cfg(target_os = "android")] mod bridge;
 pub mod console;
+#[cfg(target_os = "android")] mod fetch;
 mod gateway;
 mod js;
 #[cfg(target_os = "android")] mod jvm;
@@ -36,6 +37,8 @@ pub enum Error {
    NoTarget,
    #[error("the runtime is already running")]
    AlreadyStarted,
+   #[error("the runtime has not started")]
+   NotStarted,
    #[error("{path}: {source}")]
    Io {
       path:   PathBuf,
@@ -48,6 +51,13 @@ pub enum Error {
    Sig(#[from] plumage_sigs::Error),
    #[error(transparent)]
    Hook(#[from] plumage_hook::Error),
+   #[error("{url}: plugins install from https:// URLs ending in a name like plugin.js")]
+   PluginUrl { url: String },
+   #[error("{url}: the download is not UTF-8 text")]
+   NotUtf8 { url: String },
+   #[cfg(target_os = "android")]
+   #[error(transparent)]
+   Fetch(#[from] fetch::FetchError),
 }
 
 struct State {
@@ -123,6 +133,48 @@ pub fn evaluate(code: &str) {
       Some(Err(err)) => log::error!("{err}"),
       None => log::error!("the runtime is not running"),
    }
+}
+
+/// Downloads a plugin bundle into `home/plugins` and loads it, replacing a
+/// plugin of the same name. Returns the plugin's name.
+#[cfg(target_os = "android")]
+pub fn install(url: &str) -> Result<String, Error> {
+   let bad_url = || {
+      Error::PluginUrl {
+         url: url.to_owned(),
+      }
+   };
+   let rest = url.strip_prefix("https://").ok_or_else(bad_url)?;
+   let path = rest.split(['?', '#']).next().unwrap_or_default();
+   let name = path
+      .rsplit('/')
+      .next()
+      .and_then(|file| file.strip_suffix(".js"))
+      .filter(|name| {
+         !name.is_empty()
+            && name
+               .bytes()
+               .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+      })
+      .ok_or_else(bad_url)?;
+
+   let body = fetch::get(url)?;
+   let source = String::from_utf8(body).map_err(|_| {
+      Error::NotUtf8 {
+         url: url.to_owned(),
+      }
+   })?;
+   let state = STATE.get().ok_or(Error::NotStarted)?;
+   let file = state.plugins_dir().join(format!("{name}.js"));
+   let write = || {
+      std::fs::create_dir_all(state.plugins_dir())?;
+      std::fs::write(&file, &source)
+   };
+   write().map_err(io_error(&file))?;
+   if let Some(mut engine) = engine() {
+      engine.install(name, source);
+   }
+   Ok(name.to_owned())
 }
 
 /// Evaluates an enabled plugin again with its hooks cleared.

@@ -74,8 +74,8 @@ const RADII: [Prop; 5] = [
    Prop::RADIUS_BOTTOM_RIGHT,
 ];
 
-/// Plugins are named by their index in [`crate::plugins`], which keeps its
-/// order for the life of the process.
+/// Plugins are named by their index in [`crate::plugins`] as of the last
+/// render, which every install follows with a fresh one.
 #[derive(Clone, Copy, Debug)]
 enum Press {
    OpenMain,
@@ -100,23 +100,23 @@ enum PageKind {
 enum Job {
    Press(Press),
    NavigateTo(usize),
-   /// The console input's text after an edit.
-   Draft(String),
-   Submit,
+   /// A text field's contents after an edit.
+   Draft(Field, String),
+   Submit(Field),
    Log,
 }
 
-/// Nodes the console page updates in place, so typing is not interrupted.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Field {
+   Eval,
+   Install,
+}
+
+/// Nodes updated in place, so typing is not interrupted.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Slot {
-   Input,
+   Input(Field),
    Log,
-}
-
-#[derive(Clone, Copy)]
-struct ConsoleIds {
-   input: i32,
-   log:   i32,
 }
 
 struct Tree {
@@ -153,11 +153,14 @@ impl Tree {
       self.kids.iter_mut().find_map(|kid| kid.find(src))
    }
 
-   fn slot(&self, slot: Slot) -> Option<i32> {
-      if self.slot == Some(slot) {
-         return Some(self.id);
-      }
-      self.kids.iter().find_map(|kid| kid.slot(slot))
+   fn slots(&self) -> Vec<(i32, Slot)> {
+      let mut slots = self
+         .slot
+         .map(|slot| (self.id, slot))
+         .into_iter()
+         .collect::<Vec<_>>();
+      slots.extend(self.kids.iter().flat_map(Self::slots));
+      slots
    }
 
    fn ids(&self) -> Vec<i32> {
@@ -195,7 +198,7 @@ struct Page {
    kind:     PageKind,
    content:  i32,
    sections: Vec<i32>,
-   console:  Option<ConsoleIds>,
+   slots:    Vec<(i32, Slot)>,
 }
 
 /// The open Settings screen and what plumage added to it.
@@ -218,7 +221,7 @@ struct Settings {
    screen:     Option<Screen>,
    handlers:   HashMap<i32, Press>,
    plugins:    Vec<PluginInfo>,
-   draft:      String,
+   drafts:     HashMap<Field, String>,
 }
 
 static SETTINGS: LazyLock<Mutex<Settings>> = LazyLock::new(|| {
@@ -228,7 +231,7 @@ static SETTINGS: LazyLock<Mutex<Settings>> = LazyLock::new(|| {
       screen:     None,
       handlers:   HashMap::new(),
       plugins:    Vec::new(),
-      draft:      String::new(),
+      drafts:     HashMap::new(),
    })
 });
 
@@ -266,10 +269,19 @@ pub fn start() {
          // settings lock is taken.
          match &job {
             Job::Log => LOG_QUEUED.store(false, Ordering::Relaxed),
-            Job::Submit => {
-               let code = std::mem::take(&mut settings().draft);
-               if !code.trim().is_empty() {
-                  crate::evaluate(&code);
+            Job::Submit(field) => {
+               let draft = settings().drafts.remove(field).unwrap_or_default();
+               let input = draft.trim();
+               if !input.is_empty() {
+                  match field {
+                     Field::Eval => crate::evaluate(input),
+                     Field::Install => {
+                        match crate::install(input) {
+                           Ok(name) => log::info!("installed {name}"),
+                           Err(err) => log::error!("install failed: {err}"),
+                        }
+                     },
+                  }
                }
             },
             _ => {},
@@ -292,7 +304,8 @@ pub fn start() {
                (None, _) => {},
             }
          }
-         let plugins = matches!(job, Job::Press(_)).then(crate::plugins);
+         let plugins =
+            matches!(job, Job::Press(_) | Job::Submit(Field::Install)).then(crate::plugins);
          let ops = {
             let mut state = settings();
             if let Some(plugins) = plugins {
@@ -370,14 +383,11 @@ fn filter_dispatch(frame: &[u8]) -> Action {
             Some(Job::NavigateTo(
                index.unwrap_or_else(|| state.page_index().saturating_sub(1)),
             ))
-         } else if state
-            .console()
-            .is_some_and(|console| console.input == *node)
-         {
+         } else if let Some(field) = state.field(*node) {
             if *event == Prop::CHANGE_TEXT {
-               text_of(payload).map(Job::Draft)
+               text_of(payload).map(|text| Job::Draft(field, text))
             } else {
-               (*event == Prop::SUBMIT).then_some(Job::Submit)
+               (*event == Prop::SUBMIT).then_some(Job::Submit(field))
             }
          } else if let Some(press) = state.handlers.get(node) {
             (*event == Prop::PRESS).then_some(Job::Press(*press))
@@ -495,45 +505,66 @@ impl Settings {
       }]
    }
 
-   fn console(&self) -> Option<ConsoleIds> {
+   fn slots(&self) -> impl Iterator<Item = (i32, Slot)> + '_ {
       self
          .screen
-         .as_ref()?
-         .stack
          .iter()
-         .find_map(|page| page.console)
+         .flat_map(|screen| &screen.stack)
+         .flat_map(|page| page.slots.iter().copied())
+   }
+
+   fn field(&self, node: i32) -> Option<Field> {
+      self.slots().find_map(|(id, slot)| {
+         match slot {
+            Slot::Input(field) if id == node => Some(field),
+            _ => None,
+         }
+      })
    }
 
    fn log_ops(&self) -> Vec<Op> {
-      self.console().map_or_default(|console| {
-         vec![Op::Update {
-            id:    console.log,
-            props: vec![(Prop::TEXT, text(&log_text()))],
-         }]
-      })
+      let lines = log_text();
+      self
+         .slots()
+         .filter(|(_, slot)| *slot == Slot::Log)
+         .map(|(id, _)| {
+            Op::Update {
+               id,
+               props: vec![(Prop::TEXT, text(&lines))],
+            }
+         })
+         .collect()
    }
 
    fn run(&mut self, job: Job) -> Vec<Op> {
       match job {
-         Job::Draft(draft) => {
-            self.draft = draft;
+         Job::Draft(field, draft) => {
+            self.drafts.insert(field, draft);
             Vec::new()
          },
          Job::Log => self.log_ops(),
-         Job::Submit => {
+         Job::Submit(Field::Eval) => {
             let mut ops = self.log_ops();
-            if let Some(console) = self.console() {
-               ops.push(Op::Update {
-                  id:    console.input,
-                  props: vec![(Prop::VALUE, text(""))],
-               });
-            }
+            ops.extend(
+               self
+                  .slots()
+                  .filter(|(_, slot)| *slot == Slot::Input(Field::Eval))
+                  .map(|(id, _)| {
+                     Op::Update {
+                        id,
+                        props: vec![(Prop::VALUE, text(""))],
+                     }
+                  }),
+            );
             ops
          },
          Job::Press(Press::OpenMain) => self.open_page(PageKind::Main),
          Job::Press(Press::OpenConsole) => self.open_page(PageKind::Console),
          Job::Press(Press::OpenPlugin(index)) => self.open_page(PageKind::Plugin(index)),
-         Job::Press(Press::Toggle(_) | Press::Reload(_) | Press::Switch(..)) => self.rerender_all(),
+         Job::Submit(Field::Install)
+         | Job::Press(Press::Toggle(_) | Press::Reload(_) | Press::Switch(..)) => {
+            self.rerender_all()
+         },
          Job::Press(Press::Back) => self.close_top(),
          Job::NavigateTo(index) => {
             let mut ops = Vec::new();
@@ -594,6 +625,7 @@ impl Settings {
          else {
             continue;
          };
+         page.slots = sections.iter().flat_map(Tree::slots).collect();
          let old = std::mem::replace(&mut page.sections, ids.clone());
          page.ids.retain(|id| !old.contains(id));
          page.ids.extend(ids);
@@ -654,10 +686,7 @@ impl Settings {
       let mut ops = Vec::new();
       let root = self.build(&mut page, None, &mut ops);
       let ids = page.ids();
-      let console = page
-         .slot(Slot::Input)
-         .zip(page.slot(Slot::Log))
-         .map(|(input, log)| ConsoleIds { input, log });
+      let slots = page.slots();
       let Some(content) = page.find(PAGE_CONTENT) else {
          log::warn!("settings: the page layout has no content node");
          return Vec::new();
@@ -671,7 +700,7 @@ impl Settings {
             kind,
             content,
             sections,
-            console,
+            slots,
          });
       }
       ops.extend(self.navigator_ops());
@@ -1083,6 +1112,11 @@ fn main_sections(plugins: &[PluginInfo]) -> Vec<Tree> {
    let enabled = plugins.iter().filter(|plugin| plugin.enabled).count();
    vec![
       section("Plugins", rows),
+      section("Install from URL", vec![text_field(
+         Field::Install,
+         ICON_PLUGIN,
+         "https://example.com/plugin.js",
+      )]),
       section("", vec![button_row(
          "Console",
          ICON_CONSOLE,
@@ -1105,26 +1139,34 @@ fn log_text() -> String {
    lines.join("\n")
 }
 
-/// `root > field > row > [icon wrap > icon, input]`, Phoenix's search box.
-fn console_sections() -> Vec<Tree> {
-   let mut input_row = Tree::from_template(&templates().input);
-   if let Some(row) = input_row
+/// `root > frame > row > [icon wrap > icon, input]`, Phoenix's search box.
+fn text_field(field: Field, icon: &str, placeholder: &str) -> Tree {
+   let mut root = Tree::from_template(&templates().input);
+   let Some(row) = root
       .kids
       .first_mut()
-      .and_then(|field| field.kids.first_mut())
-   {
-      if let Some(icon) = row.kids.first_mut().and_then(|wrap| wrap.kids.first_mut()) {
-         icon.set(Prop::URI, Some(text(ICON_CONSOLE)));
-      }
-      if let Some(input) = row.kids.get_mut(1) {
-         input.set(Prop::PLACEHOLDER, Some(text("Evaluate JavaScript")));
-         input.set(Prop::RETURN_KEY, Some(text("go")));
-         input.set(Prop::ROLE, None);
-         input.set(Prop::ACCESSIBILITY_ID, Some(text("plumage-console-input")));
-         input.slot = Some(Slot::Input);
-      }
+      .and_then(|frame| frame.kids.first_mut())
+   else {
+      return root;
+   };
+   if let Some(icon_node) = row.kids.first_mut().and_then(|wrap| wrap.kids.first_mut()) {
+      icon_node.set(Prop::URI, Some(text(icon)));
    }
+   if let Some(input) = row.kids.get_mut(1) {
+      input.set(Prop::PLACEHOLDER, Some(text(placeholder)));
+      input.set(Prop::RETURN_KEY, Some(text("go")));
+      input.set(Prop::ROLE, None);
+      input.set(
+         Prop::ACCESSIBILITY_ID,
+         Some(text(&format!("plumage-{placeholder}"))),
+      );
+      input.slot = Some(Slot::Input(field));
+   }
+   root
+}
 
+fn console_sections() -> Vec<Tree> {
+   let input_row = text_field(Field::Eval, ICON_CONSOLE, "Evaluate JavaScript");
    let mut log = button_row(&log_text(), ICON_CONSOLE, None, false);
    if let Some(row) = log.kids.first_mut() {
       row.kids.remove(0);
