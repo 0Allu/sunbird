@@ -63,6 +63,7 @@
               android.sdk
               pkgs.cargo-ndk
               pkgs.esbuild
+              pkgs.jdk_headless
               pkgs.nushell
               pkgs.rust-analyzer
               pkgs.typescript
