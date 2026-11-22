@@ -172,6 +172,14 @@ pub fn install(event: EventId) {
    }
 }
 
+/// Sends `event` straight to Phoenix again once no plugin listens to it.
+pub fn uninstall(event: EventId) {
+   let gateway = GATEWAY.get().expect("start swaps the registry before plugins load");
+   if gateway.hooked[event.index()].swap(false, Ordering::AcqRel) {
+      log::info!("unhooked {}", gateway.registry.entry(event).name);
+   }
+}
+
 unsafe extern "C" fn detour(
    store: *mut c_void,
    event: *const GatewayEvent,

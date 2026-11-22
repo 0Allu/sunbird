@@ -2,6 +2,7 @@ use std::{
    cell::RefCell,
    collections::{
       BTreeMap,
+      BTreeSet,
       HashMap,
    },
    fs,
@@ -31,6 +32,7 @@ use rquickjs::{
 use crate::{
    Error,
    Plugin,
+   PluginInfo,
    STATE,
    State,
    gateway,
@@ -40,6 +42,19 @@ use crate::{
 pub struct Engine {
    _runtime: Runtime,
    context:  Context,
+   plugins:  BTreeMap<String, Loaded>,
+}
+
+struct Loaded {
+   source:  String,
+   enabled: bool,
+   error:   Option<String>,
+}
+
+/// Which plugins the user turned off, kept in `home/plugins.json`.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct Choices {
+   disabled: BTreeSet<String>,
 }
 
 pub enum Before {
@@ -98,7 +113,108 @@ impl Engine {
       Ok(Self {
          _runtime: runtime,
          context,
+         plugins: BTreeMap::new(),
       })
+   }
+
+   pub fn plugins(&self) -> Vec<PluginInfo> {
+      self
+         .plugins
+         .iter()
+         .map(|(name, loaded)| {
+            PluginInfo {
+               name:    name.clone(),
+               enabled: loaded.enabled,
+               error:   loaded.error.clone(),
+            }
+         })
+         .collect()
+   }
+
+   /// Evaluates `name` with a fresh `plumage` object, recording any error.
+   fn eval(&mut self, name: &str) {
+      let Some(loaded) = self.plugins.get_mut(name) else {
+         return;
+      };
+      let outcome = self.context.with(|ctx| {
+         let run = || -> rquickjs::Result<()> {
+            let plumage = api(&ctx, name)?;
+            let wrapped = format!("(function (plumage) {{\n{}\n}})", loaded.source);
+            ctx.eval::<Function<'_>, _>(wrapped)?.call((plumage,))
+         };
+         run().catch(&ctx).map_err(js_error)
+      });
+      match outcome {
+         Ok(()) => {
+            log::info!("loaded plugin {name}");
+            loaded.error = None;
+         },
+         Err(err) => {
+            log::error!("plugin {name} failed to load: {err}");
+            loaded.error = Some(err.to_string());
+         },
+      }
+   }
+
+   /// Drops every hook `name` registered, and turns off events nobody else
+   /// listens to.
+   fn unload(&self, name: &str) {
+      self.context.with(|ctx| {
+         let Some(registry) = ctx.userdata::<Registry<'_>>() else {
+            return;
+         };
+         let mut hooks = registry.hooks.borrow_mut();
+         for (event, list) in hooks.iter_mut() {
+            list.retain(|hook| hook.plugin != name);
+            if list.is_empty() {
+               gateway::uninstall(*event);
+            }
+         }
+         hooks.retain(|_, list| !list.is_empty());
+      });
+   }
+
+   pub fn set_enabled(&mut self, name: &str, enabled: bool) {
+      let Some(loaded) = self.plugins.get_mut(name) else {
+         return;
+      };
+      if loaded.enabled == enabled {
+         return;
+      }
+      loaded.enabled = enabled;
+      loaded.error = None;
+      if enabled {
+         self.eval(name);
+      } else {
+         self.unload(name);
+      }
+      self.save_choices();
+   }
+
+   pub fn reload(&mut self, name: &str) {
+      if self.plugins.get(name).is_some_and(|loaded| loaded.enabled) {
+         self.unload(name);
+         self.eval(name);
+      }
+   }
+
+   fn save_choices(&self) {
+      let choices = Choices {
+         disabled: self
+            .plugins
+            .iter()
+            .filter(|(_, loaded)| !loaded.enabled)
+            .map(|(name, _)| name.clone())
+            .collect(),
+      };
+      let path = state().choices_path();
+      let write = || -> std::io::Result<()> {
+         fs::create_dir_all(path.parent().expect("the choices path has a parent"))?;
+         fs::write(&path, serde_json::to_vec(&choices)?)
+      };
+      if let Err(err) = write() {
+         log::error!("{}: {err}", path.display());
+      }
    }
 
    /// Runs the `before` hooks for `event`. Each sees the previous hook's
@@ -382,14 +498,14 @@ fn storage<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
 }
 
 /// Evaluates `bundled` plus every `*.js` file in the plugins directory, in name
-/// order.
+/// order, skipping the ones the user turned off.
 #[expect(
    clippy::significant_drop_tightening,
    reason = "plugins load under one engine lock so no gateway event sees a half-loaded set"
 )]
 pub fn load_plugins(state: &State, bundled: Vec<Plugin>) -> Result<Vec<String>, Error> {
    let dir = state.plugins_dir();
-   let mut plugins: BTreeMap<String, String> = bundled
+   let mut sources: BTreeMap<String, String> = bundled
       .into_iter()
       .map(|plugin| (plugin.name, plugin.source))
       .collect();
@@ -411,30 +527,43 @@ pub fn load_plugins(state: &State, bundled: Vec<Plugin>) -> Result<Vec<String>, 
          continue;
       };
       let source = fs::read_to_string(&path).map_err(io_error(&path))?;
-      plugins.insert(name.to_owned(), source);
+      sources.insert(name.to_owned(), source);
    }
 
-   let engine = state
+   let choices_path = state.choices_path();
+   let choices = match fs::read(&choices_path) {
+      Ok(bytes) => {
+         serde_json::from_slice::<Choices>(&bytes).unwrap_or_else(|err| {
+            log::error!("{}: {err}", choices_path.display());
+            Choices::default()
+         })
+      },
+      Err(err) if err.kind() == ErrorKind::NotFound => Choices::default(),
+      Err(err) => return Err(io_error(&choices_path)(err)),
+   };
+
+   let mut engine = state
       .js
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner);
-   let mut loaded = Vec::new();
-   for (name, source) in plugins {
-      let outcome = engine.context.with(|ctx| {
-         let run = || -> rquickjs::Result<()> {
-            let plumage = api(&ctx, &name)?;
-            let wrapped = format!("(function (plumage) {{\n{source}\n}})");
-            ctx.eval::<Function<'_>, _>(wrapped)?.call((plumage,))
-         };
-         run().catch(&ctx).map_err(js_error)
-      });
-      match outcome {
-         Ok(()) => {
-            log::info!("loaded plugin {name}");
-            loaded.push(name);
-         },
-         Err(err) => log::error!("plugin {name} failed to load: {err}"),
-      }
+   engine.plugins = sources
+      .into_iter()
+      .map(|(name, source)| {
+         let enabled = !choices.disabled.contains(&name);
+         (name, Loaded { source, enabled, error: None })
+      })
+      .collect();
+   let enabled = engine
+      .plugins
+      .iter()
+      .filter(|(_, loaded)| loaded.enabled)
+      .map(|(name, _)| name.clone())
+      .collect::<Vec<String>>();
+   for name in &enabled {
+      engine.eval(name);
    }
-   Ok(loaded)
+   Ok(enabled
+      .into_iter()
+      .filter(|name| engine.plugins.get(name).is_some_and(|loaded| loaded.error.is_none()))
+      .collect())
 }

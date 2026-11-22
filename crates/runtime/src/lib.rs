@@ -63,6 +63,38 @@ pub struct Plugin {
    pub source: String,
 }
 
+/// A plugin as the settings page shows it.
+#[derive(Clone, Debug)]
+pub struct PluginInfo {
+   pub name:    String,
+   pub enabled: bool,
+   pub error:   Option<String>,
+}
+
+fn engine() -> Option<std::sync::MutexGuard<'static, js::Engine>> {
+   Some(STATE.get()?.js.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+}
+
+/// Every plugin found at start, enabled or not.
+#[must_use]
+pub fn plugins() -> Vec<PluginInfo> {
+   engine().map_or_default(|engine| engine.plugins())
+}
+
+/// Turns a plugin on or off and remembers the choice across restarts.
+pub fn set_enabled(name: &str, enabled: bool) {
+   if let Some(mut engine) = engine() {
+      engine.set_enabled(name, enabled);
+   }
+}
+
+/// Evaluates an enabled plugin again with its hooks cleared.
+pub fn reload(name: &str) {
+   if let Some(mut engine) = engine() {
+      engine.reload(name);
+   }
+}
+
 /// What [`start`] found and loaded.
 pub struct Started {
    pub target:  String,
@@ -108,7 +140,7 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
 
    let plugins = js::load_plugins(state, bundled)?;
    #[cfg(target_os = "android")]
-   settings::start(plugins.clone());
+   settings::start();
    Ok(Started {
       target: state.image.path.clone(),
       build: state.build.map(|build| build.label),
@@ -119,6 +151,10 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
 impl State {
    fn storage_path(&self, plugin: &str) -> PathBuf {
       self.home.join("storage").join(format!("{plugin}.json"))
+   }
+
+   fn choices_path(&self) -> PathBuf {
+      self.home.join("plugins.json")
    }
 
    fn plugins_dir(&self) -> PathBuf {

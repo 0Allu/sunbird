@@ -24,6 +24,7 @@ use std::{
    thread,
 };
 
+use memchr::memmem;
 use plumage_ui::{
    ChildEdit,
    DispatchEvent,
@@ -39,15 +40,19 @@ use plumage_ui::{
    without_frames,
 };
 
-use crate::bridge::{
-   self,
-   Action,
-   Sink,
+use crate::{
+   PluginInfo,
+   bridge::{
+      self,
+      Action,
+      Sink,
+   },
 };
 
 const FIRST_ID: i32 = 0x5000_0000;
 const LOGOUT_ROW: &str = "settings.row.logout";
 const ICON_PLUGIN: &str = "res://ic_mana_puzzle_piece_plus";
+const ICON_RELOAD: &str = "res://ic_mana_puzzle_piece_retry";
 /// Ids Phoenix's captured page layout uses for the parts plumage fills in.
 const PAGE_HEADER_SPACER: u32 = 0x4e1;
 const PAGE_CONTENT: u32 = 0x4e4;
@@ -63,10 +68,21 @@ const RADII: [Prop; 5] = [
    Prop::RADIUS_BOTTOM_RIGHT,
 ];
 
+/// Plugins are named by their index in [`crate::plugins`], which keeps its
+/// order for the life of the process.
 #[derive(Clone, Copy, Debug)]
 enum Press {
    OpenMain,
+   OpenPlugin(usize),
+   Toggle(usize),
+   Reload(usize),
    Back,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PageKind {
+   Main,
+   Plugin(usize),
 }
 
 /// What the UI thread hands to the worker. UI ops must not be sent from the
@@ -132,9 +148,18 @@ fn text(value: &str) -> Value {
    Value::Str(value.to_owned())
 }
 
-struct Page {
+/// The "Plumage" row in the Settings list.
+struct Entry {
    root: i32,
    ids:  Vec<i32>,
+}
+
+struct Page {
+   root:     i32,
+   ids:      Vec<i32>,
+   kind:     PageKind,
+   content:  i32,
+   sections: Vec<i32>,
 }
 
 /// The open Settings screen and what plumage added to it.
@@ -147,7 +172,7 @@ struct Screen {
    navigator:   Option<i32>,
    rust_pages:  Option<Vec<i32>>,
    header:      Option<Props>,
-   entry:       Option<Page>,
+   entry:       Option<Entry>,
    stack:       Vec<Page>,
 }
 
@@ -156,7 +181,7 @@ struct Settings {
    navigators: HashSet<i32>,
    screen:     Option<Screen>,
    handlers:   HashMap<i32, Press>,
-   plugins:    Vec<String>,
+   plugins:    Vec<PluginInfo>,
 }
 
 static SETTINGS: LazyLock<Mutex<Settings>> = LazyLock::new(|| {
@@ -188,8 +213,7 @@ impl Sink for SettingsSink {
 }
 
 /// Hooks the UI bridge and starts the worker that answers presses.
-pub fn start(plugins: Vec<String>) {
-   settings().plugins = plugins;
+pub fn start() {
    let (sender, receiver) = mpsc::channel::<Job>();
    if WORKER.set(sender).is_err() {
       log::warn!("settings: already started");
@@ -198,7 +222,24 @@ pub fn start(plugins: Vec<String>) {
    bridge::install(Box::new(SettingsSink));
    thread::spawn(move || {
       for job in receiver {
-         let ops = settings().run(job);
+         // Runtime calls take the engine lock, so they run before the
+         // settings lock is taken.
+         if let Job::Press(Press::Toggle(index) | Press::Reload(index)) = job {
+            let plugin = settings().plugins.get(index).cloned();
+            match (plugin, job) {
+               (Some(plugin), Job::Press(Press::Toggle(_))) => {
+                  crate::set_enabled(&plugin.name, !plugin.enabled);
+               },
+               (Some(plugin), _) => crate::reload(&plugin.name),
+               (None, _) => {},
+            }
+         }
+         let plugins = crate::plugins();
+         let ops = {
+            let mut state = settings();
+            state.plugins = plugins;
+            state.run(job)
+         };
          if !ops.is_empty() && !bridge::apply_ops(&encode(&ops)) {
             log::warn!("settings: the UI update did not apply");
          }
@@ -208,6 +249,14 @@ pub fn start(plugins: Vec<String>) {
 
 /// Splices plumage's nodes into a Rust-to-Java UI batch.
 fn rewrite_ops(batch: &[u8]) -> Action {
+   // Most batches carry neither the Settings list nor a navigator, so they
+   // pass without being decoded.
+   let relevant = settings().screen.is_some()
+      || memmem::find(batch, LOGOUT_ROW.as_bytes()).is_some()
+      || memmem::find(batch, b"navigator").is_some();
+   if !relevant {
+      return Action::Pass;
+   }
    let ops = match decode(batch) {
       Ok(ops) => ops,
       Err(err) => {
@@ -337,7 +386,9 @@ impl Settings {
 
    fn run(&mut self, job: Job) -> Vec<Op> {
       match job {
-         Job::Press(Press::OpenMain) => self.open_page("Plumage", main_sections(&self.plugins)),
+         Job::Press(Press::OpenMain) => self.open_page(PageKind::Main),
+         Job::Press(Press::OpenPlugin(index)) => self.open_page(PageKind::Plugin(index)),
+         Job::Press(Press::Toggle(_) | Press::Reload(_)) => self.rerender_all(),
          Job::Press(Press::Back) => self.close_top(),
          Job::NavigateTo(index) => {
             let mut ops = Vec::new();
@@ -351,7 +402,50 @@ impl Settings {
       }
    }
 
-   fn open_page(&mut self, title: &str, sections: Vec<Tree>) -> Vec<Op> {
+   fn render(&self, kind: PageKind) -> (String, Vec<Tree>) {
+      match kind {
+         PageKind::Main => ("Plumage".to_owned(), main_sections(&self.plugins)),
+         PageKind::Plugin(index) => {
+            self.plugins.get(index).map_or_else(
+               || ("Plugin".to_owned(), Vec::new()),
+               |plugin| (plugin.name.clone(), plugin_sections(index, plugin)),
+            )
+         },
+      }
+   }
+
+   fn build_sections(&mut self, sections: &mut [Tree], ops: &mut Vec<Op>) -> (Vec<i32>, Vec<i32>) {
+      let roots = sections
+         .iter_mut()
+         .map(|section| self.build(section, None, ops))
+         .collect();
+      let ids = sections.iter().flat_map(Tree::ids).collect();
+      (roots, ids)
+   }
+
+   fn rerender_all(&mut self) -> Vec<Op> {
+      let kinds = self
+         .screen
+         .as_ref()
+         .map_or_default(|screen| screen.stack.iter().map(|page| page.kind).collect::<Vec<PageKind>>());
+      let mut ops = Vec::new();
+      for (position, kind) in kinds.into_iter().enumerate() {
+         let (_, mut sections) = self.render(kind);
+         let (roots, ids) = self.build_sections(&mut sections, &mut ops);
+         let Some(page) = self.screen.as_mut().and_then(|screen| screen.stack.get_mut(position)) else {
+            continue;
+         };
+         let old = std::mem::replace(&mut page.sections, ids.clone());
+         page.ids.retain(|id| !old.contains(id));
+         page.ids.extend(ids);
+         ops.push(Op::Children { id: page.content, ids: roots });
+         ops.push(Op::Delete { ids: old.clone() });
+         self.forget(&old);
+      }
+      ops
+   }
+
+   fn open_page(&mut self, kind: PageKind) -> Vec<Op> {
       let Some(screen) = &self.screen else {
          return Vec::new();
       };
@@ -360,6 +454,8 @@ impl Settings {
          return Vec::new();
       }
       let header = screen.header.clone();
+      let (title, sections) = self.render(kind);
+      let title = title.as_str();
 
       let mut page = Tree::from_template(&templates().page);
       page.set(Prop::PANE_TITLE, Some(text(title)));
@@ -395,8 +491,15 @@ impl Settings {
 
       let mut ops = Vec::new();
       let root = self.build(&mut page, None, &mut ops);
+      let ids = page.ids();
+      let Some(content) = page.find(PAGE_CONTENT) else {
+         log::warn!("settings: the page layout has no content node");
+         return Vec::new();
+      };
+      let sections = content.kids.iter().flat_map(Tree::ids).collect();
+      let content = content.id;
       if let Some(screen) = &mut self.screen {
-         screen.stack.push(Page { root, ids: page.ids() });
+         screen.stack.push(Page { root, ids, kind, content, sections });
       }
       ops.extend(self.navigator_ops());
       ops
@@ -412,12 +515,12 @@ impl Settings {
       ops
    }
 
-   fn entry_ops(&mut self) -> (Page, Vec<Op>) {
+   fn entry_ops(&mut self) -> (Entry, Vec<Op>) {
       let row = button_row("Plumage", ICON_PLUGIN, Some(Press::OpenMain), true);
       let mut section = section("", vec![row]);
       let mut ops = Vec::new();
       let root = self.build(&mut section, None, &mut ops);
-      (Page { root, ids: section.ids() }, ops)
+      (Entry { root, ids: section.ids() }, ops)
    }
 
    fn rewrite(&mut self, ops: Vec<Op>) -> Option<Vec<Op>> {
@@ -485,8 +588,8 @@ impl Settings {
                let ours = screen
                   .entry
                   .into_iter()
-                  .chain(screen.stack)
-                  .flat_map(|page| page.ids)
+                  .flat_map(|entry| entry.ids)
+                  .chain(screen.stack.into_iter().flat_map(|page| page.ids))
                   .collect::<Vec<i32>>();
                self.forget(&ours);
                ids.extend(ours);
@@ -688,21 +791,94 @@ fn value_row(label: &str, value: &str) -> Tree {
    root
 }
 
-fn main_sections(plugins: &[String]) -> Vec<Tree> {
+/// `root > row > [icon, column > [title, subtitle], wrap > track > knob]`.
+/// Pressing the row runs `press`, pressing the switch runs `toggle`.
+fn switch_row(title: &str, subtitle: Option<&str>, on: bool, press: Press, toggle: Press) -> Tree {
+   let layouts = templates();
+   let mut root = Tree::from_template(&layouts.switch_row);
+   root.props.retain(|(key, _)| !is_radius(*key));
+   let label = subtitle.map_or_else(|| title.to_owned(), |subtitle| format!("{title}, {subtitle}"));
+   root.set(Prop::ACCESSIBILITY_LABEL, Some(text(&label)));
+   root.set(Prop::ACCESSIBILITY_CHECKED, Some(Value::Bool(on)));
+   root.set(Prop::ACCESSIBILITY_ID, Some(text(&format!("plumage-{title}"))));
+   root.press = Some(press);
+   let Some(row) = root.kids.first_mut() else {
+      return root;
+   };
+   if let Some(icon) = row.kids.get_mut(0) {
+      icon.set(Prop::URI, Some(text(ICON_PLUGIN)));
+   }
+   if let Some(column) = row.kids.get_mut(1) {
+      if let Some(title_node) = column.kids.get_mut(0) {
+         title_node.set(Prop::TEXT, Some(text(title)));
+      }
+      match subtitle {
+         Some(subtitle) => {
+            if let Some(subtitle_node) = column.kids.get_mut(1) {
+               subtitle_node.set(Prop::TEXT, Some(text(subtitle)));
+            }
+         },
+         None => column.kids.truncate(1),
+      }
+   }
+   if let Some(track) = row.kids.get_mut(2).and_then(|wrap| wrap.kids.get_mut(0)) {
+      track.press = Some(toggle);
+      if !on {
+         track.props.clone_from(&layouts.track_off);
+         if let Some(knob) = track.kids.get_mut(0) {
+            knob.props.clone_from(&layouts.knob_off);
+         }
+      }
+   }
+   root
+}
+
+fn main_sections(plugins: &[PluginInfo]) -> Vec<Tree> {
    let rows = if plugins.is_empty() {
-      vec![button_row("No plugins loaded", ICON_PLUGIN, None, false)]
+      vec![button_row("No plugins found", ICON_PLUGIN, None, false)]
    } else {
       plugins
          .iter()
-         .map(|name| value_row(name, "loaded"))
+         .enumerate()
+         .map(|(index, plugin)| {
+            let subtitle = plugin.error.as_deref().map(|error| format!("Failed: {error}"));
+            switch_row(
+               &plugin.name,
+               subtitle.as_deref(),
+               plugin.enabled,
+               Press::OpenPlugin(index),
+               Press::Toggle(index),
+            )
+         })
          .collect()
    };
+   let enabled = plugins.iter().filter(|plugin| plugin.enabled).count();
    vec![
       section("Plugins", rows),
       section("About", vec![
          value_row("Runtime", "rquickjs"),
          value_row("Hooks", "registry pointer swap"),
-         value_row("Plugins", &plugins.len().to_string()),
+         value_row("Enabled", &format!("{enabled} of {}", plugins.len())),
       ]),
+   ]
+}
+
+fn plugin_sections(index: usize, plugin: &PluginInfo) -> Vec<Tree> {
+   let subtitle = plugin.error.as_deref().map(|error| format!("Failed: {error}"));
+   let status = match (&plugin.error, plugin.enabled) {
+      (Some(_), _) => "failed",
+      (None, true) => "running",
+      (None, false) => "off",
+   };
+   vec![
+      section("", vec![switch_row(
+         "Enabled",
+         subtitle.as_deref(),
+         plugin.enabled,
+         Press::Toggle(index),
+         Press::Toggle(index),
+      )]),
+      section("", vec![button_row("Reload", ICON_RELOAD, Some(Press::Reload(index)), false)]),
+      section("Info", vec![value_row("Name", &plugin.name), value_row("Status", status)]),
    ]
 }

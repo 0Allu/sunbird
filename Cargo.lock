@@ -435,10 +435,13 @@ dependencies = [
  "jni-sys",
  "libc",
  "log",
+ "memchr",
  "plumage-hook",
  "plumage-sigs",
  "plumage-ui",
  "rquickjs",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
