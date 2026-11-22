@@ -329,13 +329,17 @@ pub unsafe fn load_class(env: *mut JNIEnv, anchor: jobject, name: &CStr) -> Opti
     (!clear_exc(env) && !c.is_null()).then_some(c as jclass)
 }
 
-// ---- Java helper (hook/java/phx/Picker.java, built to picker.dex) -------------------------------
-// Loaded once from memory under the app's class loader; it opens Android's document picker and
-// calls back onPicked(id, name, text, error) from Java.
-static HELPER: OnceLock<usize> = OnceLock::new(); // global ref to phx.Picker
+// ---- Java helper (hook/java/phx/*.java, built to picker.dex) ------------------------------------
+// Loaded once from memory under the app's class loader: phx.Picker (document picker) and phx.Ui
+// (toasts, confirm dialogs). They call back into the registered native methods below.
+static HELPER_LOADER: OnceLock<usize> = OnceLock::new(); // global ref
+static HELPER_CLASSES: Mutex<Vec<(&'static str, usize)>> = Mutex::new(Vec::new());
 pub type PickedFn = fn(id: i32, name: Option<String>, text: Option<String>, error: Option<String>);
 static PICKED: OnceLock<PickedFn> = OnceLock::new();
 pub fn set_picked(f: PickedFn) { let _ = PICKED.set(f); }
+pub type ConfirmedFn = fn(id: i32, ok: bool);
+static CONFIRMED: OnceLock<ConfirmedFn> = OnceLock::new();
+pub fn set_confirmed(f: ConfirmedFn) { let _ = CONFIRMED.set(f); }
 
 /// Java string via UTF-16 (GetStringUTFChars' modified UTF-8 would mangle emoji).
 pub unsafe fn jstr16(env: *mut JNIEnv, s: jstring) -> Option<String> {
@@ -345,48 +349,90 @@ pub unsafe fn jstr16(env: *mut JNIEnv, s: jstring) -> Option<String> {
     jcall!(env, GetStringRegion, s, 0, n, b.as_mut_ptr());
     Some(String::from_utf16_lossy(&b))
 }
+/// Java string from UTF-8 via UTF-16 (NewStringUTF expects modified UTF-8).
+pub unsafe fn new_jstr(env: *mut JNIEnv, s: &str) -> jstring {
+    let u: Vec<u16> = s.encode_utf16().collect();
+    jcall!(env, NewString, u.as_ptr(), u.len() as jsize)
+}
 
 unsafe extern "system" fn w_on_picked(env: *mut JNIEnv, _cls: jclass, id: jint, name: jstring, text: jstring, error: jstring) {
     let (n, t, e) = (jstr16(env, name), jstr16(env, text), jstr16(env, error));
     if let Some(f) = PICKED.get() { f(id, n, t, e); }
 }
+unsafe extern "system" fn w_on_confirm(_env: *mut JNIEnv, _cls: jclass, id: jint, ok: jboolean) {
+    if let Some(f) = CONFIRMED.get() { f(id, ok != 0); }
+}
 
-unsafe fn helper(env: *mut JNIEnv) -> Result<jclass, String> {
-    if let Some(&c) = HELPER.get() { return Ok(c as jclass); }
-    const DEX: &[u8] = include_bytes!("../java/picker.dex");
+unsafe fn helper_class(env: *mut JNIEnv, name: &'static str) -> Result<jclass, String> {
+    if let Some(&(_, c)) = HELPER_CLASSES.lock().unwrap().iter().find(|x| x.0 == name) { return Ok(c as jclass); }
     let gh = GUEST_HOST.load(Relaxed) as jobject;
     if gh.is_null() { return Err("Phoenix's UI bridge is not up yet".into()); }
-    let gc = jcall!(env, GetObjectClass, gh);
-    let cc = jcall!(env, FindClass, c"java/lang/Class".as_ptr());
-    let parent = jcall!(env, CallObjectMethodA, gc, jcall!(env, GetMethodID, cc, c"getClassLoader".as_ptr(), c"()Ljava/lang/ClassLoader;".as_ptr()), std::ptr::null());
-    let buf = jcall!(env, NewDirectByteBuffer, DEX.as_ptr() as *mut c_void, DEX.len() as jlong);
-    let lc = jcall!(env, FindClass, c"dalvik/system/InMemoryDexClassLoader".as_ptr());
-    let init = jcall!(env, GetMethodID, lc, c"<init>".as_ptr(), c"(Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;)V".as_ptr());
-    let loader = jcall!(env, NewObjectA, lc, init, [jvalue { l: buf }, jvalue { l: parent }].as_ptr());
-    if clear_exc(env) || loader.is_null() { return Err("could not load the helper dex".into()); }
+    let loader = match HELPER_LOADER.get() {
+        Some(&l) => l as jobject,
+        None => {
+            const DEX: &[u8] = include_bytes!("../java/picker.dex");
+            let gc = jcall!(env, GetObjectClass, gh);
+            let cc = jcall!(env, FindClass, c"java/lang/Class".as_ptr());
+            let parent = jcall!(env, CallObjectMethodA, gc, jcall!(env, GetMethodID, cc, c"getClassLoader".as_ptr(), c"()Ljava/lang/ClassLoader;".as_ptr()), std::ptr::null());
+            let buf = jcall!(env, NewDirectByteBuffer, DEX.as_ptr() as *mut c_void, DEX.len() as jlong);
+            let lc = jcall!(env, FindClass, c"dalvik/system/InMemoryDexClassLoader".as_ptr());
+            let init = jcall!(env, GetMethodID, lc, c"<init>".as_ptr(), c"(Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;)V".as_ptr());
+            let l = jcall!(env, NewObjectA, lc, init, [jvalue { l: buf }, jvalue { l: parent }].as_ptr());
+            if clear_exc(env) || l.is_null() { return Err("could not load the helper dex".into()); }
+            *HELPER_LOADER.get_or_init(|| jcall!(env, NewGlobalRef, l) as usize) as jobject
+        }
+    };
     let cl = jcall!(env, FindClass, c"java/lang/ClassLoader".as_ptr());
     let load = jcall!(env, GetMethodID, cl, c"loadClass".as_ptr(), c"(Ljava/lang/String;)Ljava/lang/Class;".as_ptr());
-    let cls = jcall!(env, CallObjectMethodA, loader, load, [jvalue { l: jcall!(env, NewStringUTF, c"phx.Picker".as_ptr()) }].as_ptr());
-    if clear_exc(env) || cls.is_null() { return Err("phx.Picker not found in the helper dex".into()); }
-    let m = JNINativeMethod {
-        name: c"onPicked".as_ptr() as *mut c_char,
-        signature: c"(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V".as_ptr() as *mut c_char,
-        fnPtr: w_on_picked as *mut c_void,
+    let cls = jcall!(env, CallObjectMethodA, loader, load, [jvalue { l: new_jstr(env, name) }].as_ptr());
+    if clear_exc(env) || cls.is_null() { return Err(format!("{name} not found in the helper dex")); }
+    let natives: &[(&CStr, &CStr, *mut c_void)] = match name {
+        "phx.Picker" => &[(c"onPicked", c"(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", w_on_picked as *mut c_void)],
+        "phx.Ui" => &[(c"onConfirm", c"(IZ)V", w_on_confirm as *mut c_void)],
+        _ => &[],
     };
-    if jcall!(env, RegisterNatives, cls, &m, 1) != 0 { clear_exc(env); return Err("RegisterNatives(onPicked) failed".into()); }
+    for (n, sig, f) in natives {
+        let m = JNINativeMethod { name: n.as_ptr() as *mut c_char, signature: sig.as_ptr() as *mut c_char, fnPtr: *f };
+        if jcall!(env, RegisterNatives, cls, &m, 1) != 0 { clear_exc(env); return Err(format!("RegisterNatives({name}) failed")); }
+    }
     let g = jcall!(env, NewGlobalRef, cls) as usize;
-    Ok(*HELPER.get_or_init(|| g) as jclass)
+    HELPER_CLASSES.lock().unwrap().push((name, g));
+    Ok(g as jclass)
 }
+
+/// Calls a static helper method whose first parameter is Phoenix's GuestHost (it finds the activity).
+unsafe fn helper_call(class: &'static str, method: &CStr, sig: &CStr, mut args: Vec<jvalue>) -> Result<(), String> {
+    let env = env().ok_or("no JNI env")?;
+    let cls = helper_class(env, class)?;
+    let m = jcall!(env, GetStaticMethodID, cls, method.as_ptr(), sig.as_ptr());
+    if clear_exc(env) || m.is_null() { return Err(format!("{class}.{method:?} not found")); }
+    args.insert(0, jvalue { l: GUEST_HOST.load(Relaxed) as jobject });
+    jcall!(env, CallStaticVoidMethodA, cls, m, args.as_ptr());
+    if clear_exc(env) { Err(format!("{class}.{method:?} threw")) } else { Ok(()) }
+}
+
+/// True once Rust has sent its first UI batch (the helper needs Phoenix's GuestHost).
+pub fn ui_ready() -> bool { !GUEST_HOST.load(Relaxed).is_null() }
 
 /// Opens Android's document picker; the result arrives through set_picked's callback with `id`.
 pub fn pick_file(id: i32, mime: &str) -> Result<(), String> {
     unsafe {
         let env = env().ok_or("no JNI env")?;
-        let cls = helper(env)?;
-        let pick = jcall!(env, GetStaticMethodID, cls, c"pick".as_ptr(), c"(Ljava/lang/Object;ILjava/lang/String;)V".as_ptr());
-        let m = std::ffi::CString::new(mime).unwrap_or_default();
-        let args = [jvalue { l: GUEST_HOST.load(Relaxed) as jobject }, jvalue { i: id }, jvalue { l: jcall!(env, NewStringUTF, m.as_ptr()) }];
-        jcall!(env, CallStaticVoidMethodA, cls, pick, args.as_ptr());
-        if clear_exc(env) { Err("the picker could not start".into()) } else { Ok(()) }
+        helper_call("phx.Picker", c"pick", c"(Ljava/lang/Object;ILjava/lang/String;)V", vec![jvalue { i: id }, jvalue { l: new_jstr(env, mime) }])
+    }
+}
+pub fn toast(text: &str, long: bool) -> Result<(), String> {
+    unsafe {
+        let env = env().ok_or("no JNI env")?;
+        helper_call("phx.Ui", c"toast", c"(Ljava/lang/Object;Ljava/lang/String;Z)V", vec![jvalue { l: new_jstr(env, text) }, jvalue { z: long as jboolean }])
+    }
+}
+/// A dialog with two buttons; the answer arrives through set_confirmed's callback with `id`.
+pub fn confirm(id: i32, title: &str, message: &str, ok: &str, cancel: &str) -> Result<(), String> {
+    unsafe {
+        let env = env().ok_or("no JNI env")?;
+        let s = |x: &str| jvalue { l: new_jstr(env, x) };
+        helper_call("phx.Ui", c"confirm", c"(Ljava/lang/Object;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+            vec![jvalue { i: id }, s(title), s(message), s(ok), s(cancel)])
     }
 }

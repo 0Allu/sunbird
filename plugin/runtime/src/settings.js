@@ -231,10 +231,39 @@
           enabledState, (sw) => { togglePlugin(id)(sw); rerender(page); rerenderMain(); })]),
         ...(settingRows.length ? [section('Settings', settingRows)] : p.enabled ? [] : [section('', [textLine('Turn it on to see its settings.', COLOR.muted, false)], false)]),
         section('', [
+          buttonRow('Edit code', ICON.console, () => openPage(codePage(id)), { chevron: true, key: `code-${id}` }),
           buttonRow('Reload', ICON.reload, () => { PL.reloadOne(id); rerender(page); rerenderMain(); }, { key: `reload-${id}` }),
           buttonRow('Remove', ICON.remove, () => { PL.remove(id); closeTop(); rerenderMain(); }, { danger: true, key: `remove-${id}` }),
         ]),
-        section('Info', [valueRow('ID', id), valueRow('Source', origin)]),
+        section('Info', [valueRow('ID', id), ...(p.version ? [valueRow('Version', p.version)] : []), ...(p.author ? [valueRow('Author', p.author)] : []), valueRow('Source', origin)]),
+      ];
+    },
+  });
+  // The plugin's source in a multiline editor; Save checks it and restarts the plugin.
+  const MAX_EDIT = 100 * 1024;
+  const codePage = (id) => ({
+    title: 'Edit code',
+    render: (page) => {
+      const src = PL.source(id) ?? '';
+      if (src.length > MAX_EDIT) return [section('', [textLine(`This plugin is ${Math.round(src.length / 1024)} KB, too large to edit here.`, COLOR.muted, false)], false)];
+      const status = textLine('Changes apply when you tap Save and restart.', COLOR.muted, false);
+      const ed = inputRow('', ICON.console, `code-input-${id}`, () => {});
+      const line = ed.kids[0].kids[0], input = line.kids[1], h = input.h;
+      line.kids.shift(); // no icon
+      for (const k of ['margin', 'returnKey', 'placeholder']) setProp(input.props, k);
+      for (const [k, v] of [['multiline', bool(true)], ['value', str(src)], ['fontFamily', str('monospace')], ['fontSize', num(12)], ['autoCorrect', bool(false)]]) setProp(input.props, k, v);
+      h.text = src;
+      const name = (PL.list().find((x) => x.id === id) || { name: id }).name;
+      return [
+        section(`${name} (${id}.js)`, [ed]),
+        section('', [
+          buttonRow('Save and restart', ICON.reload, () => {
+            try { PL.saveSource(id, h.text); setText(status, 'Saved. The plugin restarted.', COLOR.text); rerenderMain(); }
+            catch (e) { setText(status, `Not saved: ${e.message}`, COLOR.danger); }
+          }, { key: `code-save-${id}` }),
+          buttonRow('Revert', ICON.remove, () => rerender(page), { key: `code-revert-${id}` }),
+        ]),
+        section('', [status], false),
       ];
     },
   });

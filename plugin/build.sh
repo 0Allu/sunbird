@@ -16,7 +16,7 @@ mkdir -p ../web/plugins
 # dex is used as is without one.
 if command -v javac >/dev/null; then
   JT=$(mktemp -d)
-  javac --release 8 -nowarn -cp "$(win "$SDK/platforms/android-36/android.jar")" -d "$(win "$JT")" hook/java/phx/Picker.java
+  javac --release 8 -nowarn -cp "$(win "$SDK/platforms/android-36/android.jar")" -d "$(win "$JT")" hook/java/phx/*.java
   D8=$(ls "$SDK"/build-tools/*/d8* | sort -V | tail -1)
   ( cd "$JT" && "$D8" --release --min-api 26 --lib "$(win "$SDK/platforms/android-36/android.jar")" --output . phx/*.class )
   cp "$JT/classes.dex" hook/java/picker.dex

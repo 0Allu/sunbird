@@ -89,7 +89,7 @@ plugin log plus a JS prompt), Reload and About. Plugins declare settings with
 layouts and spliced into its UI-op stream (`plugin/runtime/src/settings.js`, format in
 `plugin/ui/FORMAT.md`).
 
-Plugin API (`phoenix`, typed in `plugin/runtime/phoenix.d.ts`): gateway events (`on` to change or
+Plugin API v1 (`phoenix`; reference in `plugin/API.md`, types in `plugin/runtime/phoenix.d.ts`): gateway events (`on` to change or
 drop them on Phoenix's store thread, `observe`), `dispatch`, `fetch`, `storage`, live stores via
 Phoenix's serializers (`stores`), the guest/host bridge (`bridge`) and `native`: `sym`, `read`/`write`
 (through the kernel, so a bad address throws instead of crashing), `call`, `scan`, and on arm64

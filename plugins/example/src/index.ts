@@ -1,22 +1,32 @@
-// Example plugin: logs incoming messages and rewrites ":shrug:" before Phoenix stores them.
-// Build: npm i && npm run build -> dist/example.js (drop it into files/phoenix-js or the patcher's plugin list).
+// @name Example
+// @description Rewrites :shrug: and answers "!ping" with a local "pong" only you see.
+// @version 1.0.0
+// @author phoenix-unlock
+// @api 1
+//
+// Build: npm i && npm run build -> dist/example.js, then Settings → Phoenix → Install plugin.
 
-interface Message {
-  id: string;
-  channel_id: string;
-  content: string;
-  author?: { username?: string };
-}
+phoenix.settings.define({
+  shrug: { type: 'switch', title: 'Rewrite :shrug:', description: 'Turns :shrug: into ¯\\_(ツ)_/¯ in messages you receive.', default: true },
+  trigger: { type: 'text', title: 'Ping command', description: 'What to answer with a local pong', default: '!ping' },
+});
 
 const SHRUG = '¯\\_(ツ)_/¯';
+let myId: string | undefined;
 
-phoenix.on<Message>('MESSAGE_CREATE', (ev) => {
+phoenix.ready.then(async () => {
+  myId = (await phoenix.stores.me())?.id;
+  phoenix.ui.toast('Example plugin is running');
+});
+
+phoenix.on('MESSAGE_CREATE', (ev) => {
   const m = ev.data;
-  console.log(`${m.author?.username ?? '?'} in ${m.channel_id}: ${m.content}`);
-  if (!m.content.includes(':shrug:')) return; // pass through untouched
+  if (m.author.id === myId && m.content.trim() === phoenix.settings.get<string>('trigger')) {
+    phoenix.messages.addLocal(m.channel_id, `pong (${phoenix.version.arch}, plugin API ${phoenix.version.api})`, { guildId: m.guild_id });
+    return;
+  }
+  if (!phoenix.settings.get('shrug') || !m.content.includes(':shrug:')) return; // pass through untouched
   return { ...m, content: m.content.split(':shrug:').join(SHRUG) };
 });
 
-const runs = phoenix.storage.get<number>('runs', 0) + 1;
-phoenix.storage.set('runs', runs);
-console.log(`example plugin loaded (run ${runs})`);
+phoenix.exports.shrug = SHRUG; // other plugins: phoenix.plugins.get('example')?.shrug

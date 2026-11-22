@@ -41,6 +41,8 @@ pub enum Action {
 pub trait Sink: Send + Sync {
     fn sync(&self, slot: usize, data: &[u8]) -> Action;
     fn observe(&self, slot: usize, data: &[u8]);
+    /// Work queued for the store thread (request_store_thread), run before the next event.
+    fn store_work(&self) {}
 }
 
 struct Slot {
@@ -55,6 +57,10 @@ static STORE: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static CTX: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static REST: [AtomicU64; 4] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 thread_local! { static IN_HANDLER: Cell<bool> = const { Cell::new(false) }; }
+static WANT_STORE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Asks for Sink::store_work on Phoenix's store thread, just before its next gateway event.
+pub fn request_store_thread() { WANT_STORE.store(true, Relaxed); }
 
 unsafe fn entry(host: &Module, e: usize) -> Option<(String, *mut Handler)> {
     if !host.contains(e) || !host.contains(e + 23) { return None; }
@@ -144,6 +150,13 @@ unsafe extern "C" fn w_any(store: *mut c_void, ev: *const Event, ctx: *mut c_voi
     let Some((i, s)) = SLOTS.get().and_then(|v| v.iter().enumerate().find(|(_, x)| x.name.as_bytes() == name)) else {
         return OK; // cannot happen: every wrapped entry is a slot
     };
+    if WANT_STORE.swap(false, Relaxed) {
+        if let Some(sink) = SINK.get() {
+            IN_HANDLER.with(|c| c.set(true));
+            sink.store_work();
+            IN_HANDLER.with(|c| c.set(false));
+        }
+    }
     let (sync, obs) = (s.sync.load(Relaxed) > 0, s.observe.load(Relaxed) > 0);
     if !sync && !obs { return (s.orig)(store, ev, ctx); }
     let Some(sink) = SINK.get() else { return (s.orig)(store, ev, ctx) };

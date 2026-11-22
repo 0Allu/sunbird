@@ -43,6 +43,7 @@ static JS: OnceLock<Js> = OnceLock::new();
 
 enum Job {
     Picked(i32, Option<String>, Option<String>, Option<String>),
+    Confirmed(i32, bool),
     Observe(usize, String),
     Fetched(i32, i32, Option<String>),
     Wake,
@@ -146,6 +147,15 @@ fn install(ctx: &Ctx) -> rquickjs::Result<()> {
     f(&p, "pickFile", Function::new(ctx.clone(), |ctx: Ctx, id: i32, mime: String| -> rquickjs::Result<()> {
         hook::jni::pick_file(id, &mime).map_err(|e| rquickjs::Exception::throw_message(&ctx, &e))
     }))?;
+    f(&p, "toast", Function::new(ctx.clone(), |ctx: Ctx, text: String, long: Opt<bool>| -> rquickjs::Result<()> {
+        hook::jni::toast(&text, long.0.unwrap_or(false)).map_err(|e| rquickjs::Exception::throw_message(&ctx, &e))
+    }))?;
+    f(&p, "confirm", Function::new(ctx.clone(), |ctx: Ctx, id: i32, title: String, message: String, ok: String, cancel: String| -> rquickjs::Result<()> {
+        hook::jni::confirm(id, &title, &message, &ok, &cancel).map_err(|e| rquickjs::Exception::throw_message(&ctx, &e))
+    }))?;
+    f(&p, "uiReady", Function::new(ctx.clone(), hook::jni::ui_ready))?;
+    f(&p, "inHandler", Function::new(ctx.clone(), registry::in_handler))?;
+    f(&p, "wantStore", Function::new(ctx.clone(), registry::request_store_thread))?;
     f(&p, "bridgeListen", Function::new(ctx.clone(), |k: usize, d: i32| hook::jni::listen(k, d)))?;
     p.set("events", registry::names())?;
     native::install(ctx, &p)?;
@@ -169,6 +179,7 @@ impl registry::Sink for Sink {
         }).unwrap_or(Action::Pass)
     }
     fn observe(&self, slot: usize, data: &[u8]) { push(Job::Observe(slot, String::from_utf8_lossy(data).into_owned())); }
+    fn store_work(&self) { with(|ctx| call::<()>(&ctx, "__phx_storeWork", ())); }
 }
 
 fn bridge(kind: usize, a: &[u8], b: Option<&[u8]>) -> Action {
@@ -196,6 +207,7 @@ fn js_thread() {
                 Job::Observe(i, s) => call::<()>(&ctx, "__phx_observe", (i as i32, s)).unwrap_or(()),
                 Job::Fetched(id, st, s) => call::<()>(&ctx, "__phx_fetched", (id, s, st)).unwrap_or(()),
                 Job::Picked(id, n, t, e) => call::<()>(&ctx, "__phx_picked", (id, n, t, e)).unwrap_or(()),
+                Job::Confirmed(id, ok) => call::<()>(&ctx, "__phx_confirmed", (id, ok)).unwrap_or(()),
                 Job::Wake => {}
             });
         }
@@ -206,6 +218,10 @@ fn js_thread() {
 pub fn start(cfg: Config) -> bool {
     let rt = match Runtime::new() { Ok(r) => r, Err(e) => { log(ERROR, &format!("runtime: {e}")); return false } };
     rt.set_max_stack_size(512 * 1024);
+    // unhandled promise rejections go to the console like uncaught errors
+    rt.set_host_promise_rejection_tracker(Some(Box::new(|ctx, _promise, reason, handled| {
+        if !handled { call::<()>(&ctx, "__phx_unhandled", (reason,)); }
+    })));
     let cx = match Context::full(&rt) { Ok(c) => c, Err(e) => { log(ERROR, &format!("context: {e}")); return false } };
     let bundle = cfg.bundle.clone();
     if JS.set(Js { _rt: rt, cx, cfg, start: Instant::now() }).is_err() { return false; }
@@ -219,5 +235,6 @@ pub fn start(cfg: Config) -> bool {
     registry::set_sink(Box::new(Sink));
     hook::jni::set_sink(bridge);
     hook::jni::set_picked(|id, n, t, e| push(Job::Picked(id, n, t, e)));
+    hook::jni::set_confirmed(|id, ok| push(Job::Confirmed(id, ok)));
     std::thread::Builder::new().name("phoenix-js".into()).spawn(js_thread).is_ok()
 }

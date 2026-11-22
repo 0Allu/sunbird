@@ -23,6 +23,7 @@ const logLine = (level, text) => {
   for (const f of LOG.listeners) try { f(l); } catch {}
 };
 globalThis.console = Object.fromEntries(['log', 'info', 'warn', 'error', 'debug'].map((k, i) => [k, (...a) => logLine(i, fmt(a))]));
+globalThis.__phx_unhandled = (r) => logLine(3, 'Unhandled promise rejection: ' + show(r));
 globalThis.__phx_log = { lines: () => LOG.lines.slice(), listen: (f) => { LOG.listeners.add(f); return () => LOG.listeners.delete(f); } };
 // The console prompt: global eval; promises are awaited.
 globalThis.__phx_eval = (code) => {
@@ -124,6 +125,83 @@ const pickFile = (mime = '*/*') => new Promise((resolve, reject) => {
   try { P.pickFile(id, mime); } catch (e) { picks.delete(id); reject(e); }
 });
 
+// ---- plugin API v1 ----------------------------------------------------------------------------
+const API = 1;
+// Work that must run on Phoenix's store thread (dispatch, store reads): now if we are already there
+// (inside a phoenix.on listener), else just before Phoenix's next gateway event. Always a Promise.
+const storeQ = [];
+globalThis.__phx_storeWork = () => { for (const j of storeQ.splice(0)) { try { j.res(j.fn()); } catch (e) { j.rej(e); } } };
+const onStore = (fn) => {
+  if (P.inHandler()) { try { return Promise.resolve(fn()); } catch (e) { return Promise.reject(e); } }
+  return new Promise((res, rej) => { storeQ.push({ fn, res, rej }); P.wantStore(); });
+};
+const parseOrNull = (s) => (s == null ? null : JSON.parse(s));
+const dispatchNow = (n, data) => P.dispatch(n, typeof data === 'string' ? data : JSON.stringify(data));
+const confirms = new Map(); let confirmId = 0;
+globalThis.__phx_confirmed = (id, ok) => { const r = confirms.get(id); if (r) { confirms.delete(id); r(ok); } };
+// Android UI needs Phoenix's activity, known once its first screen is up: calls made earlier wait.
+const uiReady = () => new Promise((res) => { const t = () => (P.uiReady() ? res() : setTimeout(t, 250)); t(); });
+const ui = {
+  toast: (text, o = {}) => { uiReady().then(() => P.toast(String(text), !!o.long)).catch((e) => console.error('toast:', e)); },
+  confirm: (title, message, o = {}) => uiReady().then(() => new Promise((res) => {
+    const id = ++confirmId; confirms.set(id, res);
+    try { P.confirm(id, String(title), String(message ?? ''), o.ok || 'OK', o.cancel || 'Cancel'); } catch (e) { confirms.delete(id); res(false); console.error('confirm:', e); }
+  })),
+  pickFile: (mime) => uiReady().then(() => pickFile(mime)),
+};
+// Local-only message changes: what this device shows; nothing is sent to Discord.
+const snowflake = () => String((BigInt(Date.now()) - 1420070400000n) << 22n);
+const messages = {
+  addLocal: (channelId, content, o = {}) => {
+    const id = snowflake(), who = o.author || 'Phoenix';
+    const msg = { id, nonce: id, channel_id: String(channelId), ...(o.guildId ? { guild_id: String(o.guildId) } : {}), content: String(content), type: 0, flags: 64,
+      tts: false, mention_everyone: false, mentions: [], mention_roles: [], attachments: [], embeds: o.embeds || [], components: [], pinned: false,
+      timestamp: new Date().toISOString(), edited_timestamp: null,
+      author: { id: '0', username: who, global_name: who, discriminator: '0000', avatar: null, bot: true, public_flags: 0 } };
+    return onStore(() => dispatchNow('MESSAGE_CREATE', msg)).then(() => id);
+  },
+  updateLocal: (message) => onStore(() => dispatchNow('MESSAGE_UPDATE', message)),
+  deleteLocal: (channelId, id) => onStore(() => dispatchNow('MESSAGE_DELETE', { id: String(id), channel_id: String(channelId) })),
+};
+// The value of a top-level key of a JSON object, without parsing the rest (READY is megabytes).
+const jsonField = (raw, key) => {
+  let depth = 0;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (c === '{' || c === '[') { depth++; continue; }
+    if (c === '}' || c === ']') { depth--; continue; }
+    if (c !== '"') continue;
+    let e = i + 1;
+    while (e < raw.length && raw[e] !== '"') e += raw[e] === '\\' ? 2 : 1;
+    const k = raw.slice(i + 1, e);
+    let j = e + 1;
+    while (raw[j] === ' ') j++;
+    if (depth !== 1 || raw[j] !== ':' || k !== key) { i = e; continue; }
+    j++;
+    while (raw[j] === ' ') j++;
+    let d = 0, inStr = false, end = j;
+    for (; end < raw.length; end++) {
+      const x = raw[end];
+      if (inStr) { if (x === '\\') end++; else if (x === '"') { inStr = false; if (d === 0) { end++; break; } } continue; }
+      if (x === '"') inStr = true;
+      else if (x === '{' || x === '[') d++;
+      else if (x === '}' || x === ']') { d--; if (d === 0) { end++; break; } }
+      else if ((x === ',' || x === '}') && d === 0) break;
+    }
+    return JSON.parse(raw.slice(j, end));
+  }
+  return undefined;
+};
+// The signed-in user from READY (kept up to date by USER_UPDATE), for builds where the patcher found no Me store.
+let meCache = null;
+add(async, 1, 'READY', (ev) => { try { meCache = jsonField(ev.raw, 'user') ?? meCache; } catch (e) { console.warn('READY user:', e.message); } });
+add(async, 1, 'USER_UPDATE', (ev) => { try { if (meCache && ev.data.id === meCache.id) meCache = { ...meCache, ...ev.data }; } catch {} });
+const meNow = () => { try { const s = P.me(); if (s != null) return JSON.parse(s); } catch {} return meCache; };
+// ready: at READY, or at the first gateway event if plugins started after Phoenix had handled it
+let readyResolve; const ready = new Promise((r) => { readyResolve = r; });
+add(async, 1, 'READY', () => readyResolve());
+onStore(() => readyResolve());
+
 // Plugin settings: define({key: {type: 'switch'|'text'|'number'|'button', title, description?,
 // default?, onPress?}}); values persist in storage.json and show on the plugin's Settings page.
 const settingDefs = new Map(), settingListeners = new Map();
@@ -157,21 +235,47 @@ const api = (id) => ({ id,
   observe: (n, fn) => { fn.__plugin = id; return track(id, add(async, 1, n, fn)); },
   /** Runs when the plugin is turned off in Settings (undo timers, Java hooks, ...). */
   onUnload: (fn) => { const p = plugins.get(id); if (p) p.unload.push(fn); },
-  dispatch: (n, data) => P.dispatch(n, typeof data === 'string' ? data : JSON.stringify(data)),
+  /** Runs an event through Phoenix's own handler, on its store thread. Resolves to whether it was accepted. */
+  dispatch: (n, data) => onStore(() => dispatchNow(n, data)),
   fetch: fetchImpl, storage: storageFor(id), events: [...names],
-  // Live Phoenix stores via Phoenix's own serializers; store-thread only (inside phoenix.on).
-  stores: { me: () => { const s = P.me(); return s == null ? null : JSON.parse(s); },
-    raw: (ser, off) => { const s = P.storeJson(ser, off); return s == null ? null : JSON.parse(s); } },
+  // Live Phoenix stores via Phoenix's own serializers, read on its store thread (Promises).
+  stores: { me: () => onStore(meNow),
+    raw: (ser, off) => onStore(() => parseOrNull(P.storeJson(ser, off))),
+    /** fn({me, raw}) on the store thread, with synchronous readers. */
+    read: (fn) => onStore(() => fn({ me: meNow, raw: (ser, off) => parseOrNull(P.storeJson(ser, off)) })) },
+  ui, messages, ready,
+  version: { api: API, runtime: 'rquickjs (QuickJS-ng)', arch: N.arch, inlineHooks: N.inlineHooks },
+  /** What this plugin offers other plugins (phoenix.plugins.get(id)). */
+  exports: {},
+  plugins: {
+    get: (other) => { const q = plugins.get(other); return q && q.enabled && !q.error ? q.exports : undefined; },
+    list: () => __phx_plugins.list(),
+  },
   native: nativeFor(id),
   settings: settingsFor(id) });
 globalThis.phoenix = api('global');
 
 // "// Name: what it does" on the first line names the plugin in Settings.
-const meta = (id, src) => { const m = /^\s*\/\/\s*([^:\n]{1,40}):\s*([^\n]*)/.exec(src); return m ? { name: m[1].trim(), description: m[2].trim() } : { name: id, description: '' }; };
+// Plugin header: leading "// @name Foo", "// @description ...", "// @version 1.0", "// @author ...",
+// "// @api 1". The older first line "// Name: what it does" still works.
+const meta = (id, src) => {
+  const m = { name: id, description: '', version: '', author: '', api: 1 };
+  const head = /^(?:[ \t]*\/\/[^\n]*\n?)*/.exec(src)[0];
+  let tagged = false;
+  for (const line of head.split('\n')) {
+    const t = /^\s*\/\/\s*@(\w+)\s+(.*?)\s*$/.exec(line);
+    if (t && t[1].toLowerCase() in m) { tagged = true; const k = t[1].toLowerCase(); m[k] = k === 'api' ? Number(t[2]) || 1 : t[2]; }
+  }
+  if (!tagged) { const o = /^\s*\/\/\s*([^:\n]{1,40}):\s*([^\n]*)/.exec(src); if (o) { m.name = o[1].trim(); m.description = o[2].trim(); } }
+  return m;
+};
 const run = (p) => {
+  if (p.api > API) { p.error = `needs plugin API ${p.api}; this app has ${API}`; console.warn(`plugin ${p.id}: ${p.error}`); return; }
   const fn = new Function('phoenix', 'console', p.source + `\n//# sourceURL=${p.id}.js`);
   const tag = (k) => (...a) => console[k](`[${p.id}]`, ...a);
-  try { fn(api(p.id), { log: tag('log'), info: tag('info'), warn: tag('warn'), error: tag('error'), debug: tag('debug') }); p.error = null; console.info(`plugin ${p.id} loaded`); }
+  const a = api(p.id);
+  p.exports = a.exports;
+  try { fn(a, { log: tag('log'), info: tag('info'), warn: tag('warn'), error: tag('error'), debug: tag('debug') }); p.error = null; console.info(`plugin ${p.id} loaded`); }
   catch (e) { p.error = String(e); console.error(`plugin ${p.id} failed:`, e, e && e.stack); stop(p); }
 };
 const stop = (p) => {
@@ -185,12 +289,20 @@ const load = (id, source) => {
   if (p.enabled) run(p); else console.info(`plugin ${id} is turned off`);
 };
 globalThis.__phx_plugins = {
-  list: () => [...plugins.values()].map(({ id, name, description, enabled, error }) => ({ id, name, description, enabled, error,
+  list: () => [...plugins.values()].map(({ id, name, description, version, author, enabled, error }) => ({ id, name, description, version, author, enabled, error,
     origin: cfg.origins?.[id] || (bundled.some((b) => b.id === id) ? 'app' : 'file') })),
   /** [{key, type, title, description, value}] from the plugin's settings.define() */
   settings: (id) => Object.entries(settingDefs.get(id) || {}).map(([key, d]) => ({ key, type: d.type || 'switch', title: d.title || key, description: d.description || '', value: settingValue(id, key) })),
   setSetting,
   pressSetting: (id, key) => { const d = (settingDefs.get(id) || {})[key]; if (d && d.onPress) try { d.onPress(); } catch (e) { console.error(`[${id}] ${key}:`, e); } },
+  /** The plugin's current source (what Edit code shows). */
+  source: (id) => plugins.get(id)?.source ?? null,
+  /** Saves edited code: checked first, then written and restarted like an install. */
+  saveSource: (id, src) => {
+    try { new Function(src); } catch (e) { throw new Error('not valid JavaScript: ' + e.message); }
+    const err = __phx_plugins.install(id, src);
+    if (err) throw new Error(err);
+  },
   /** Re-reads one plugin's file and restarts it if enabled. */
   reloadOne: (id) => {
     const p = plugins.get(id);
