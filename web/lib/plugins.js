@@ -17,8 +17,8 @@ export const PLUGINS = [
   {
     id: 'jsPlugins',
     runtime: true,
-    name: 'JS plugins (rquickjs)',
-    description: 'The built-in plugin runtime. Add your own .js plugins below; turn them on and off in Discord Settings → Phoenix.',
+    name: 'JS plugins (rquickjs + ShadowHook)',
+    description: 'The built-in plugin runtime, with native hooks through ShadowHook on arm64 phones. Add your own .js plugins below; turn them on and off in Discord Settings → Phoenix.',
   },
   {
     id: 'frida',

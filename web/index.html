@@ -74,7 +74,7 @@
   <h2>Plugins</h2>
   <section class="card" id="plugins"></section>
   <section class="card" id="jsp" hidden>
-    <p class="note"><b>Your plugins</b> run on the built-in runtime (<code>phoenix</code> API, plain scripts; types in <a href="https://github.com/mantikafasi/phoenix-unlock/blob/main/plugin/runtime/phoenix.d.ts">phoenix.d.ts</a>). The first line <code>// Name: what it does</code> names it in Settings → Phoenix. Optional: pick .js files and/or write one below.</p>
+    <p class="note"><b>Your plugins</b> run on the built-in runtime (<code>phoenix</code> API, plain scripts; on arm64 <code>phoenix.native.intercept</code> hooks native code through ShadowHook; types in <a href="https://github.com/mantikafasi/phoenix-unlock/blob/main/plugin/runtime/phoenix.d.ts">phoenix.d.ts</a>). The first line <code>// Name: what it does</code> names it in Settings → Phoenix. Optional: pick .js files and/or write one below.</p>
     <input type="file" id="jsp-files" multiple accept=".js,text/javascript">
     <textarea id="jsp-code" rows="8" spellcheck="false" aria-label="Your plugin" placeholder="// Hello: Logs incoming messages (adb logcat -s PhoenixJS)
 phoenix.observe('MESSAGE_CREATE', (ev) => console.log(ev.data.author?.username, ':', ev.data.content));"></textarea>
