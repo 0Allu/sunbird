@@ -1,4 +1,4 @@
-// @description Rewrites incoming messages to show off plugin settings
+// @description Shows off plugin settings, UI patch targets and slash commands
 // @version 0.1.0
 // @author amaanq
 
@@ -31,3 +31,41 @@ plumage.hook(gateway.messageCreate, {
     message.content = `${content} ${settings.suffix} #${seen}`;
   },
 });
+
+plumage.ui.addHeaderButton({
+  icon: "res://ic_mana_puzzle_piece_plus",
+  label: "Example",
+  onPress: (ctx) => ctx.reply(`header button pressed in ${ctx.channelId}`),
+});
+
+plumage.ui.addComposerButton({
+  icon: "res://ic_mana_angle_brackets",
+  label: "Shrug",
+  onPress: (ctx) => ctx.reply("¯\\_(ツ)_/¯"),
+});
+
+plumage.ui.addMessageAccessory({
+  placement: "header",
+  render: ({ messageId }) => `#${messageId.slice(-4)}`,
+});
+
+plumage.ui.addMessageAction({
+  label: "Copy id to chat",
+  icon: "res://ic_mana_id",
+  onPress: (ctx) => ctx.reply(`message ${ctx.messageId} by ${ctx.message?.author.username ?? "someone"}`),
+});
+
+plumage.ui.addProfileSection({
+  title: "Plumage",
+  render: ({ userId }) => (userId ? `user ${userId}` : null),
+});
+
+plumage.commands.register({
+  name: "echo",
+  description: "Sends its arguments back to you only",
+  execute: (args, ctx) => {
+    ctx.reply(args || "(nothing)");
+  },
+});
+
+plumage.messages.onSend((text) => text.replace(/\bteh\b/g, "the"));
