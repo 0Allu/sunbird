@@ -1,5 +1,6 @@
 use std::{
    cell::Cell,
+   collections::BTreeMap,
    ffi::c_void,
    panic::{
       self,
@@ -28,6 +29,11 @@ use plumage_sigs::{
    GatewayRegistry,
    HandlerResult,
    RawStr,
+};
+use serde_json::{
+   Map,
+   Value,
+   value::RawValue,
 };
 
 use crate::{
@@ -278,6 +284,18 @@ unsafe extern "C" fn detour(
       log::error!("gateway event without a registry entry, dropped");
       return HandlerResult::OK;
    };
+   let promoted = data.and_then(|data| promote(name, data));
+   let promoted_event = promoted.as_deref().map(|json| {
+      GatewayEvent {
+         data: RawStr {
+            ptr: json.as_ptr(),
+            len: json.len(),
+         },
+         ..*event
+      }
+   });
+   let event = promoted_event.as_ref().unwrap_or(event);
+   let data = promoted.as_deref().or(data);
    let original = gateway.originals[id.index()];
    // SAFETY: forwarded to the registry's own handler unchanged or with
    // replaced data.
@@ -313,6 +331,41 @@ unsafe extern "C" fn detour(
    run_js(state, |engine| engine.after(id, name, data, result.is_ok()));
    HANDLING.set(None);
    result
+}
+
+/// Gives the signed-in user the staff flag, which unlocks Phoenix's
+/// experiments. `None` leaves the event as it was.
+fn promote(name: &str, data: &str) -> Option<String> {
+   let promoted = match name {
+      "READY" => ready_with_staff(data),
+      "USER_UPDATE" => with_staff(data),
+      _ => return None,
+   };
+   if promoted.is_none() {
+      log::warn!("{name} kept its user flags, the staff flag is off");
+   }
+   promoted
+}
+
+/// READY with its `user` swapped for one with the staff flag. The other
+/// fields pass through as they came.
+fn ready_with_staff(data: &str) -> Option<String> {
+   let mut fields = serde_json::from_str::<BTreeMap<String, &RawValue>>(data).ok()?;
+   let user = RawValue::from_string(with_staff(fields.get("user")?.get())?).ok()?;
+   fields.insert("user".to_owned(), &user);
+   serde_json::to_string(&fields).ok()
+}
+
+fn with_staff(user: &str) -> Option<String> {
+   const STAFF: u64 = 1;
+
+   let mut user = serde_json::from_str::<Map<String, Value>>(user).ok()?;
+   let flags = user
+      .get("flags")
+      .and_then(Value::as_u64)
+      .unwrap_or_default();
+   user.insert("flags".to_owned(), (flags | STAFF).into());
+   serde_json::to_string(&user).ok()
 }
 
 /// # Safety
