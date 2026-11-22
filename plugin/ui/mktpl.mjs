@@ -11,7 +11,7 @@ const load = (f) => {
   for (const o of ops) { if (o.op === 'create') create.set(o.id, o); if (o.op === 'children') kids.set(o.id, o.ids); }
   const strip = (props) => props.filter((p) => p.k !== 'worklet')
     .map((p) => ({ k: p.k, v: JSON.parse(JSON.stringify(p.v, (k, v) => (typeof v === 'bigint' ? String(v) : v))) }))
-    .map((p) => (['text', 'accessibilityLabel'].includes(p.k) ? { k: p.k, v: { t: 'str', v: '' } } : p));
+    .map((p) => (['text', 'accessibilityLabel', 'value'].includes(p.k) ? { k: p.k, v: { t: 'str', v: '' } } : p));
   const tree = (id) => ({ type: create.get(id).type, props: strip(create.get(id).props), kids: (kids.get(id) || []).map(tree), src: id });
   return { create, tree, strip };
 };
@@ -29,6 +29,7 @@ const T = {
   switchRow: clean(s.tree(0x46f)), trackOff: s.strip(s.create.get(0x4a2).props), knobOff: s.strip(s.create.get(0x4a3).props),
   divider: clean(s.tree(0x41a)), buttonRow: clean(s.tree(0x42b)),
   valueRow: clean(p.tree(0x544)), // label ... value > chevron
+  input: clean(s.tree(0x336)), // Settings search: row > box > [icon wrap > icon, input]
   page, // ids to address: spacer 0x4e1, content 0x4e4, header 0x562, back button 0x565, title 0x56a (kept as `src`)
 };
 const keep = (n) => { if (![0x4e1, 0x4e4, 0x562, 0x565, 0x56a].includes(n.src)) delete n.src; n.kids.forEach(keep); };

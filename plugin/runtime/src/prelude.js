@@ -2,8 +2,37 @@
 // JS side of the plugin API (global `phoenix`); natives live on __phx (see lib.rs).
 (() => {
 const P = __phx, names = P.events;
-const fmt = (a) => a.map(String).join(' ');
-globalThis.console = Object.fromEntries(['log', 'info', 'warn', 'error', 'debug'].map((k, i) => [k, (...a) => P.log(i, fmt(a))]));
+// Values as a console shows them: strings raw, errors with their stack, objects as JSON.
+const show = (v) => {
+  if (typeof v === 'string') return v;
+  if (v instanceof Error) return v.stack ? `${v}\n${v.stack}` : String(v);
+  if (typeof v === 'bigint') return v + 'n';
+  if (typeof v === 'function') return `[function ${v.name || 'anonymous'}]`;
+  if (v instanceof Uint8Array) return `Uint8Array(${v.length}) [${Array.from(v.subarray(0, 32), (b) => b.toString(16).padStart(2, '0')).join(' ')}${v.length > 32 ? ' …' : ''}]`;
+  if (v && typeof v === 'object') { try { return JSON.stringify(v, (k, x) => (typeof x === 'bigint' ? x + 'n' : x), 1) ?? String(v); } catch { return String(v); } }
+  return String(v);
+};
+const fmt = (a) => a.map(show).join(' ');
+// Last 500 lines for Settings > Phoenix > Console: {t, level (0 log 1 info 2 warn 3 error 4 debug), text}
+const LOG = { lines: [], listeners: new Set() };
+const logLine = (level, text) => {
+  P.log(level, text);
+  const l = { t: Date.now(), level, text };
+  LOG.lines.push(l);
+  if (LOG.lines.length > 500) LOG.lines.shift();
+  for (const f of LOG.listeners) try { f(l); } catch {}
+};
+globalThis.console = Object.fromEntries(['log', 'info', 'warn', 'error', 'debug'].map((k, i) => [k, (...a) => logLine(i, fmt(a))]));
+globalThis.__phx_log = { lines: () => LOG.lines.slice(), listen: (f) => { LOG.listeners.add(f); return () => LOG.listeners.delete(f); } };
+// The console prompt: global eval; promises are awaited.
+globalThis.__phx_eval = (code) => {
+  logLine(0, '> ' + code);
+  try {
+    const r = (0, eval)(code);
+    if (r && typeof r.then === 'function') r.then((v) => logLine(0, '< ' + show(v)), (e) => logLine(3, '< ' + show(e)));
+    else logLine(0, '< ' + show(r));
+  } catch (e) { logLine(3, show(e)); }
+};
 
 const sync = new Map(), async = new Map();
 const add = (m, kind, name, fn) => { if (!m.has(name)) m.set(name, []); m.get(name).push(fn); P.listen(name, kind, 1);
@@ -81,7 +110,9 @@ const nativeFor = (id) => ({
 
 // Plugins: id -> { id, name, description, source, enabled, error, unsubs, unload }
 const plugins = new Map();
-let cfg = { disabled: [] }; try { cfg = { disabled: [], ...JSON.parse(P.readFile('plugins.json') || '{}') }; } catch {}
+let cfg = { disabled: [], removed: [] }; try { cfg = { disabled: [], removed: [], ...JSON.parse(P.readFile('plugins.json') || '{}') }; } catch {}
+const saveCfg = () => P.writeFile('plugins.json', JSON.stringify(cfg));
+let bundled = []; // the APK's plugin bundle ([{id, source?, url?}])
 const track = (id, unsub) => { const p = plugins.get(id); if (p) p.unsubs.push(unsub); return unsub; };
 const api = (id) => ({ id,
   bridge: { onOps: (fn) => track(id, brOn(0, id, fn)), onInvoke: (fn) => track(id, brOn(1, id, fn)),
@@ -122,7 +153,7 @@ globalThis.__phx_plugins = {
     if (!p || p.enabled === on) return;
     p.enabled = on;
     cfg.disabled = cfg.disabled.filter((x) => x !== id).concat(on ? [] : [id]);
-    P.writeFile('plugins.json', JSON.stringify(cfg));
+    saveCfg();
     if (on) run(p); else { stop(p); console.info(`plugin ${id} turned off`); }
   },
   /** Re-reads every plugin from files/phoenix-js and restarts the enabled ones. */
@@ -134,6 +165,46 @@ globalThis.__phx_plugins = {
     }
     console.info(`plugins reloaded: ${plugins.size}`);
   },
+  /** Saves `source` as <id>.js and (re)starts it. */
+  install: (id, source) => {
+    if (!/^[\w-]{1,40}$/.test(id)) throw new Error(`bad plugin id "${id}"`);
+    if (!P.writeFile(id + '.js', source)) throw new Error(`could not save ${id}.js`);
+    const old = plugins.get(id);
+    if (old) stop(old);
+    cfg.removed = cfg.removed.filter((x) => x !== id);
+    cfg.disabled = cfg.disabled.filter((x) => x !== id);
+    saveCfg();
+    load(id, source);
+    console.info(`plugin ${id} installed`);
+    return plugins.get(id).error;
+  },
+  /** Stops it and deletes its file; a plugin shipped in the APK stays removed. */
+  remove: (id) => {
+    const p = plugins.get(id);
+    if (!p) return;
+    stop(p);
+    plugins.delete(id);
+    P.removeFile(id + '.js');
+    if (!cfg.removed.includes(id)) cfg.removed.push(id);
+    saveCfg();
+    console.info(`plugin ${id} removed`);
+  },
+  /** Plugins shipped in the APK that were removed: [{id, name}] */
+  removedBundled: () => bundled.filter((b) => b.source && cfg.removed.includes(b.id)).map((b) => ({ id: b.id, name: meta(b.id, b.source).name })),
+  /** Brings back a removed plugin that came with the app. */
+  restore: (id) => { const b = bundled.find((x) => x.id === id && x.source); if (b) __phx_plugins.install(id, b.source); },
+  /** Fetches a plugin from a URL and installs it (id: file name). Resolves to the id. */
+  installUrl: async (url) => {
+    const m = /([\w-]+)(\.m?js)?(?:[?#].*)?$/i.exec(url.trim());
+    if (!/^https?:\/\//i.test(url.trim()) || !m) throw new Error('enter an http(s) URL of a .js file');
+    const r = await fetchImpl(url.trim());
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const src = await r.text();
+    try { new Function(src); } catch (e) { throw new Error('not valid JavaScript: ' + e.message); }
+    const err = __phx_plugins.install(m[1], src);
+    if (err) throw new Error(err);
+    return m[1];
+  },
 };
 
 // Bundle entries with a source (shipped in the APK, so a reinstall updates them) are written to
@@ -141,6 +212,8 @@ globalThis.__phx_plugins = {
 // entries load their cached copy and are refreshed in the background.
 globalThis.__phx_loadAll = (bundle) => { const seen = new Set();
   let b = []; try { b = JSON.parse(bundle || '[]'); } catch (e) { console.error('bad plugin bundle', e); }
+  bundled = b;
+  b = b.filter((p) => !cfg.removed.includes(p.id));
   for (const p of b) if (p.source) { if (P.readFile(p.id + '.js') !== p.source) P.writeFile(p.id + '.js', p.source); seen.add(p.id); load(p.id, p.source); }
   for (const f of P.listDir()) if (f.endsWith('.js')) { const id = f.slice(0, -3); if (!seen.has(id)) { seen.add(id); load(id, P.readFile(f)); } }
   for (const p of b) {

@@ -123,6 +123,10 @@ fn install(ctx: &Ctx) -> rquickjs::Result<()> {
         std::fs::write(&tmp, data).and_then(|_| std::fs::rename(&tmp, &p)).is_ok()
     }))?;
     let dir = js.cfg.dir.clone();
+    f(&p, "removeFile", Function::new(ctx.clone(), move |name: String| {
+        safe_path(&dir, &name).is_some_and(|p| std::fs::remove_file(p).is_ok())
+    }))?;
+    let dir = js.cfg.dir.clone();
     f(&p, "listDir", Function::new(ctx.clone(), move || {
         let mut v: Vec<String> = std::fs::read_dir(&dir).into_iter().flatten().flatten()
             .filter_map(|e| e.file_name().into_string().ok()).filter(|n| !n.starts_with('.')).collect();

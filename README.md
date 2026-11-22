@@ -81,7 +81,8 @@ Optional, ticked on the page. The patcher renames the host lib's `DT_NEEDED` `li
 
 JS plugins live in `files/phoenix-js/`; ones shipped in the APK are copied there and replace older
 copies. Discord's **Settings** gets a **Phoenix** row at the top, opening a page with a switch per
-plugin (turned off = unloaded live, remembered), Reload and About. It is built from Phoenix's own row
+plugin (turned off = unloaded live, remembered), Install from URL, Remove plugins (app-bundled ones
+can be restored), a Console (live plugin log plus a JS prompt), Reload and About. It is built from Phoenix's own row
 layouts and spliced into its UI-op stream (`plugin/runtime/src/settings.js`, format in
 `plugin/ui/FORMAT.md`).
 
