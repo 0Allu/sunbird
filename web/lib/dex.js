@@ -1,5 +1,5 @@
-// Force PhoenixLaunch.i(ContextWrapper)Z to return true. JS port of patcher/dexpatch.py.
-// The method is found by its log string (names are obfuscated), must return boolean, and its first
+// Forces Phoenix to launch, a port of crates/patcher/src/dex.rs: the launcher method that falls back to React Native.
+// It is found by its log string (names are obfuscated per build), must return boolean, and its first
 // two code units become `const/4 v0, #1; return v0`. Checksum and SHA-1 signature are recomputed.
 
 const ANCHOR = new TextEncoder().encode("Phoenix didn't stay up for 3 launches");

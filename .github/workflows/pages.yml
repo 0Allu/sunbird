@@ -2,7 +2,7 @@ name: pages
 on:
   push:
     branches: [main]
-    paths: ['web/**', '.github/workflows/pages.yml']
+    paths: ['web/**', 'plugins/**', '.github/workflows/pages.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -16,6 +16,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The plugins stay TypeScript in plugins/*/src; the site serves them bundled.
+      - run: npm install --no-save --no-package-lock esbuild@0.25.12
+      - run: node web/tools/bundle-plugins.mjs
+        env:
+          ESBUILD: node_modules/.bin/esbuild
       - uses: actions/upload-pages-artifact@v5
         with:
           path: web

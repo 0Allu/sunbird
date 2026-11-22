@@ -1,113 +1,93 @@
 # AGENTS.md
 
-Notes for coding agents working on this repo. Read README.md for what the project does; this file
-is about how to work on it without repeating past mistakes.
+Notes for coding agents working on Phoenix Unlock (this repo): a patcher and plugin runtime for
+Phoenix, Discord's native Rust Android client (356.7 Alpha, versionCode 356207). "Phoenix" is
+Discord's client; our tool is "Phoenix Unlock" (the code calls its runtime `phoenix`).
 
 ## Rules from the owner
 
-- **No self-attribution.** Never add `Co-Authored-By` (or any other agent attribution) to commits
-  or PRs. Existing history was rewritten to remove them.
-- **API in Rust.** New plugin API features and their machinery (UI-op handling, patch targets,
-  settings pages, stores) are written in Rust inside libplg and exposed to JS as `__phx` natives.
-  JS (`prelude.js` etc.) stays thin `phoenix.*` wiring; don't grow the JS modules.
-- **One signing key.** Every APK (site, `node-build`, `patch.py`) is signed with
-  `web/signing-key.json`, so builds install over each other. Don't introduce other keys.
-- **Push only what works.** Test on a device (WSA and/or the owner's phone) before pushing.
-  Pushing `main` deploys GitHub Pages (`.github/workflows/pages.yml`, `web/` only). A force push
-  may not trigger it: run `gh workflow run pages.yml --ref main`.
-- **Privacy.** Screenshots of the owner's devices show private chats, emails, phone numbers.
-  Don't quote that content, don't commit captures (`plugin/ui/mktpl.mjs` scrubs text from
-  templates), delete screenshots after use.
-- **Phone:** the owner's arm64 phone has no root. Don't enter passwords; install over the existing
-  `com.discord.phoenix` (same key keeps the login). Clean up test plugins/files you add.
+- **Attribution.** Agents may credit themselves in commit messages, e.g. with an
+  `Assisted-By: <agent>` trailer.
+- **API in Rust.** Plugin API features and their machinery (UI ops, patch targets, settings pages,
+  stores) live in the Rust crates and reach plugins through the `phoenix` object. Plugins are
+  TypeScript; keep JS out of the runtime itself.
+- **One signing identity.** Every APK, from the patcher, the site or `node-build`, is signed with
+  `crates/patcher/keys/` (`web/signing-key.json` holds the same key for the site): v3 only, with
+  the proof of rotation from the old Valenced test key, so builds install over each other and over
+  older installs. The old private key must not be added to the repo. Read `keys/README.md`.
+- **Push only what works.** Test on a device before pushing.
+- **Privacy.** Screenshots and logs from the owner's phone show private chats, emails and
+  accounts. Don't quote them, don't commit captures, delete screenshots after use. Some plugins
+  (`example`) log message text to the console.
+- **Phone.** The owner's arm64 phone has no root. Don't enter passwords. Install over the existing
+  `com.discord` (same key keeps the login). Don't tap around while the owner is using it; ask.
+  Remove test plugins and files you add.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `web/` | The browser patcher (GitHub Pages): `lib/arm64.js`, `lib/x86.js` (host lib patches), `dex.js`, `axml.js`, `arsc.js`, `zip.js`, `sign.js`, `apk.js` (pipeline), `plugins.js` (plugin options + config block), `frida.js`; `tools/node-build.mjs` is the same pipeline as a CLI; `worker/proxy.js` is the Cloudflare CORS proxy. |
-| `web/plugins/` | Prebuilt artifacts served by the site: `libplg-{arm64,x86_64}.so`, `libshadowhook_nothing-arm64.so`, `message-logger.js`, frida gadget + bootstrap. `*.so` is gitignored except here. |
-| `plugin/` | The plugin host, a Rust workspace building `libplg.so`: `loader` (cdylib, `.init_array` constructor), `sigs` (typed config block filled by the patcher), `hook` (gateway registry hooks, JNI bridge, scanner, ShadowHook, Java helper loader), `runtime` (rquickjs, JS API). |
-| `plugin/runtime/src/prelude.js` | The JS side of the `phoenix` API. `settings.js` = the Settings → Phoenix pages. `patches.js` = UI patch targets (`ui.add*`, `commands`, `messages.onSend`). |
-| `plugin/API.md`, `plugin/runtime/phoenix.d.ts` | Plugin API reference and types. Keep both in sync with prelude.js. |
-| `plugin/ui/` | Phoenix UI-op format (`FORMAT.md`), codec (`uiops.js`), template generator (`mktpl.mjs`). |
-| `plugin/hook/java/phx/` | Java helper classes (picker, toast/confirm, DB) compiled to `picker.dex` and embedded in libplg. |
-| `plugin/hook/shadowhook/` | Vendored ShadowHook 2.0.1 (see its README.phoenix for local patches). |
-| `plugin/rquickjs-sys/` | Trimmed rquickjs-sys with Android bindings (copied from linux-gnu). |
-| `plugins/example/` | TypeScript plugin template (esbuild, keeps the header via `build.mjs`). |
-| `patcher/`, `native/`, `java/` | Older Python patcher and Xposed-based tooling (x86 WSA test injection). |
+| `crates/loader` | `libphoenix.so`, injected as `libplm.so`: a constructor that starts the runtime inside the host. |
+| `crates/runtime` | rquickjs plugin runtime and the `phoenix` API: gateway hooks, UI bridge, Settings → Phoenix pages (`settings.rs`), UI patch targets (`patches/`), console, file picker (`picker.rs` + `java/phx/Picker.java` → `java/picker.dex`, rebuild with `java/build.sh`). `phoenix.d.ts` is the plugin API reference. |
+| `crates/hook` | ShadowHook (arm) / Dobby (elsewhere) inline hooks, bytehook PLT hooks, image scanner. |
+| `crates/sigs`, `crates/sigscan` | Hook-point rules and the per-build table; `sigscan` evaluates them against a library file. |
+| `crates/ui`, `crates/wire` | Codecs for Phoenix's UI-op batches and bridge values/frames. `ui/src/props.in` is Phoenix's prop table, `templates.json` captured layouts. |
+| `crates/patcher` | CLI that patches the split APKs (dex launcher, host access check, `liblog.so` → `libplm.so`, adds the loader, shadowhook probe and plugin bundle) and signs them. |
+| `crates/stand-in*` | A fake Phoenix gateway library and an end-to-end demo, to test hooks without Discord. |
+| `plugins/*/src/index.ts` | Bundled plugins (TypeScript; `// @` header lines are kept as the bundle banner). |
+| `web/` | The browser patcher (GitHub Pages, `.github/workflows/pages.yml`), a JS port of `crates/patcher` that must stay byte-identical to it: `lib/apk.js`, `host.js`, `dex.js`, `sign.js`, `zip.js`, `axml.js`, `arsc.js`, `frida.js`. `tools/node-build.mjs` is the same pipeline as a CLI, `tools/bundle-plugins.mjs` builds `web/plugins/*.js` + `index.json` (build output, not committed; CI runs it). `web/plugins/libphoenix-arm64.so` is copied from a loader build. |
+| `frida/` | The optional Frida gadget bootstrap (`build.sh` → `web/plugins/frida-bootstrap.js`). |
+| `flake.nix`, `nix/`, `scripts/*.nu` | The Linux devshell and build/install scripts (`scripts/phoenix.nu` patches and installs on a phone). |
 
 ## Building
 
-- libplg: `TOOLCHAIN=+stable-x86_64-pc-windows-gnu plugin/build.sh` (Git Bash). Builds both ABIs
-  into `web/plugins/` and recompiles `picker.dex` if `javac` exists.
-  - No Visual Studio on the dev box: use the GNU host toolchain (`+stable-x86_64-pc-windows-gnu`).
-  - The NDK `*.cmd` wrappers mangle rustc's quoted link args, so `clang.exe --target=...` is the linker.
-- Patched APK locally: `node web/tools/node-build.mjs --package com.discord.phoenix --plugins jsPlugins,frida --bundled messageLogger [--js my.js] out.apk base.apk config.<abi>.apk config.<dpi>.apk config.<lang>.apk`
-- Web dev server: `node web/tools/dev-server.mjs` (port 8787).
-- Example plugin: `cd plugins/example && npm i && npm run build && npm run check`.
+- **Linux:** `nix develop`, then `nu scripts/phoenix.nu base.apk config.arm64_v8a.apk config.<dpi>.apk config.<lang>.apk`.
+  The devshell sets `SHADOWHOOK_SRC` / `BYTEHOOK_SRC` to the commits pinned in `flake.lock`.
+- **Windows (no nix):**
+  - Rust `stable-x86_64-pc-windows-gnu` with the `aarch64-linux-android` target, `cargo install cargo-ndk`, an NDK.
+  - Fetch bytedance `android-inline-hook` and `bhook` at the `flake.lock` revisions and point
+    `SHADOWHOOK_SRC` (`…/shadowhook/src/main/cpp`) and `BYTEHOOK_SRC` (`…/bytehook/src/main/cpp`) at them.
+  - `LIBCLANG_PATH` to an LLVM `bin` with `libclang.dll`, and set
+    `BINDGEN_EXTRA_CLANG_ARGS_aarch64-linux-android="--target=aarch64-linux-android28 --sysroot=<ndk>/toolchains/llvm/prebuilt/windows-x86_64/sysroot -isystem <ndk>/…/lib/clang/<ver>/include"`
+    (a hyphenated name: set it with `env`).
+  - Git for Windows' MinGW (gcc 12) can't link the host build scripts. Take it off `PATH` so rustc
+    links with its bundled MinGW, and put a dir with only `dlltool.exe` (from the toolchain's
+    `self-contained`) and `as.exe` (plus its DLLs) on `PATH`.
+  - `cargo +stable-x86_64-pc-windows-gnu ndk -t arm64-v8a -P 28 --link-builtins build --release -p phoenix-loader`,
+    and `cargo build --release -p patcher` for the host patcher. The patcher calls `apksigner.bat` on Windows.
+  - The C: drive is nearly full: use `CARGO_TARGET_DIR` on E:.
+- **Site:** `node web/tools/bundle-plugins.mjs` (`ESBUILD=` path to esbuild), then
+  `node web/tools/dev-server.mjs <dir with the splits> [port]`. The deploy workflow runs on pushes to `main`.
 
 ## Testing
 
-- **WSA (x86_64)** at `adb -s 127.0.0.1:58526`. `com.discord` there is a test install with an
-  Xposed module (`native/loader.c`, "GateProbe") that loads `/data/local/tmp/gatepayload.so`
-  after start. For libplg tests push a shim as `gatepayload.so` that applies the gate/staff
-  patches, copies `/data/local/tmp/libplg_test.so` + `libplg.js.so` (the bundle) into
-  `files/` (SELinux won't map code from /data/local/tmp) and dlopens it. Fill the config block
-  of the test libplg yourself (build ID, registry anchor) like `web/lib/plugins.js` does.
-- **Phone (arm64)**: build with node-build and `adb install -r`; logs: `adb logcat -s PhoenixJS`.
-- Open Settings: `adb shell am start -a android.intent.action.VIEW -d discord://app/settings <pkg>`
-  (ignored while the app is still starting). Find rows by accessibility label with
-  `uiautomator dump`, not by coordinates (layouts move).
-- `adb shell input text` with parentheses needs `"input text '...'"` quoting; the phone keyboard
-  inserts spaces after dots.
+- Phone (arm64): patch with the patcher or `node web/tools/node-build.mjs`, `adb install-multiple -r`
+  (splits) or `adb install -r` (merged), then `adb logcat -s phoenix` (`-s FridaPlugins` for Frida).
+- Open Settings: `adb shell am start -a android.intent.action.VIEW -d discord://app/settings com.discord`.
+  Find rows with `uiautomator dump` by resource-id (= accessibility id, ours are `phoenix-<title>`);
+  the dump shows an accessibility toast over the bottom of the screen for a few seconds.
+- Compare the site against the Rust patcher by unzipping both outputs: every entry but the
+  signature must be identical.
+- Git Bash turns `/word` into a Windows path in adb arguments: set `MSYS_NO_PATHCONV=1`, and pass
+  local paths with `cygpath -w`.
 
 ## Facts that cost time to learn
 
-- **Threads:** Phoenix handles gateway events on its store thread. Store reads and dispatches
-  must run there (`registry::request_store_thread` / `onStore` in prelude.js). UI ops must not be
-  sent from the main thread (`hook::jni::apply_ops`, serialized with Rust's batches by `UI_LOCK`).
-- **Bridge:** almost all UI-op batches arrive as `GuestHost.invoke` frames starting with 4 zero
-  bytes, not through `applyOps`. ART's shared JNI table is patched once (`hook::jni::attach`).
-- **Settings injection:** our UI node ids start at 0x50000000. Rust's `childEdits` count Java's
-  child list, so the Phoenix row is spliced in by mirroring Rust's list and re-sending full
-  `children` ops. The phone layout pushes Settings onto the app's root navigator; the tablet one
-  has its own. Page headers copy the live status-bar inset from Rust's `stackHeader`.
-- **UI patch targets (`patches.js`):** it mirrors Rust's tree (children + accessibilityIds) and
-  anchors on language-neutral ids: `search.entry` (chat header), `composer.expressions` /
-  `composer` / `send` (message box), `message.content:<id>` / `message.timestamp:<id>` (rows),
-  `message.actions.root` (long-press sheet; its message comes from the list's `rowLongPress`
-  index), `profile-tab-pages` (profile sheet; user id from the avatar URL). Layouts are cloned
-  from the live neighbours, so themes carry over. Closing a sheet = a `dismiss` event to the
-  `sheet` node. Sending = `submit` on `composer` or `press` on `send`; Rust keeps the text from
-  `changeText`, so a rewrite is `changeText(new)` + the original event in one batch frame.
-  Our ids start at 0x58000000. Text set from a Promise waits ~100 ms so Java has applied the batch.
-  `/` suggestions: `suggestions` (scroll) > stack > view > [`suggestion-surface`, view > view > view >
-  scroll > rows]; our command rows go first in Rust's rows. Rust sizes that popup with worklets
-  (animation drivers): a copy of it without them stays 0 high, so there is no popup of our own.
-  To set the message box text use `forceValue {seq, text, start, end}` (applied when `seq`
-  changes), not `value` (ignored while the keyboard has edits in flight; leaves stale text).
-- **Testing sends:** never post to real channels while testing; load a guard plugin (a
-  `phoenix.bridge.onDispatch` listener returning `false` for `submit` and `send` presses) and check `/commands` with `ctx.reply`.
-  `uiautomator dump` pops an accessibility toast over the bottom of the phone screen for a few
-  seconds: wait before tapping there. Git Bash turns `/word` into a Windows path in
-  `adb shell input text`: set `MSYS_NO_PATHCONV=1`.
-- **ShadowHook:** its constructors are patched to priority 101 (they must run before libplg's),
-  it needs `libshadowhook_nothing.so` next to libplg (shipped by the patcher), and compiler-rt
-  builtins linked in (`__clear_cache`). arm64 only.
-- **BigInt:** arm64 heap pointers carry tag bits above 2^53; native addresses/registers are BigInts.
-- **Stores:** Phoenix persists its state in `files/store/<account>/cache.sqlite` (Java module
-  `nativeapp.modules.w4`): key/value tables (`k`, `v` JSON) like guilds, members, channels,
-  users, messages, read_states, user_guild_settings, relationships, and a `meta` table (`me`,
-  `guild_order`, `domain.*`, experiments, ...). Keys are 20-digit zero-padded ids. The runtime
-  reads it read-only through the Java helper (`phx.Db`). READY does not go through the hooked
-  event table on the phone build, so don't rely on observing it. `files/kv-storage/` is the
-  old React Native app's storage.
+- **Hooks:** gateway events are hooked by swapping handler pointers in Phoenix's event registry
+  (found from the `MESSAGE_CREATE` name, so it survives updates); the UI bridge swaps two entries
+  of ART's JNI table. ShadowHook and bytehook are linked in but not used yet.
+- **Update risks:** `crates/ui/src/props.in` (UI ops name props by index, so a new prop shifts
+  them), `GuestHost.d(byte[], Function0)` (an obfuscated name), and `templates.json` (captured
+  look). Everything else is found by names, strings and patterns, not addresses.
+- **UI text:** text and inputs take `spans` / `valueSpans`: arrays of `{text, color, weight,
+  italic, bg, …}` pieces that concatenate to the text. Set an input's text with
+  `forceValue {seq, text, start, end}` (applied when `seq` changes), not `value`, which is
+  ignored while the keyboard has edits in flight.
+- **Threads:** UI ops must not be sent from the main thread (Rust may hold the UI lock while it
+  waits on Java); the settings worker sends them.
+- **Stores:** Phoenix keeps its state in `files/store/<account>/cache.sqlite`.
 - **Credentials on the bridge:** HTTP requests travel over `GuestHost.invoke` with the user's
-  `authorization` header. Never capture/log invoke frames wholesale; filter before saving and
-  delete captures that contain tokens.
-- **Plugins dir:** JS plugins live in `files/phoenix-js/`; Frida plugins in `files/phoenix-plugins/`.
-- **esbuild drops line comments**: keep plugin headers with a banner (see plugins/example/build.mjs).
-- **Shell gotchas (Windows Git Bash):** long heredocs sometimes fail to parse; write scripts to a
-  file instead. Set `MSYS_NO_PATHCONV=1` for adb paths, pass Windows paths (`cygpath -w`) to
-  native tools. Python on this box prints with cp1254: write UTF-8 to files instead.
+  `authorization` header. Never capture or log invoke frames wholesale.
+- **Shell (Windows):** long heredocs in Git Bash sometimes fail to parse; write scripts to files.
+  Python prints with cp1254 here: write UTF-8 to files. Bash's `printf` writes `é` as one
+  Latin-1 byte, not UTF-8.

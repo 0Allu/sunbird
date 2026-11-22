@@ -6,8 +6,9 @@
 // x86_64 61260e633db2189ab4655b5b28d0aaf41d3ec31337c282af27e30dc151aff881.
 // Frida is licensed under the wxWindows Library Licence 3.1.
 //
-// Loading: plugins.js renames libplg.so's DT_NEEDED liblog.so -> libfrg.so (the gadget, which itself needs
-// liblog.so, so symbol lookup is unchanged). Its constructor runs while liblibdiscord_wasm_host.so loads and,
+// Loading: apk.js renames DT_NEEDED liblog.so -> libfrg.so (the gadget, which itself needs liblog.so, so symbol
+// lookup is unchanged) in the loader libplm.so, or in the host lib when the plugin runtime is off. Either way
+// the gadget's constructor runs while liblibdiscord_wasm_host.so loads and,
 // in script mode, runs the script synchronously before the app goes on. The gadget reads its config and the
 // script straight from the APK: its own path is ".../base.apk!/lib/<abi>/libfrg.so", from which it derives
 // libfrg.config.so, and Frida 17 resolves "x.apk!/entry" paths with its own zip reader. So native libs stay
@@ -55,9 +56,8 @@ export function bundleScripts(files, bootstrap) {
 }\n`;
 }
 
-/** Files to add next to the other native libs of `abi` (e.g. 'arm64-v8a'): [name, data][] */
-export function fridaFiles(gadget, script, abi) {
-  const DIR = `lib/${abi}/`;
+/** Files to add to native lib dir `DIR` (e.g. 'lib/arm64-v8a/'): [name, data][] */
+export function fridaFiles(gadget, script, DIR) {
   const config = { interaction: { type: 'script', path: SCRIPT, on_change: 'ignore' } };
   const te = new TextEncoder();
   return [

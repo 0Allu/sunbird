@@ -1,0 +1,25 @@
+[package]
+name = "phoenix-loader"
+description = "The injected library, a constructor that starts phoenix inside the host"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = [ "cdylib" ]
+name       = "phoenix"
+
+[dependencies]
+libc            = { workspace = true }
+log             = { workspace = true }
+misstep         = { workspace = true }
+phoenix-runtime = { workspace = true }
+phoenix-sigs    = { workspace = true }
+serde_json      = { workspace = true }
+zip             = { workspace = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "sigscan"
+description = "Evaluates phoenix's rules against a library file and prints a build table entry"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+misstep      = { workspace = true }
+phoenix-sigs = { features = [ "file" ], workspace = true }
+
+[lints]
+workspace = true

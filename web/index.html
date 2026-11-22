@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Phoenix Unlock</title>
-<meta name="description" content="Patch Discord's Phoenix client in your browser: no access gate, staff tools.">
+<meta name="description" content="Patch Discord's Phoenix client in your browser: no access gate, plugins built in.">
 <style>
   :root { color-scheme: light dark; --bg:#f6f6f8; --card:#fff; --fg:#17171c; --mut:#6b6b76; --line:#e3e3e8; --acc:#5865f2; --ok:#1f8a4c; --err:#c2353a; }
   @media (prefers-color-scheme: dark) { :root { --bg:#111214; --card:#1c1d21; --fg:#ececf1; --mut:#9a9aa6; --line:#2c2d33; --ok:#3fb977; --err:#ef6b6f; } }
@@ -49,38 +49,42 @@
   label.plugin span { font-size:14px; color:var(--mut); }
   #frida textarea, #jsp textarea { display:block; width:100%; margin-top:10px; font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--fg); background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:10px; resize:vertical; }
   #frida input[type=file], #jsp input[type=file] { max-width:100%; font-size:14px; }
+  .contributors { display:flex; flex-wrap:wrap; gap:12px 24px; }
+  .contributors a { display:flex; align-items:center; gap:10px; font-weight:600; text-decoration:none; color:var(--fg); }
+  .contributors a:hover { color:var(--acc); }
+  .contributors img { border-radius:50%; background:var(--line); }
 </style>
 </head>
 <body>
 <main>
   <h1>Phoenix Unlock</h1>
-  <p class="lede">Patches Discord's new native client (Phoenix) so it opens without the access gate, with staff tools turned on. It all runs in this browser; nothing is uploaded.</p>
+  <p class="lede">Patches Discord's new native client (Phoenix) so it opens without the access gate, with Phoenix Unlock's plugin runtime and the plugins you pick built in. It all runs in this browser; nothing is uploaded.</p>
 
   <section class="card" id="setup">
     <div class="row"><label for="ver">Discord build</label><select id="ver"></select></div>
     <div class="row"><label for="dpi">Screen density</label><select id="dpi"></select></div>
     <div class="row"><label for="lang">Language</label><select id="lang"></select></div>
     <div class="row"><label for="mode">Install</label><select id="mode">
-      <option value="side" selected>Next to Discord</option>
-      <option value="replace">Replace Discord</option>
+      <option value="replace" selected>Replace Discord</option>
+      <option value="side">Next to Discord</option>
     </select></div>
-    <div class="row" id="pkg-row"><label for="pkg">Package name</label><input type="text" id="pkg" value="com.discord.phoenix" spellcheck="false" autocapitalize="off" autocomplete="off"></div>
-    <div class="row"><label for="cpu">CPU</label><select id="cpu">
-      <option value="arm64-v8a" selected>arm64 (phones, tablets)</option>
-      <option value="x86_64">x86_64 (WSA, emulators, Intel/AMD Chromebooks)</option>
-    </select></div>
+    <div class="row" id="pkg-row" hidden><label for="pkg">Package name</label><input type="text" id="pkg" value="com.discord.phoenix" spellcheck="false" autocapitalize="off" autocomplete="off"></div>
   </section>
 
   <h2>Plugins</h2>
-  <section class="card" id="plugins"></section>
-  <section class="card" id="jsp" hidden>
+  <section class="card" id="plugins">
+    <label class="plugin"><input type="checkbox" id="runtime" checked><b>Plugin runtime</b><span>Phoenix Unlock's plugin runtime, with native hooks through ShadowHook. Pick ready-made plugins and/or add your own below; manage them in Discord Settings → Phoenix. Off: only the access patches.</span></label>
+    <label class="plugin"><input type="checkbox" id="frida-on"><b>Frida gadget (advanced)</b><span>Embeds frida-gadget (+40 MB) for Frida scripts and debugging: a floating JS panel, a console and an optional debug shell. Not needed for the plugins above.</span></label>
+  </section>
+  <section class="card" id="jsp">
     <p class="note"><b>Include</b></p>
     <div id="jsp-bundled"></div>
-    <p class="note"><b>Your plugins</b> run on the built-in runtime (<code>phoenix</code> API, plain scripts; on arm64 <code>phoenix.native.intercept</code> hooks native code through ShadowHook; types in <a href="https://github.com/mantikafasi/phoenix-unlock/blob/main/plugin/runtime/phoenix.d.ts">phoenix.d.ts</a>). The first line <code>// Name: what it does</code> names it in Settings → Phoenix. Optional: pick .js files and/or write one below.</p>
+    <p class="note"><b>Your plugins</b> run next to the ones above (the global <code>phoenix</code> API, plain scripts; types in <a href="https://github.com/mantikafasi/phoenix-unlock/blob/rust/crates/runtime/phoenix.d.ts">phoenix.d.ts</a>). Leading <code>// @description</code>, <code>// @version</code> and <code>// @author</code> lines describe it in Discord Settings → Phoenix; a file is named after itself. Optional: pick .js files and/or write one below.</p>
     <input type="file" id="jsp-files" multiple accept=".js,text/javascript">
-    <textarea id="jsp-code" rows="8" spellcheck="false" aria-label="Your plugin" placeholder="// Hello: Logs incoming messages (adb logcat -s PhoenixJS)
-phoenix.observe('MESSAGE_CREATE', (ev) => console.log(ev.data.author?.username, ':', ev.data.content));"></textarea>
+    <textarea id="jsp-code" rows="8" spellcheck="false" aria-label="Your plugin" placeholder="// @description Logs incoming messages (adb logcat -s phoenix)
+phoenix.on(phoenix.gateway.messageCreate, (m) => phoenix.log.info(m.author?.username, ':', m.content));"></textarea>
   </section>
+
   <section class="card" id="frida" hidden>
     <p class="note"><b>Frida scripts</b> run inside Discord when it starts (Frida 17 API with <code>Java</code>, plain scripts without imports). The ones you pick here are installed on first start; in the app, the floating <b>JS</b> button opens a panel to turn plugins on and off, add more from a URL, reload them, and see their console.</p>
     <input type="file" id="frida-files" multiple accept=".js,text/javascript">
@@ -105,7 +109,13 @@ phoenix.observe('MESSAGE_CREATE', (ev) => console.log(ev.data.author?.username, 
     <a class="btn" id="dl" download>Download patched APK</a>
     <p class="note"><span id="note-side">1. It installs as <b>Discord Phoenix</b>, next to your normal Discord, and you sign in once.</span><span id="note-replace" hidden>1. Uninstall Discord first if it came from the Play Store; Android won't update an app signed with a different key.</span><br>
     2. Open the downloaded file and allow your browser to install apps if asked.<br>
-    3. Later builds: just patch again. Every build is signed with the same key, so it installs as an update and you stay logged in.</p>
+    3. Later builds: just patch again. Builds are signed with Phoenix Unlock's key, rotated from the one earlier builds used, so it installs as an update over either (Android 9+) and you stay logged in.</p>
+  </section>
+
+  <h2>Contributors</h2>
+  <section class="card contributors">
+    <a href="https://github.com/mantikafasi"><img src="https://github.com/mantikafasi.png?size=96" alt="" width="48" height="48" loading="lazy">mantikafasi</a>
+    <a href="https://github.com/amaanq"><img src="https://github.com/amaanq.png?size=96" alt="" width="48" height="48" loading="lazy">Amaan Qureshi</a>
   </section>
 
   <p class="note">Unofficial and not affiliated with Discord. Source: <a href="https://github.com/mantikafasi/phoenix-unlock">github.com/mantikafasi/phoenix-unlock</a></p>

@@ -1,13 +1,14 @@
 import { PROXY as DEFAULT_PROXY, VERIFIED } from './config.js';
 import { ABIS, abiOf, buildPatchedApk } from './lib/apk.js';
 import { BOOTSTRAP_URL, bundleScripts, GADGET_URLS, gunzip } from './lib/frida.js';
-import { BUNDLED, PLUGINS } from './lib/plugins.js';
+import { keysFrom } from './lib/sign.js';
 import { readZip } from './lib/zip.js';
 
 const TRACKER = 'https://tracker.vendetta.rocks';
 const PROXY = (new URLSearchParams(location.search).get('proxy') ?? DEFAULT_PROXY).replace(/\/$/, '');
 const DENSITIES = [['ldpi', 120], ['mdpi', 160], ['hdpi', 240], ['xhdpi', 320], ['xxhdpi', 480], ['xxxhdpi', 640]];
 const LANGS = ['en', 'ar', 'bg', 'cs', 'da', 'de', 'el', 'es', 'fi', 'fr', 'hi', 'hr', 'hu', 'id', 'it', 'ja', 'ko', 'lt', 'nl', 'no', 'pl', 'pt', 'ro', 'ru', 'sv', 'th', 'tr', 'uk', 'vi', 'zh'];
+const ABI = 'arm64-v8a'; // the only ABI with a loader build (web/plugins)
 const $ = (id) => document.getElementById(id);
 
 // --- setup ------------------------------------------------------------------------------
@@ -15,10 +16,6 @@ const dpi = Math.round((window.devicePixelRatio || 1) * 160);
 const bestDensity = (DENSITIES.find(([, d]) => d >= dpi) || DENSITIES.at(-1))[0];
 $('dpi').innerHTML = DENSITIES.map(([n, d]) => `<option value="${n}" ${n === bestDensity ? 'selected' : ''}>${n} (${d})</option>`).join('');
 const myLang = (navigator.language || 'en').slice(0, 2).toLowerCase();
-// x86_64 only where the browser runs on it (WSA, emulators, x86 Chromebooks); the APK is usually for this device
-const looksX86 = (arch) => /Android|CrOS/.test(navigator.userAgent) && (arch === 'x86' || /x86|i686|Subsystem for Android/i.test(navigator.userAgent));
-if (looksX86()) $('cpu').value = 'x86_64';
-navigator.userAgentData?.getHighEntropyValues(['architecture']).then(({ architecture }) => { if (looksX86(architecture)) $('cpu').value = 'x86_64'; }).catch(() => {});
 $('lang').innerHTML = ['none', ...LANGS].map((l) => `<option ${l === (LANGS.includes(myLang) ? myLang : 'en') ? 'selected' : ''}>${l}</option>`).join('');
 
 function setVersions(latest) {
@@ -28,12 +25,13 @@ function setVersions(latest) {
 setVersions();
 fetch(`${TRACKER}/tracker/index`).then((r) => r.json()).then((j) => setVersions(j.latest?.alpha)).catch(() => {});
 
-// --- one fixed signing key for every build, so each patched APK installs as an update -----
-const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
-async function identity() {
-  const j = await (await fetch('signing-key.json')).json();
-  return { pkcs8: unb64(j.pkcs8), spki: unb64(j.spki), cert: unb64(j.cert) };
+// --- fixed keys for every build (the patcher's, see lib/sign.js), so each patched APK installs as an update ---
+async function fetchOk(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
+  return res;
 }
+const fetchBytes = async (url) => new Uint8Array(await (await fetchOk(url)).arrayBuffer());
 
 // --- progress UI -------------------------------------------------------------------------
 function step(label) {
@@ -75,20 +73,18 @@ async function download(vc, split, optional) {
 
 function splitNames() {
   const lang = $('lang').value;
-  return { abi: ABIS[$('cpu').value].split, density: `config.${$('dpi').value}`, lang: lang === 'none' ? null : `config.${lang}` };
+  return { abi: ABIS[ABI].split, density: `config.${$('dpi').value}`, lang: lang === 'none' ? null : `config.${lang}` };
 }
 
-async function patchAndOffer(vc, base, abi, configs, abiName) {
-  const plugins = [...document.querySelectorAll('#plugins input:checked')].map((i) => i.value);
-  const frida = plugins.includes('frida') ? await fridaInput(abiName) : null;
+async function patchAndOffer(vc, base, abi, configs) {
+  const plugins = await pluginInput();
+  const frida = $('frida-on').checked ? await fridaInput() : null;
   const s = step('Patch and sign');
   s.progress(0.5, 'working…');
   const packageName = chosenPackage(), side = packageName !== 'com.discord';
-  const pluginLib = plugins.length ? new Uint8Array(await (await fetch(ABIS[abiName].pluginLib)).arrayBuffer()) : null;
-  const nothingUrl = plugins.length && ABIS[abiName].shadowhookNothing;
-  const shadowhookNothing = nothingUrl ? new Uint8Array(await (await fetch(nothingUrl)).arrayBuffer()) : null;
-  const scripts = plugins.includes('jsPlugins') ? await jsInput() : [];
-  const parts = await buildPatchedApk({ base, abi, configs, identity: await identity(), packageName, label: side ? 'Discord Phoenix' : null, plugins, pluginLib, shadowhookNothing, scripts, frida, log });
+  const libraries = !plugins ? [] : await Promise.all(Object.entries(ABIS[ABI].libs).map(async ([name, url]) => ({ name, bytes: await fetchBytes(url) })));
+  const keys = keysFrom(await (await fetchOk('signing-key.json')).json());
+  const parts = await buildPatchedApk({ base, abi, configs, keys, libraries, plugins, frida, packageName, label: side ? 'Discord Phoenix' : null, log });
   const blob = new Blob(parts, { type: 'application/vnd.android.package-archive' });
   s.done(mb(blob.size));
   $('note-side').hidden = !side; $('note-replace').hidden = side;
@@ -118,51 +114,40 @@ async function downloadDensity(vc) {
   throw new Error('this build has no density split on the tracker');
 }
 
-// --- plugins ------------------------------------------------------------------------------
-for (const p of PLUGINS) {
-  const l = document.createElement('label');
-  l.className = 'plugin';
-  l.innerHTML = '<input type="checkbox"><b></b><span></span>';
-  l.querySelector('input').value = p.id;
-  l.querySelector('b').textContent = p.name;
-  l.querySelector('span').textContent = p.description;
-  $('plugins').append(l);
-}
-
-// JS plugins (rquickjs): ready-made ones (BUNDLED), picked .js files and the editor, each its own plugin
-const jsBox = document.querySelector('#plugins input[value=jsPlugins]');
-jsBox.onchange = () => { $('jsp').hidden = !jsBox.checked; };
-for (const p of BUNDLED) {
-  const l = document.createElement('label');
-  l.className = 'plugin';
-  l.innerHTML = '<input type="checkbox"><b></b><span></span>';
-  Object.assign(l.querySelector('input'), { value: p.id, checked: !!p.default });
-  l.querySelector('b').textContent = p.name;
-  l.querySelector('span').textContent = p.description;
-  $('jsp-bundled').append(l);
-}
-const pluginId = (name) => name.replace(/\.js$/i, '').replace(/[^\w-]+/g, '-').slice(0, 40) || 'plugin';
-async function jsInput() {
-  const picked = BUNDLED.filter((p) => $('jsp-bundled').querySelector(`input[value="${p.id}"]`).checked);
-  const scripts = await Promise.all(picked.map(async (p) => ({ id: p.id, source: await (await fetch(p.js)).text() })));
-  scripts.push(...await Promise.all([...$('jsp-files').files].map(async (f) => ({ id: pluginId(f.name), source: await f.text() }))));
+// --- plugin runtime: the bundled plugins (web/plugins, tools/bundle-plugins.mjs), picked .js files and the editor ---
+($('runtime').onchange = () => { $('jsp').hidden = !$('runtime').checked; })(); // browsers may restore the box on reload
+fetchOk('plugins/index.json').then((r) => r.json()).then((list) => {
+  for (const p of list) {
+    const l = document.createElement('label');
+    l.className = 'plugin';
+    l.innerHTML = '<input type="checkbox" checked><b></b><span></span>';
+    l.querySelector('input').value = p.name;
+    l.querySelector('b').textContent = p.name;
+    l.querySelector('span').textContent = p.description;
+    $('jsp-bundled').append(l);
+  }
+}).catch(fail);
+/** [{name, source}], or null with the runtime off */
+async function pluginInput() {
+  if (!$('runtime').checked) return null;
+  const picked = [...document.querySelectorAll('#jsp-bundled input:checked')].map((i) => i.value);
+  const plugins = await Promise.all(picked.map(async (name) => ({ name, source: await (await fetchOk(`plugins/${name}.js`)).text() })));
+  plugins.push(...await Promise.all([...$('jsp-files').files].map(async (f) => ({ name: f.name.replace(/\.[^.]*$/, ''), source: await f.text() }))));
   const code = $('jsp-code').value.trim();
-  if (code) scripts.push({ id: 'my-plugin', source: code });
-  if (scripts.length) log(`JS plugins: ${scripts.map((x) => x.id).join(', ')}`);
-  return scripts;
+  if (code) plugins.push({ name: 'my-plugin', source: code });
+  return plugins;
 }
 
 // Frida: Frida scripts from picked files and the editor (prefilled with the example), bundled into one script
-const fridaBox = document.querySelector('#plugins input[value=frida]');
-fridaBox.onchange = () => { $('frida').hidden = !fridaBox.checked; };
+($('frida-on').onchange = () => { $('frida').hidden = !$('frida-on').checked; })();
 fetch('plugins/frida-example.js').then((r) => r.text()).then((t) => { if (!$('frida-code').value) $('frida-code').value = t; }).catch(() => {});
-async function fridaInput(abiName) {
+async function fridaInput() {
   const scripts = await Promise.all([...$('frida-files').files].map(async (f) => ({ name: f.name, code: await f.text() })));
   const code = $('frida-code').value.trim();
   if (code) scripts.push({ name: 'editor.js', code });
-  const script = bundleScripts(scripts, await (await fetch(BOOTSTRAP_URL)).text());
+  const script = bundleScripts(scripts, await (await fetchOk(BOOTSTRAP_URL)).text());
   const s = step('Download frida-gadget');
-  const res = await fetch(GADGET_URLS[abiName]);
+  const res = await fetch(GADGET_URLS[ABI]);
   if (!res.ok) { s.fail(`HTTP ${res.status}`); throw new Error(`frida-gadget: HTTP ${res.status}`); }
   const gadget = await gunzip(new Uint8Array(await res.arrayBuffer()));
   s.done(mb(gadget.length));
@@ -197,7 +182,7 @@ $('go').onclick = async () => {
     const base = await download(vc, 'base');
     const abi = await download(vc, n.abi);
     const configs = [await downloadDensity(vc), n.lang && (await download(vc, n.lang, true))].filter(Boolean);
-    await patchAndOffer(vc, base, abi, configs, $('cpu').value);
+    await patchAndOffer(vc, base, abi, configs);
     $('go').disabled = false;
   } catch (e) {
     if (e instanceof TypeError) { log(`download blocked (${e.message}); switching to manual mode`); return showManual(vc); }
@@ -218,12 +203,12 @@ function showManual(vc) {
         const u8 = new Uint8Array(await f.arrayBuffer());
         const entries = readZip(u8), names = entries.map((e) => e.name), abi = abiOf(entries);
         if (names.includes('classes.dex')) found.base = u8;
-        else if (abi) { found.abi = u8; found.abiName = abi; }
+        else if (abi) found.abi = u8;
         else if (names.includes('resources.arsc')) found.configs.push(u8);
         log(`${f.name}: ${names.includes('classes.dex') ? 'base' : abi ? `native libs (${abi})` : names.some((x) => x.startsWith('lib/')) ? 'native libs (unsupported CPU, ignored)' : 'config split'}`);
       }
-      if (!found.base || !found.abi) throw new Error('need at least base and config.arm64_v8a or config.x86_64');
-      await patchAndOffer(vc, found.base, found.abi, found.configs, found.abiName);
+      if (!found.base || !found.abi) throw new Error('need at least base and config.arm64_v8a');
+      await patchAndOffer(vc, found.base, found.abi, found.configs);
       $('go').disabled = false;
     } catch (e) { fail(e); }
   };

@@ -1,4 +1,0 @@
-package de.robv.android.xposed;
-public class XposedHelpers {
-    public static XC_MethodHook.Unhook findAndHookMethod(String className, ClassLoader cl, String methodName, Object... parameterTypesAndCallback) { return null; }
-}
