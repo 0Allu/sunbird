@@ -1,5 +1,7 @@
 {
   "name": "plumage-plugin-example",
+  "description": "Rewrites incoming messages to show off plugin settings",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
