@@ -13,6 +13,7 @@
 
 use std::{
    collections::BTreeMap,
+   str::FromStr,
    sync::{
       Mutex,
       PoisonError,
@@ -325,11 +326,44 @@ fn fail_self_update(message: &str) {
    let _ = crate::picker::toast(message);
 }
 
+/// A state `phx.Updater` reports through `onUpdateStatus`.
+#[derive(Clone, Copy, Debug)]
+pub enum UpdaterState {
+   Repacking,
+   Installing,
+   Done,
+   Permission,
+   Fallback,
+   Cancelled,
+   Error,
+}
+
+#[derive(Debug, flub::Error)]
+#[error("phx.Updater reported an unknown state {0:?}")]
+pub struct UnknownUpdaterState(String);
+
+impl FromStr for UpdaterState {
+   type Err = UnknownUpdaterState;
+
+   fn from_str(state: &str) -> Result<Self, Self::Err> {
+      Ok(match state {
+         "repacking" => Self::Repacking,
+         "installing" => Self::Installing,
+         "done" => Self::Done,
+         "permission" => Self::Permission,
+         "fallback" => Self::Fallback,
+         "cancelled" => Self::Cancelled,
+         "error" => Self::Error,
+         _ => return Err(UnknownUpdaterState(state.to_owned())),
+      })
+   }
+}
+
 /// Callback invoked from `phx.Updater.onUpdateStatus(state, message)`.
-pub fn on_native_status(state: &str, message: &str) {
-   log::info!("self-update [{state}]: {message}");
+pub fn on_native_status(state: UpdaterState, message: &str) {
+   log::info!("self-update [{state:?}]: {message}");
    match state {
-      "done" => {
+      UpdaterState::Done => {
          *FOUND.lock().unwrap_or_else(PoisonError::into_inner) = None;
          set_status(None);
          BUSY.store(false, Ordering::Release);
@@ -342,13 +376,14 @@ pub fn on_native_status(state: &str, message: &str) {
             crate::patches::banners::BannerAction::None,
          );
       },
-      "permission" | "fallback" | "cancelled" | "error" => {
+      UpdaterState::Permission
+      | UpdaterState::Fallback
+      | UpdaterState::Cancelled
+      | UpdaterState::Error => {
          set_status(Some(message.to_owned()));
          BUSY.store(false, Ordering::Release);
          let _ = crate::picker::toast(message);
       },
-      _ => {
-         set_status(Some(message.to_owned()));
-      },
+      UpdaterState::Repacking | UpdaterState::Installing => set_status(Some(message.to_owned())),
    }
 }

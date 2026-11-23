@@ -620,5 +620,8 @@ unsafe extern "system" fn on_update_status(
          jvm::read_string(env, message).unwrap_or_default(),
       )
    };
-   crate::update::on_native_status(&state, &message);
+   match state.parse() {
+      Ok(known) => crate::update::on_native_status(known, &message),
+      Err(err) => log::warn!("self-update: {err}"),
+   }
 }
