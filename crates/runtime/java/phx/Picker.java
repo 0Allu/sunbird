@@ -26,7 +26,7 @@ import java.lang.reflect.Field;
 /**
  * Opens Android's document picker from a headless fragment and hands the chosen file's text to
  * native code (crates/runtime/src/picker.rs loads this class from an in-memory dex and registers
- * onPicked). Build: crates/runtime/java/build.sh.
+ * onPicked). crates/runtime/build.rs compiles it.
  */
 public final class Picker extends Fragment {
     private static final int REQ = 0x5048;

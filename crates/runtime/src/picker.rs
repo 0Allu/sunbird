@@ -1,6 +1,7 @@
-//! Android's document picker and opening links, through `phx.Picker` (`java/phx/Picker.java`),
-//! loaded from an in-memory dex under Phoenix's class loader. The chosen file
-//! arrives on a Java thread and goes to [`crate::settings::picked`].
+//! Android's document picker and opening links, through `phx.Picker`
+//! (`java/phx/Picker.java`), loaded from an in-memory dex under Phoenix's class
+//! loader. The chosen file arrives on a Java thread and goes to
+//! [`crate::settings::picked`].
 
 use std::{
    collections::HashMap,
@@ -43,7 +44,7 @@ use crate::{
    },
 };
 
-const DEX: &[u8] = include_bytes!("../java/picker.dex");
+const DEX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/picker.dex"));
 /// Any type: pickers often file `.js` under an unexpected MIME type.
 const MIME: &core::ffi::CStr = c"*/*";
 
@@ -60,7 +61,11 @@ static CHOICES: Mutex<Option<HashMap<i32, Sender<i32>>>> = Mutex::new(None);
 /// Shows a dialog over Phoenix's activity and waits for it: a list of
 /// `options` without `message`, or `message` with up to three buttons.
 /// Returns the chosen option's index, or -1 when it was dismissed.
-pub fn choose(title: Option<&str>, message: Option<&str>, options: &[String]) -> Result<i32, String> {
+pub fn choose(
+   title: Option<&str>,
+   message: Option<&str>,
+   options: &[String],
+) -> Result<i32, String> {
    static NEXT: AtomicI32 = AtomicI32::new(1);
    let id = NEXT.fetch_add(1, Ordering::Relaxed);
    let (sender, receiver) = mpsc::channel();
@@ -82,7 +87,13 @@ pub fn choose(title: Option<&str>, message: Option<&str>, options: &[String]) ->
          );
          for (index, option) in options.iter().enumerate() {
             let option = jstring_of(env, option);
-            jni!(env, SetObjectArrayElement, array, jni_sys::jsize::try_from(index).unwrap_or_default(), option);
+            jni!(
+               env,
+               SetObjectArrayElement,
+               array,
+               jni_sys::jsize::try_from(index).unwrap_or_default(),
+               option
+            );
          }
          (
             c"(Ljava/lang/Object;ILjava/lang/String;Ljava/lang/String;[Ljava/lang/String;)V",
@@ -103,7 +114,11 @@ pub fn choose(title: Option<&str>, message: Option<&str>, options: &[String]) ->
       }
    });
    let forget = || {
-      if let Some(choices) = CHOICES.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
+      if let Some(choices) = CHOICES
+         .lock()
+         .unwrap_or_else(PoisonError::into_inner)
+         .as_mut()
+      {
          choices.remove(&id);
       }
    };
@@ -238,13 +253,25 @@ fn call_static(
       let result = (|| {
          let class = class(env)?;
          let (signature, args) = args(env);
-         let method = jni!(env, GetStaticMethodID, class, name.as_ptr(), signature.as_ptr());
+         let method = jni!(
+            env,
+            GetStaticMethodID,
+            class,
+            name.as_ptr(),
+            signature.as_ptr()
+         );
          if method.is_null() {
-            return Err(failure(env, &format!("phx.Picker.{} is missing", name.to_string_lossy())));
+            return Err(failure(
+               env,
+               &format!("phx.Picker.{} is missing", name.to_string_lossy()),
+            ));
          }
          jni!(env, CallStaticVoidMethodA, class, method, args.as_ptr());
          if jni!(env, ExceptionCheck) {
-            return Err(failure(env, &format!("phx.Picker.{} threw", name.to_string_lossy())));
+            return Err(failure(
+               env,
+               &format!("phx.Picker.{} threw", name.to_string_lossy()),
+            ));
          }
          Ok(())
       })();
@@ -443,7 +470,11 @@ unsafe fn class(env: *mut JNIEnv) -> Result<jclass, String> {
          DEX.as_ptr().cast_mut().cast::<c_void>(),
          DEX.len() as jlong,
       );
-      let loader_class = jni!(env, FindClass, c"dalvik/system/InMemoryDexClassLoader".as_ptr());
+      let loader_class = jni!(
+         env,
+         FindClass,
+         c"dalvik/system/InMemoryDexClassLoader".as_ptr()
+      );
       let init = jvm::method(
          env,
          loader_class,
@@ -463,14 +494,22 @@ unsafe fn class(env: *mut JNIEnv) -> Result<jclass, String> {
          c"(Ljava/lang/String;)Ljava/lang/Class;",
       );
       let name = jni!(env, NewStringUTF, c"phx.Picker".as_ptr());
-      let class = jni!(env, CallObjectMethodA, loader, load, [jvalue { l: name }].as_ptr());
+      let class = jni!(
+         env,
+         CallObjectMethodA,
+         loader,
+         load,
+         [jvalue { l: name }].as_ptr()
+      );
       if class.is_null() || jni!(env, ExceptionCheck) {
          return Err(failure(env, "phx.Picker is not in the dex"));
       }
       let natives = [
          JNINativeMethod {
             name:      c"onPicked".as_ptr().cast_mut(),
-            signature: c"(ILjava/lang/String;[BLjava/lang/String;)V".as_ptr().cast_mut(),
+            signature: c"(ILjava/lang/String;[BLjava/lang/String;)V"
+               .as_ptr()
+               .cast_mut(),
             fnPtr:     on_picked as *mut c_void,
          },
          JNINativeMethod {
@@ -513,7 +552,8 @@ unsafe fn class(env: *mut JNIEnv) -> Result<jclass, String> {
 /// The pending exception's text, or `what` when there is none.
 unsafe fn failure(env: *mut JNIEnv, what: &str) -> String {
    // SAFETY: forwarded from the caller.
-   unsafe { jvm::take_exception(env) }.map_or_else(|| what.to_owned(), |thrown| format!("{what}: {thrown}"))
+   unsafe { jvm::take_exception(env) }
+      .map_or_else(|| what.to_owned(), |thrown| format!("{what}: {thrown}"))
 }
 
 unsafe extern "system" fn on_picked(
@@ -528,7 +568,9 @@ unsafe extern "system" fn on_picked(
    let picked = unsafe {
       match jvm::read_string(env, error) {
          Some(error) => Err(error),
-         None => Ok(jvm::read_string(env, name).map(|name| (name, jvm::read_bytes(env, data, None)))),
+         None => {
+            Ok(jvm::read_string(env, name).map(|name| (name, jvm::read_bytes(env, data, None))))
+         },
       }
    };
    crate::settings::picked(picked);

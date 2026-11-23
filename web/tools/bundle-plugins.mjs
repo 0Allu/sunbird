@@ -4,8 +4,8 @@
 // The bundles are not committed: run this before web/tools/dev-server.mjs or node-build.mjs; CI runs it for the site.
 // It also writes web/version.json, what the site ships, for the runtime's update check (crates/runtime/src/update.rs):
 // the loader's baked version and each plugin bundle's CRC-32.
-// The native artifacts next to them are copied from a loader build (target/aarch64-linux-android/release):
-//   libphoenix.so -> libphoenix-arm64.so, build/phoenix-hook/*/out/libshadowhook_nothing.so -> libshadowhook_nothing-arm64.so
+// The native artifacts next to them come from `nu scripts/loader.nu web/plugins`, which CI also runs:
+//   libphoenix-arm64.so and libshadowhook_nothing-arm64.so.
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
