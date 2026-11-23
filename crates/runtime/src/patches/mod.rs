@@ -420,7 +420,9 @@ pub struct MountNode {
 /// What happens when the user taps an in-app notification banner.
 pub enum BannerAction {
    None,
+   #[allow(dead_code)]
    OpenUrl(String),
+   ApplyUpdate,
    JsCallback,
 }
 
@@ -1028,6 +1030,9 @@ fn run(job: Job) -> Vec<Op> {
                if let Err(err) = crate::picker::open(&url) {
                   log::error!("banner open {url}: {err}");
                }
+            },
+            BannerAction::ApplyUpdate => {
+               crate::update::apply();
             },
             BannerAction::JsCallback => {
                if let Some(engine) = crate::engine() {

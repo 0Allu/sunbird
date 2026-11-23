@@ -370,6 +370,32 @@ fn dispatch(
             .unwrap_or(6);
          ok_json(&crate::patches::dump_tree(Some(id), depth))
       },
+      ("GET", "/update") => {
+         let found = crate::update::found().map(|u| {
+            serde_json::json!({
+               "loader": u.loader,
+               "plugins": u.plugins,
+            })
+         });
+         ok_json(&serde_json::json!({
+            "version": crate::update::VERSION,
+            "busy": crate::update::busy(),
+            "status": crate::update::status(),
+            "found": found,
+         }))
+      },
+      ("POST", "/update/check") => {
+         crate::update::check();
+         ok_json(&serde_json::json!({ "started": true }))
+      },
+      ("POST", "/update/apply") => {
+         crate::update::apply();
+         ok_json(&serde_json::json!({ "started": true }))
+      },
+      ("POST", "/update/self") => {
+         crate::update::self_update_from_site();
+         ok_json(&serde_json::json!({ "started": true }))
+      },
       ("POST", "/debug/staff") => {
          let text = String::from_utf8_lossy(body);
          let on = matches!(text.trim(), "1" | "true" | "on");
