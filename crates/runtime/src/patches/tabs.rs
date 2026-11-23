@@ -474,7 +474,7 @@ fn rich(text: &str, color: i64) -> Draft {
       ],
       kids,
    );
-   flow.kind = ViewKind::Other("flow".to_owned());
+   flow.kind = ViewKind::Flow;
    flow
 }
 

@@ -107,7 +107,7 @@ impl Mirror {
       if let Some(Value::Str(aid)) = get_prop(props, Prop::ACCESSIBILITY_ID) {
          self.name(id, aid);
       }
-      if kind.as_str() == "sheet" {
+      if *kind == ViewKind::Sheet {
          self.sheets.insert(id);
       }
       if *kind == ViewKind::Navigator && !self.navigators.contains(&id) {
@@ -484,7 +484,7 @@ mod tests {
             },
             Op::Create {
                id:    20,
-               kind:  ViewKind::Other("sheet".to_owned()),
+               kind:  ViewKind::Sheet,
                props: vec![],
             },
             Op::Create {
@@ -497,7 +497,7 @@ mod tests {
             },
             Op::Create {
                id:    30,
-               kind:  ViewKind::Other("list".to_owned()),
+               kind:  ViewKind::List,
                props: vec![
                   (prop!("first"), Value::I32(5)),
                   (

@@ -163,50 +163,68 @@ impl fmt::Display for Prop {
 
 pub type Props = Vec<(Prop, Value)>;
 
-/// The element type a `Create` names. Phoenix keeps no list of them, so names
-/// outside the ones seen in captured batches pass through as `Other`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ViewKind {
-   View,
-   Text,
-   Image,
-   Input,
-   Scroll,
-   Stack,
-   Navigator,
-   Other(String),
+macro_rules! view_kinds {
+   ($($variant:ident = $name:literal,)*) => {
+      /// The element type a `Create` names: the host's view kinds as of
+      /// versionCode 356207. Names a later build adds pass through as `Other`.
+      #[derive(Clone, Debug, PartialEq, Eq)]
+      #[non_exhaustive]
+      pub enum ViewKind {
+         $($variant,)*
+         Other(String),
+      }
+
+      impl ViewKind {
+         #[must_use]
+         pub fn as_str(&self) -> &str {
+            match self {
+               $(Self::$variant => $name,)*
+               Self::Other(name) => name,
+            }
+         }
+      }
+
+      impl From<String> for ViewKind {
+         fn from(name: String) -> Self {
+            match name.as_str() {
+               $($name => Self::$variant,)*
+               _ => Self::Other(name),
+            }
+         }
+      }
+   };
 }
 
-impl ViewKind {
-   #[must_use]
-   pub fn as_str(&self) -> &str {
-      match self {
-         Self::View => "view",
-         Self::Text => "text",
-         Self::Image => "image",
-         Self::Input => "input",
-         Self::Scroll => "scroll",
-         Self::Stack => "stack",
-         Self::Navigator => "navigator",
-         Self::Other(name) => name,
-      }
-   }
-}
-
-impl From<String> for ViewKind {
-   fn from(name: String) -> Self {
-      match name.as_str() {
-         "view" => Self::View,
-         "text" => Self::Text,
-         "image" => Self::Image,
-         "input" => Self::Input,
-         "scroll" => Self::Scroll,
-         "stack" => Self::Stack,
-         "navigator" => Self::Navigator,
-         _ => Self::Other(name),
-      }
-   }
+view_kinds! {
+   SwipeFill = "swipeFill",
+   Canvas = "canvas",
+   View = "view",
+   Text = "text",
+   Stack = "stack",
+   Image = "image",
+   List = "list",
+   Scroll = "scroll",
+   HScroll = "hscroll",
+   Flow = "flow",
+   Navigator = "navigator",
+   Input = "input",
+   Sheet = "sheet",
+   Modal = "modal",
+   Banner = "banner",
+   Popover = "popover",
+   SystemOverlay = "systemOverlay",
+   Player = "player",
+   Lottie = "lottie",
+   Rive = "rive",
+   Video = "video",
+   WebFrame = "webframe",
+   Zoom = "zoom",
+   Ring = "ring",
+   Spinner = "spinner",
+   DatePicker = "datePicker",
+   Markup = "markup",
+   Slider = "slider",
+   VectorAnim = "vector_anim",
 }
 
 /// Serializes for the debug shell, with motion words as their count.

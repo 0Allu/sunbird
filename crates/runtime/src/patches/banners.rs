@@ -313,7 +313,7 @@ fn banner_view(
    };
 
    Draft {
-      kind:  ViewKind::Other("banner".to_owned()),
+      kind:  ViewKind::Banner,
       props: vec![
          (prop!("edge"), Value::Str("top".to_owned())),
          (prop!("passthrough"), Value::Bool(false)),

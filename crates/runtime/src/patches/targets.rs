@@ -426,7 +426,7 @@ impl Templates {
             press: None,
             src:   None,
          };
-         if kind.as_str() == "sheet" {
+         if *kind == ViewKind::Sheet {
             draft.press = Some(dismiss.clone());
          }
          node = Some(draft);
