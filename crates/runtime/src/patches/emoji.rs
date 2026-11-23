@@ -53,7 +53,7 @@ impl Patches {
 /// 0xFF means usable and 2 premium locked. Found by its start, which reads the
 /// context's intention and answers 3 for profiles.
 #[cfg(target_arch = "aarch64")]
-const UNAVAILABLE_REASON: phoenix_hook::Pattern = phoenix_hook::Pattern::ida(
+const UNAVAILABLE_REASON: phoenix_hook::Pattern = phoenix_hook::Pattern::new(
    "28 90 40 39 09 01 1F 32 3F 39 00 71 ?? ?? ?? 54 68 00 80 52 E0 03 08 2A C0 03 5F D6",
 );
 /// `EmojiContext.intention`, and its value for the message box (`CHAT`).

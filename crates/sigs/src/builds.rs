@@ -17,7 +17,7 @@ macro_rules! gateway {
       Gateway {
          sig: Sig::new($event, &[
             Anchor::Code {
-               pattern: Pattern::ida($pattern),
+               pattern: Pattern::new($pattern),
                offset:  0,
             },
             Anchor::Table {

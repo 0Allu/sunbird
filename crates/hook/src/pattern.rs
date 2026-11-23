@@ -2,7 +2,7 @@ use std::fmt;
 
 use memchr::memmem;
 
-/// An IDA-style byte signature such as `"48 8B ?? ?? 89"`. `??` and `?` match
+/// A byte-pattern signature such as `"48 8B ?? ?? 89"`. `??` and `?` match
 /// any byte.
 ///
 /// Patterns are checked when the constant is evaluated, so a typo fails the
@@ -21,7 +21,7 @@ const fn hex_digit(byte: u8) -> Option<u8> {
 
 impl Pattern {
    #[must_use]
-   pub const fn ida(source: &'static str) -> Self {
+   pub const fn new(source: &'static str) -> Self {
       let bytes = source.as_bytes();
       let mut index = 0;
       let mut literals = 0;
@@ -40,11 +40,11 @@ impl Pattern {
             2 if hex_digit(bytes[index]).is_some() && hex_digit(bytes[index + 1]).is_some() => {
                literals += 1;
             },
-            _ => panic!("IDA pattern tokens are two hex digits, `?` or `??`"),
+            _ => panic!("pattern tokens are two hex digits, `?` or `??`"),
          }
          index = end;
       }
-      assert!(literals > 0, "IDA pattern needs at least one literal byte");
+      assert!(literals > 0, "a pattern needs at least one literal byte");
       Self(source)
    }
 
