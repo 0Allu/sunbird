@@ -222,12 +222,37 @@ fn read_request(stream: &TcpStream) -> std::io::Result<(String, String, String, 
    Ok((method, path, query, body))
 }
 
-fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
-   query
+/// The percent-decoded value of `key`, as `encodeURIComponent` or a form wrote
+/// it. A `%` not followed by two hex digits stays as it is.
+fn query_param(query: &str, key: &str) -> Option<String> {
+   let (_, raw) = query
       .split('&')
       .filter_map(|pair| pair.split_once('='))
-      .find(|(k, _)| *k == key)
-      .map(|(_, v)| v)
+      .find(|(name, _)| *name == key)?;
+   let bytes = raw.as_bytes();
+   let mut out = Vec::with_capacity(bytes.len());
+   let mut at = 0;
+   while let Some(&byte) = bytes.get(at) {
+      let escaped = bytes
+         .get(at + 1..at + 3)
+         .filter(|hex| hex.iter().all(u8::is_ascii_hexdigit))
+         .and_then(|hex| u8::from_str_radix(str::from_utf8(hex).ok()?, 16).ok());
+      match (byte, escaped) {
+         (b'%', Some(decoded)) => {
+            out.push(decoded);
+            at += 3;
+         },
+         (b'+', _) => {
+            out.push(b' ');
+            at += 1;
+         },
+         _ => {
+            out.push(byte);
+            at += 1;
+         },
+      }
+   }
+   Some(String::from_utf8_lossy(&out).into_owned())
 }
 
 fn dispatch(
@@ -395,7 +420,11 @@ fn recent(
          .unwrap_or_else(PoisonError::into_inner)
          .iter()
          .rev()
-         .filter(|entry| filter.is_none_or(|needle| entry.get().contains(needle)))
+         .filter(|entry| {
+            filter
+               .as_ref()
+               .is_none_or(|needle| entry.get().contains(needle.as_str()))
+         })
          .take(limit)
          .collect::<Vec<_>>(),
    )
