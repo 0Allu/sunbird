@@ -71,7 +71,7 @@ pub enum Settlement {
    Discord(Result<fetch::Response, discord::DiscordError>),
    Text(Result<String, discord::DiscordError>),
    Int(Result<i32, String>),
-   Rows(Result<Vec<serde_json::Map<String, serde_json::Value>>, store::StoreError>),
+   Rows(Result<store::Rows, store::StoreError>),
 }
 
 /// Runs `work` on its own thread and returns a promise it settles. The

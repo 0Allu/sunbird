@@ -13,6 +13,7 @@ use phoenix_wire::{
    Key,
    Value,
 };
+use serde::Deserialize;
 
 use crate::{
    bridge,
@@ -335,6 +336,35 @@ fn view_event(
    Vec::new()
 }
 
+/// A snowflake, which Phoenix's cache keeps as a string or a number.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Snowflake {
+   Text(String),
+   Number(u64),
+}
+
+impl From<Snowflake> for String {
+   fn from(id: Snowflake) -> Self {
+      match id {
+         Snowflake::Text(text) => text,
+         Snowflake::Number(number) => number.to_string(),
+      }
+   }
+}
+
+/// The `me` row of Phoenix's `meta` table.
+#[derive(Deserialize)]
+struct Me {
+   id: Snowflake,
+}
+
+/// The `selected` row of Phoenix's `meta` table.
+#[derive(Deserialize)]
+struct Selected {
+   channel_id: Snowflake,
+}
+
 /// `ctx` for a press: the open channel, and the message when there is one.
 /// It reads Phoenix's cache, so it runs on the worker.
 pub fn press_context(place: &Place) -> UiContext {
@@ -347,29 +377,14 @@ pub fn press_context(place: &Place) -> UiContext {
          .inspect_err(|err| log::warn!("patches: {sql}: {err}"))
          .ok()
    };
-   // Phoenix keeps its JSON values as BLOBs, which come back as byte arrays.
-   let value = |rows: &[serde_json::Map<String, serde_json::Value>], key: &str| {
-      match rows.first()?.get(key)? {
-         serde_json::Value::String(text) => Some(text.clone()),
-         serde_json::Value::Array(bytes) => {
-            let bytes = bytes
-               .iter()
-               .map(|byte| u8::try_from(byte.as_u64()?).ok())
-               .collect::<Option<Vec<u8>>>()?;
-            String::from_utf8(bytes).ok()
-         },
-         _ => None,
-      }
-   };
-
    let message = |id: &str| {
       let found = rows("SELECT k, v FROM messages WHERE k LIKE ? LIMIT 1", &[
          format!("%:{id:0>20}"),
-      ])
-      .unwrap_or_default();
-      let channel = value(&found, "k")
-         .and_then(|key| Some(key.split(':').next()?.trim_start_matches('0').to_owned()));
-      (channel, value(&found, "v"))
+      ]);
+      let text = |column| found.as_ref()?.first(column)?.text();
+      let channel =
+         text("k").and_then(|key| Some(key.split(':').next()?.trim_start_matches('0').to_owned()));
+      (channel, text("v").map(str::to_owned))
    };
 
    let mut context = UiContext::default();
@@ -380,28 +395,14 @@ pub fn press_context(place: &Place) -> UiContext {
    if let Place::User(id) = place {
       context.user_id.clone_from(id);
    }
-   let me = rows("SELECT v FROM meta WHERE k = ?", &["me".to_owned()]).unwrap_or_default();
-   context.current_user_id = value(&me, "v")
-      .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
-      .and_then(|user| {
-         match user.get("id")? {
-            serde_json::Value::String(id) => Some(id.clone()),
-            serde_json::Value::Number(id) => Some(id.to_string()),
-            _ => None,
-         }
-      });
+   let meta = |key: &str| rows("SELECT v FROM meta WHERE k = ?", &[key.to_owned()]);
+   context.current_user_id = meta("me")
+      .and_then(|me| serde_json::from_str::<Me>(me.first("v")?.text()?).ok())
+      .map(|me| me.id.into());
    if context.channel_id.is_none() {
-      let selected =
-         rows("SELECT v FROM meta WHERE k = ?", &["selected".to_owned()]).unwrap_or_default();
-      context.channel_id = value(&selected, "v")
-         .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
-         .and_then(|selected| {
-            match selected.get("channel_id")? {
-               serde_json::Value::String(id) => Some(id.clone()),
-               serde_json::Value::Number(id) => Some(id.to_string()),
-               _ => None,
-            }
-         });
+      context.channel_id = meta("selected")
+         .and_then(|selected| serde_json::from_str::<Selected>(selected.first("v")?.text()?).ok())
+         .map(|selected| selected.channel_id.into());
    }
    if context.channel_id.is_none() {
       let newest = patches().newest_message();

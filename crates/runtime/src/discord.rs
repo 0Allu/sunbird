@@ -43,6 +43,7 @@ use phoenix_wire::{
    decode_dispatch,
    edit_frames,
 };
+use serde::Deserialize;
 
 use crate::{
    bridge::{
@@ -682,6 +683,12 @@ pub fn authorize(request: &Authorization) -> Result<String, DiscordError> {
    location.map_err(|_| DiscordError::NotAuthorized)
 }
 
+/// Discord's answer to an authorize request.
+#[derive(Deserialize)]
+struct Authorized {
+   location: String,
+}
+
 /// Rewrites the reply to Phoenix's own authorize request while a plugin waits
 /// for it. Returns the replacement frame.
 fn authorized(id: i32, frame: &[u8], body: &[u8]) -> Option<Vec<u8>> {
@@ -691,9 +698,8 @@ fn authorized(id: i32, frame: &[u8], body: &[u8]) -> Option<Vec<u8>> {
    }
    let current = authorizing.take()?;
    drop(authorizing);
-   let json = serde_json::from_slice::<serde_json::Value>(body).ok()?;
-   let location = json.get("location")?.as_str()?.to_owned();
-   let _ = current.waiter.send(location);
+   let reply = serde_json::from_slice::<Authorized>(body).ok()?;
+   let _ = current.waiter.send(reply.location);
    let head = &frame[..frame.len() - body.len()];
    let mut out = head.to_vec();
    out.extend_from_slice(br#"{"location":"https://discord.com/oauth2/authorized"}"#);

@@ -18,9 +18,13 @@ use jni_sys::{
    jobject,
    jvalue,
 };
-use serde_json::{
-   Map,
-   Value,
+use serde::{
+   Serialize,
+   Serializer,
+   ser::{
+      SerializeMap,
+      SerializeSeq,
+   },
 };
 
 use crate::jvm::{
@@ -42,6 +46,67 @@ const FIELD_INTEGER: jint = 1;
 const FIELD_FLOAT: jint = 2;
 const FIELD_STRING: jint = 3;
 const FIELD_BLOB: jint = 4;
+
+/// One column of one row, by its `Cursor.getType`.
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum Cell {
+   Null,
+   Integer(i64),
+   Float(f64),
+   Text(String),
+   Blob(Vec<u8>),
+}
+
+impl Cell {
+   /// The text of a string column, or of a BLOB holding UTF-8, which is how
+   /// Phoenix stores its JSON values.
+   #[must_use]
+   pub fn text(&self) -> Option<&str> {
+      match self {
+         Self::Text(text) => Some(text),
+         Self::Blob(bytes) => str::from_utf8(bytes).ok(),
+         Self::Null | Self::Integer(_) | Self::Float(_) => None,
+      }
+   }
+}
+
+/// A query result. Serializes as an array of objects keyed by column name.
+pub struct Rows {
+   columns: Vec<String>,
+   rows:    Vec<Vec<Cell>>,
+}
+
+impl Rows {
+   /// The `column` of the first row.
+   #[must_use]
+   pub fn first(&self, column: &str) -> Option<&Cell> {
+      let at = self.columns.iter().position(|name| name == column)?;
+      self.rows.first()?.get(at)
+   }
+}
+
+impl Serialize for Rows {
+   fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+      struct Row<'a>(&'a [String], &'a [Cell]);
+
+      impl Serialize for Row<'_> {
+         fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut map = serializer.serialize_map(Some(self.0.len()))?;
+            for (name, cell) in self.0.iter().zip(self.1) {
+               map.serialize_entry(name, cell)?;
+            }
+            map.end()
+         }
+      }
+
+      let mut seq = serializer.serialize_seq(Some(self.rows.len()))?;
+      for row in &self.rows {
+         seq.serialize_element(&Row(&self.columns, row))?;
+      }
+      seq.end()
+   }
+}
 
 #[derive(Debug, flub::Error)]
 pub enum StoreError {
@@ -69,13 +134,8 @@ pub fn database(files: &Path) -> Result<PathBuf, StoreError> {
       .ok_or(StoreError::Missing { dir })
 }
 
-/// Runs `sql` with `args` bound to its `?`s and returns each row as an object
-/// keyed by column name.
-pub fn query(
-   database: &Path,
-   sql: &str,
-   args: &[String],
-) -> Result<Vec<Map<String, Value>>, StoreError> {
+/// Runs `sql` with `args` bound to its `?`s.
+pub fn query(database: &Path, sql: &str, args: &[String]) -> Result<Rows, StoreError> {
    let env = env().ok_or(StoreError::NoVm)?;
    // SAFETY: `env` belongs to this thread, and every call below passes
    // references made on it with the argument types its signature names.
@@ -97,7 +157,7 @@ unsafe fn run(
    database: &Path,
    sql: &str,
    args: &[String],
-) -> Result<Vec<Map<String, Value>>, StoreError> {
+) -> Result<Rows, StoreError> {
    // SAFETY: forwarded from the caller.
    unsafe {
       let string = |text: &str| -> Result<jobject, StoreError> {
@@ -172,7 +232,7 @@ unsafe fn run(
 ///
 /// `env` is the current thread's `JNIEnv` inside a local frame, and `cursor` a
 /// live `Cursor`, closed here.
-unsafe fn rows(env: *mut JNIEnv, cursor: jobject) -> Result<Vec<Map<String, Value>>, StoreError> {
+unsafe fn rows(env: *mut JNIEnv, cursor: jobject) -> Result<Rows, StoreError> {
    // SAFETY: forwarded from the caller. Each column value is a local ref
    // deleted after it is read, so a long result does not fill the frame.
    unsafe {
@@ -187,8 +247,8 @@ unsafe fn rows(env: *mut JNIEnv, cursor: jobject) -> Result<Vec<Map<String, Valu
       let get_blob = method(env, class, c"getBlob", c"(I)[B");
       let close = method(env, class, c"close", c"()V");
 
-      let columns = jni!(env, CallIntMethodA, cursor, column_count, ptr::null());
-      let names = (0..columns)
+      let count = jni!(env, CallIntMethodA, cursor, column_count, ptr::null());
+      let columns = (0..count)
          .map(|column| {
             let name = jni!(
                env,
@@ -203,17 +263,18 @@ unsafe fn rows(env: *mut JNIEnv, cursor: jobject) -> Result<Vec<Map<String, Valu
          })
          .collect::<Vec<String>>();
 
-      let mut out = Vec::new();
-      while out.len() < ROW_LIMIT && jni!(env, CallBooleanMethodA, cursor, move_next, ptr::null()) {
-         let mut row = Map::new();
-         for (column, name) in (0..).zip(&names) {
+      let mut rows = Vec::new();
+      while rows.len() < ROW_LIMIT && jni!(env, CallBooleanMethodA, cursor, move_next, ptr::null())
+      {
+         let mut row = Vec::with_capacity(columns.len());
+         for column in 0..count {
             let arg = [jvalue { i: column }];
-            let value = match jni!(env, CallIntMethodA, cursor, kind, arg.as_ptr()) {
+            let cell = match jni!(env, CallIntMethodA, cursor, kind, arg.as_ptr()) {
                FIELD_INTEGER => {
-                  Value::from(jni!(env, CallLongMethodA, cursor, get_long, arg.as_ptr()))
+                  Cell::Integer(jni!(env, CallLongMethodA, cursor, get_long, arg.as_ptr()))
                },
                FIELD_FLOAT => {
-                  Value::from(jni!(
+                  Cell::Float(jni!(
                      env,
                      CallDoubleMethodA,
                      cursor,
@@ -223,27 +284,27 @@ unsafe fn rows(env: *mut JNIEnv, cursor: jobject) -> Result<Vec<Map<String, Valu
                },
                FIELD_STRING => {
                   let text = jni!(env, CallObjectMethodA, cursor, get_string, arg.as_ptr());
-                  let value = read_string(env, text).map_or(Value::Null, Value::from);
+                  let cell = read_string(env, text).map_or(Cell::Null, Cell::Text);
                   jni!(env, DeleteLocalRef, text);
-                  value
+                  cell
                },
                FIELD_BLOB => {
                   let blob = jni!(env, CallObjectMethodA, cursor, get_blob, arg.as_ptr());
-                  let value = Value::from(read_bytes(env, blob, None));
+                  let cell = Cell::Blob(read_bytes(env, blob, None));
                   jni!(env, DeleteLocalRef, blob);
-                  value
+                  cell
                },
-               _ => Value::Null,
+               _ => Cell::Null,
             };
-            row.insert(name.clone(), value);
+            row.push(cell);
          }
-         out.push(row);
+         rows.push(row);
       }
       let failed = jni!(env, ExceptionCheck);
       let error = failed.then(|| sql_error(env));
       jni!(env, CallVoidMethodA, cursor, close, ptr::null());
       clear_exception(env);
-      error.map_or(Ok(out), Err)
+      error.map_or(Ok(Rows { columns, rows }), Err)
    }
 }
 
