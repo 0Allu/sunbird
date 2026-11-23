@@ -162,7 +162,7 @@ struct InFlight {
 }
 
 /// Rust-side filter for `phoenix.discord.onRequest` so non-matching API calls
-/// never enter QuickJS.
+/// never enter `QuickJS`.
 #[derive(Clone, Default)]
 pub struct RequestFilter {
    pub method:        Option<String>,
@@ -296,7 +296,7 @@ pub fn wants(head: &[u8]) -> bool {
 
 /// Observes one of Phoenix's own API requests and runs any matching
 /// `phoenix.discord.onRequest` hooks (filtered in Rust first so non-matching
-/// calls never enter QuickJS). Never exposes session headers to JS.
+/// calls never enter `QuickJS`). Never exposes session headers to JS.
 pub fn intercept_call(frame: &[u8]) -> Action {
    let Ok(mut call) = HostCall::decode(frame) else {
       return Action::Pass;
@@ -538,23 +538,20 @@ fn run_response_hooks(in_flight: InFlight, status: i32, frame: Vec<u8>, body: Ve
       body,
       sender,
    );
-   match receiver.recv_timeout(Duration::from_secs(4)) {
-      Ok(new_body) => {
-         let head = &frame[..frame.len().saturating_sub(orig_len)];
-         let mut out = Vec::with_capacity(head.len() + new_body.len());
-         out.extend_from_slice(head);
-         out.extend_from_slice(&new_body);
-         bridge::dispatch_deferred(out);
-      },
-      Err(_) => {
-         log::warn!(
-            "discord onResponse: {} {} timed out, delivering original",
-            in_flight.method,
-            in_flight.path
-         );
-         bridge::dispatch_deferred(frame);
-      },
-   }
+   let Ok(new_body) = receiver.recv_timeout(Duration::from_secs(4)) else {
+      log::warn!(
+         "discord onResponse: {} {} timed out, delivering original",
+         in_flight.method,
+         in_flight.path
+      );
+      bridge::dispatch_deferred(frame);
+      return;
+   };
+   let head = &frame[..frame.len().saturating_sub(orig_len)];
+   let mut out = Vec::with_capacity(head.len() + new_body.len());
+   out.extend_from_slice(head);
+   out.extend_from_slice(&new_body);
+   bridge::dispatch_deferred(out);
 }
 
 /// Sends `method path` with Phoenix's session headers, any of them replaced

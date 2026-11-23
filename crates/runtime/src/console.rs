@@ -119,6 +119,7 @@ impl<L: Log> Log for Tee<L> {
 }
 
 /// The local time of day.
+#[cfg_attr(not(target_os = "android"), allow(clippy::missing_const_for_fn))]
 fn clock() -> String {
    #[cfg(target_os = "android")]
    {

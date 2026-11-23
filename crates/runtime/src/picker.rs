@@ -32,6 +32,8 @@ use jni_sys::{
    jclass,
    jint,
    jlong,
+   jmethodID,
+   jobject,
    jstring,
    jvalue,
 };
@@ -240,7 +242,7 @@ pub fn view(
 }
 
 /// A Java string of `text`, with NULs dropped.
-unsafe fn jstring_of(env: *mut JNIEnv, text: &str) -> jni_sys::jobject {
+unsafe fn jstring_of(env: *mut JNIEnv, text: &str) -> jobject {
    let text = CString::new(text.replace('\0', "")).unwrap_or_default();
    // SAFETY: forwarded from the caller.
    unsafe { jni!(env, NewStringUTF, text.as_ptr()) }
@@ -452,6 +454,39 @@ unsafe fn call_pick(env: *mut JNIEnv) -> Result<(), String> {
    }
 }
 
+/// Loads `phx.Updater` from the dex's `loader` and binds its status
+/// callback. The updater is optional, so a failure only leaves it unbound.
+unsafe fn bind_updater(env: *mut JNIEnv, loader: jobject, load: jmethodID) {
+   // SAFETY: forwarded from `class`, which holds live `loader` and `load`.
+   unsafe {
+      let name = jni!(env, NewStringUTF, c"phx.Updater".as_ptr());
+      let updater = jni!(
+         env,
+         CallObjectMethodA,
+         loader,
+         load,
+         [jvalue { l: name }].as_ptr()
+      );
+      if updater.is_null() || jni!(env, ExceptionCheck) {
+         let _ = jvm::take_exception(env);
+         return;
+      }
+      let native = JNINativeMethod {
+         name:      c"onUpdateStatus".as_ptr().cast_mut(),
+         signature: c"(Ljava/lang/String;Ljava/lang/String;)V"
+            .as_ptr()
+            .cast_mut(),
+         fnPtr:     on_update_status as *mut c_void,
+      };
+      if jni!(env, RegisterNatives, updater, &raw const native, 1) != 0 {
+         let _ = jvm::take_exception(env);
+         return;
+      }
+      let global = jni!(env, NewGlobalRef, updater) as usize;
+      let _ = UPDATER_CLASS.set(global);
+   }
+}
+
 /// Loads `phx.Picker` once and binds its native callback.
 unsafe fn class(env: *mut JNIEnv) -> Result<jclass, String> {
    if let Some(&class) = CLASS.get() {
@@ -530,31 +565,7 @@ unsafe fn class(env: *mut JNIEnv) -> Result<jclass, String> {
       if jni!(env, RegisterNatives, class, natives.as_ptr(), 2) != 0 {
          return Err(failure(env, "could not bind phx.Picker's natives"));
       }
-      let updater_name = jni!(env, NewStringUTF, c"phx.Updater".as_ptr());
-      let updater = jni!(
-         env,
-         CallObjectMethodA,
-         loader,
-         load,
-         [jvalue { l: updater_name }].as_ptr()
-      );
-      if !updater.is_null() && !jni!(env, ExceptionCheck) {
-         let updater_native = JNINativeMethod {
-            name:      c"onUpdateStatus".as_ptr().cast_mut(),
-            signature: c"(Ljava/lang/String;Ljava/lang/String;)V"
-               .as_ptr()
-               .cast_mut(),
-            fnPtr:     on_update_status as *mut c_void,
-         };
-         if jni!(env, RegisterNatives, updater, &raw const updater_native, 1) == 0 {
-            let global_updater = jni!(env, NewGlobalRef, updater) as usize;
-            let _ = UPDATER_CLASS.set(global_updater);
-         } else {
-            let _ = jvm::take_exception(env);
-         }
-      } else {
-         let _ = jvm::take_exception(env);
-      }
+      bind_updater(env, loader, load);
       let global = jni!(env, NewGlobalRef, class) as usize;
       Ok(*CLASS.get_or_init(|| global) as jclass)
    }

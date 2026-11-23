@@ -340,6 +340,7 @@ pub fn install(url: &str) -> Result<String, Error> {
 }
 
 /// The plugin name a file name like `plugin.js` gives.
+#[cfg(target_os = "android")]
 fn plugin_name(file: &str) -> Option<&str> {
    file.strip_suffix(".js").filter(|name| {
       !name.is_empty()
