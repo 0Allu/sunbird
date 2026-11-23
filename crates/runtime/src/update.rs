@@ -29,7 +29,7 @@ use memchr::memmem;
 
 /// This build's version, `<UTC commit date>-<short hash>` (`build.rs`).
 pub const VERSION: &str = env!("PHOENIX_VERSION");
-pub const SITE: &str = "https://mantikafasi.github.io/phoenix-unlock/";
+pub const SITE: &str = "https://sunbird.tools/";
 
 /// Where `bundle-plugins.mjs` reads the version from the loader the site ships.
 #[used]

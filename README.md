@@ -9,7 +9,7 @@ No root and no Xposed: the APK itself is patched and re-signed.
 
 ## Install
 
-Open **https://mantikafasi.github.io/phoenix-unlock/** on the phone. The page downloads Discord's
+Open **https://sunbird.tools/** on the phone. The page downloads Discord's
 split APKs, patches them, merges them into one APK and signs it, all in the browser. Options:
 
 - **Install as**: replace Discord (`com.discord`, the default) or next to it (`com.discord.phoenix`).
