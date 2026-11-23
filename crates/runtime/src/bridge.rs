@@ -53,6 +53,7 @@ use jni_sys::{
    jobject,
    jvalue,
 };
+use phoenix_hook::image::swap_words;
 
 use crate::{
    discord,
@@ -191,7 +192,7 @@ pub fn attach() {
    // SAFETY: both slots are aligned function pointers in ART's table. Each is
    // swapped atomically, and SAVED already holds the originals, so a thread
    // that reads either pointer makes a valid call.
-   match unsafe { phoenix_hook::swap_words(&writes) } {
+   match unsafe { swap_words(&writes) } {
       Ok(_) => log::info!("bridge: JNI table patched"),
       Err(err) => log::warn!("bridge: JNI table patch failed: {err}"),
    }

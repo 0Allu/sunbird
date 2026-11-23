@@ -18,16 +18,18 @@ use std::{
    },
 };
 
-use phoenix_hook::Image;
+use phoenix_hook::image::Image;
 use phoenix_sigs::{
    Abi,
-   EventId,
    GATEWAY_HANDLER_FIELD,
    GatewayEvent,
    GatewayHandler,
-   GatewayRegistry,
    HandlerResult,
    RawStr,
+   registry::{
+      EventId,
+      GatewayRegistry,
+   },
 };
 
 use crate::{

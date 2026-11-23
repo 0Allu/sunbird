@@ -17,8 +17,8 @@ use std::{
 };
 
 use phoenix_hook::{
-   Image,
-   Pattern,
+   image::Image,
+   pattern::Pattern,
 };
 
 /// The tail of a staff check: `add x8, x8, #0x8000` then the three

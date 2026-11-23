@@ -1,7 +1,7 @@
 //! Gateway hooks: `phoenix.on`, `hook`, `dispatch` and `enqueue`, and the
 //! `before` and `after` phases that run them.
 
-use phoenix_sigs::EventId;
+use phoenix_sigs::registry::EventId;
 use rquickjs::{
    CatchResultExt,
    Ctx,

@@ -3,49 +3,49 @@
 //! - [`Hook`] is the inline-hook interface. [`Inline`] picks the backend for
 //!   the target, `ShadowHook` on Android ARM and Dobby everywhere else (iOS,
 //!   x86_64 Android and Linux).
-//! - [`PltHook`] rewrites GOT entries through `ByteHook` on Android.
-//! - [`Image`] views a loaded ELF module, scans it for [`Pattern`]s, and swaps
-//!   pointers in its read-only data.
+//! - [`PltHook`](plt::PltHook) rewrites GOT entries through `ByteHook` on
+//!   Android.
+//! - [`Image`](image::Image) views a loaded ELF module, scans it for
+//!   [`Pattern`](pattern::Pattern)s, and swaps pointers in its read-only data.
 
 use std::{
    ffi::c_void,
    ptr::NonNull,
 };
 
-#[cfg(not(any(windows, all(
-   target_os = "android",
-   any(target_arch = "aarch64", target_arch = "arm")
-))))]
-mod dobby;
-// On Windows only the parts the host-side patcher reads build; the rest needs dl_iterate_phdr.
+#[cfg(not(any(
+   windows,
+   all(
+      target_os = "android",
+      any(target_arch = "aarch64", target_arch = "arm")
+   )
+)))]
+pub mod dobby;
+// On Windows only the parts the host-side patcher reads build; the rest needs
+// dl_iterate_phdr.
 #[cfg_attr(windows, allow(dead_code, unused_imports))]
-mod image;
-mod pattern;
-#[cfg(target_os = "android")] mod plt;
+pub mod image;
+pub mod pattern;
+#[cfg(target_os = "android")] pub mod plt;
 #[cfg(all(
    target_os = "android",
    any(target_arch = "aarch64", target_arch = "arm")
 ))]
-mod shadowhook;
+pub mod shadowhook;
 
-#[cfg(not(any(windows, all(
-   target_os = "android",
-   any(target_arch = "aarch64", target_arch = "arm")
-))))]
-pub use dobby::Dobby as Inline;
-#[cfg(unix)] pub use image::swap_words;
-pub use image::{
-   BuildId,
-   Image,
-   Segment,
-};
-pub use pattern::Pattern;
-#[cfg(target_os = "android")] pub use plt::PltHook;
+#[cfg(not(any(
+   windows,
+   all(
+      target_os = "android",
+      any(target_arch = "aarch64", target_arch = "arm")
+   )
+)))]
+pub type Inline = dobby::Dobby;
 #[cfg(all(
    target_os = "android",
    any(target_arch = "aarch64", target_arch = "arm")
 ))]
-pub use shadowhook::ShadowHook as Inline;
+pub type Inline = shadowhook::ShadowHook;
 
 #[derive(Debug, flub::Error)]
 pub enum Error {

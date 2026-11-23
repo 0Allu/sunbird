@@ -6,7 +6,7 @@
 //! build-specific byte pattern and a portable table lookup can sit in one rule,
 //! so a stale pattern is caught instead of hooked.
 //!
-//! The event set is never compiled in. [`GatewayRegistry`] walks the target's
+//! The event set is never compiled in. [`GatewayRegistry`](registry::GatewayRegistry) walks the target's
 //! registry at load time, so a new Discord build brings its own events. Porting
 //! the build table is `cargo run -p sigscan -- liblibdiscord_wasm_host.so`,
 //! which dumps the registry and checks every rule. Unknown builds still load
@@ -19,24 +19,17 @@ use std::{
    marker::PhantomData,
 };
 
-pub use phoenix_hook::{
-   BuildId,
-   Image,
-   Pattern,
-   Segment,
+use phoenix_hook::{
+   image::{
+      BuildId,
+      Image,
+   },
+   pattern::Pattern,
 };
 
-mod builds;
-#[cfg(feature = "file")]
-pub mod file;
-mod registry;
-
-pub use builds::BUILDS;
-pub use registry::{
-   EventId,
-   GatewayEntry,
-   GatewayRegistry,
-};
+pub mod builds;
+#[cfg(feature = "file")] pub mod file;
+pub mod registry;
 
 /// Libraries that carry the gateway registry, Phoenix's and the stand-in's.
 pub const LIBRARIES: &[&str] = &["liblibdiscord_wasm_host.so", "libstand_in.so"];
@@ -299,7 +292,7 @@ pub struct Build {
 impl Build {
    #[must_use]
    pub fn find(id: BuildId) -> Option<&'static Self> {
-      BUILDS.iter().find(|build| build.id == id)
+      builds::BUILDS.iter().find(|build| build.id == id)
    }
 
    /// The table rule for `event`, or the portable registry lookup when the

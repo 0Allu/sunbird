@@ -17,8 +17,7 @@ use object::{
       SectionHeader,
    },
 };
-
-use crate::{
+use phoenix_hook::image::{
    BuildId,
    Image,
    Segment,

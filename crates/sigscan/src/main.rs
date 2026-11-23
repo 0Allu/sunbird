@@ -17,19 +17,17 @@ use misstep::{
    ResultExt,
    bail,
 };
+use phoenix_hook::image::Image;
 use phoenix_sigs::{
    Build,
-   GatewayRegistry,
-   Image,
    Sig,
    file::ElfFile,
+   registry::GatewayRegistry,
 };
 
 fn main() -> misstep::Result<()> {
    misstep::install_panic_hook();
-   let path = env::args()
-      .nth(1)
-      .context("usage: sigscan <library.so>")?;
+   let path = env::args().nth(1).context("usage: sigscan <library.so>")?;
    let data = fs::read(&path).with_context(|| format!("reading {path}"))?;
    let image = ElfFile::parse(&path, &data)?.image;
    let build_id = image.build_id.context("no NT_GNU_BUILD_ID note")?;

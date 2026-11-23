@@ -16,11 +16,11 @@ use std::{
    },
 };
 
-use phoenix_hook::Image;
+use phoenix_hook::image::Image;
 use phoenix_sigs::{
    Build,
-   GatewayRegistry,
    LIBRARIES,
+   registry::GatewayRegistry,
 };
 
 #[cfg(target_os = "android")] mod bridge;

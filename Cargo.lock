@@ -687,6 +687,7 @@ name = "sigscan"
 version = "0.1.0"
 dependencies = [
  "misstep",
+ "phoenix-hook",
  "phoenix-sigs",
 ]
 

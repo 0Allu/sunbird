@@ -25,7 +25,7 @@ use std::{
 };
 
 use log::Level;
-use phoenix_sigs::{
+use phoenix_sigs::registry::{
    EventId,
    GatewayRegistry,
 };

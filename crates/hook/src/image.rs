@@ -16,6 +16,8 @@ use std::{
 
 use memchr::memmem;
 
+use crate::pattern::Pattern;
+
 const NT_GNU_BUILD_ID: u32 = 3;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
@@ -264,13 +266,20 @@ pub unsafe fn swap_words(writes: &[(usize, usize)]) -> Result<Vec<usize>, crate:
       .iter()
       .map(|&page| Some((page, protection(&maps, page)?)))
       .collect::<Option<Vec<(usize, c_int)>>>()
-      .ok_or_else(|| crate::Error::Unmapped { addr: pages.first().copied().unwrap_or(0) })?;
+      .ok_or_else(|| {
+         crate::Error::Unmapped {
+            addr: pages.first().copied().unwrap_or(0),
+         }
+      })?;
    let protect = |page: usize, prot: c_int| {
       // SAFETY: `page` is a mapped page, from /proc/self/maps.
       if unsafe { libc::mprotect(page as *mut c_void, page_size, prot) } == 0 {
          Ok(())
       } else {
-         Err(crate::Error::Protect { addr: page, source: std::io::Error::last_os_error() })
+         Err(crate::Error::Protect {
+            addr:   page,
+            source: std::io::Error::last_os_error(),
+         })
       }
    };
 
@@ -299,11 +308,15 @@ fn protection(maps: &str, addr: usize) -> Option<c_int> {
       let range = usize::from_str_radix(start, 16).ok()?..usize::from_str_radix(end, 16).ok()?;
       let perms = fields.next()?.as_bytes();
       range.contains(&addr).then(|| {
-         [(b'r', libc::PROT_READ), (b'w', libc::PROT_WRITE), (b'x', libc::PROT_EXEC)]
-            .iter()
-            .zip(perms)
-            .filter(|((flag, _), perm)| flag == *perm)
-            .fold(libc::PROT_NONE, |prot, ((_, bit), _)| prot | bit)
+         [
+            (b'r', libc::PROT_READ),
+            (b'w', libc::PROT_WRITE),
+            (b'x', libc::PROT_EXEC),
+         ]
+         .iter()
+         .zip(perms)
+         .filter(|((flag, _), perm)| flag == *perm)
+         .fold(libc::PROT_NONE, |prot, ((_, bit), _)| prot | bit)
       })
    })
 }
@@ -319,7 +332,7 @@ impl Image<'_> {
 
    /// Addresses in executable segments where `pattern` matches.
    #[must_use]
-   pub fn scan(&self, pattern: crate::Pattern) -> Vec<usize> {
+   pub fn scan(&self, pattern: Pattern) -> Vec<usize> {
       self
          .segments
          .iter()

@@ -2,6 +2,11 @@
 //! `phoenix.messages.onEmojiPick`, and Phoenix's emoji check, which while a
 //! handler exists stops locking emojis that need Nitro in the message box.
 
+use phoenix_hook::{
+   Hook,
+   Inline,
+   pattern::Pattern,
+};
 use phoenix_ui::Op;
 
 use crate::{
@@ -53,7 +58,7 @@ impl Patches {
 /// 0xFF means usable and 2 premium locked. Found by its start, which reads the
 /// context's intention and answers 3 for profiles.
 #[cfg(target_arch = "aarch64")]
-const UNAVAILABLE_REASON: phoenix_hook::Pattern = phoenix_hook::Pattern::new(
+const UNAVAILABLE_REASON: Pattern = Pattern::new(
    "28 90 40 39 09 01 1F 32 3F 39 00 71 ?? ?? ?? 54 68 00 80 52 E0 03 08 2A C0 03 5F D6",
 );
 /// `EmojiContext.intention`, and its value for the message box (`CHAT`).
@@ -69,7 +74,7 @@ const USABLE: u8 = 0xFF;
 #[cfg(target_arch = "aarch64")]
 static UNLOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(target_arch = "aarch64")]
-static CHECK: std::sync::OnceLock<Option<phoenix_hook::Inline>> = std::sync::OnceLock::new();
+static CHECK: std::sync::OnceLock<Option<Inline>> = std::sync::OnceLock::new();
 
 /// While `on`, emojis Phoenix keeps for Nitro count as usable in the message
 /// box: the picker and autocomplete offer them without a lock. Reactions,
@@ -90,9 +95,7 @@ pub(super) fn unlock(on: bool) {
 }
 
 #[cfg(target_arch = "aarch64")]
-fn hook_check() -> Option<phoenix_hook::Inline> {
-   use phoenix_hook::Hook;
-
+fn hook_check() -> Option<Inline> {
    let image = &crate::STATE.get()?.image;
    let found = image.scan(UNAVAILABLE_REASON);
    let [target] = found.as_slice() else {
@@ -106,7 +109,7 @@ fn hook_check() -> Option<phoenix_hook::Inline> {
    let detour = std::ptr::NonNull::new(unavailable_reason as *mut std::ffi::c_void)?;
    // SAFETY: the pattern matches the start of the check, and the detour has
    // its ABI.
-   match unsafe { phoenix_hook::Inline::attach(target, detour) } {
+   match unsafe { Inline::attach(target, detour) } {
       Ok(hook) => Some(hook),
       Err(err) => {
          log::warn!("emoji check: {err}");
@@ -117,8 +120,6 @@ fn hook_check() -> Option<phoenix_hook::Inline> {
 
 #[cfg(target_arch = "aarch64")]
 extern "C" fn unavailable_reason(emoji: *const u8, context: *const u8) -> u8 {
-   use phoenix_hook::Hook;
-
    // A call can land here before `CHECK` holds the hook that sent it.
    let Some(hook) = CHECK.wait() else {
       return USABLE;

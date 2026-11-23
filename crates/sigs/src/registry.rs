@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
+use phoenix_hook::image::Image;
+
 use crate::{
    Error,
    GATEWAY_HANDLER_FIELD,
-   Image,
    table_entries,
 };
 
