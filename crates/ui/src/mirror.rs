@@ -55,37 +55,7 @@ impl Mirror {
          match op {
             Op::Create { id, kind, props } => {
                created.insert(*id, (kind, props));
-               if capture {
-                  self.kinds.insert(*id, kind.clone());
-                  self.props.insert(*id, props.clone());
-               }
-               let is_list = prop(props, FIRST).is_some();
-               if let Some(Value::I32(first)) = prop(props, FIRST) {
-                  self.firsts.insert(*id, *first);
-               }
-               if let Some(Value::Arr(on)) = prop(props, Prop::ON)
-                  && (is_list
-                     || on
-                        .iter()
-                        .any(|value| matches!(value, Value::Str(name) if name == "rowLongPress")))
-               {
-                  self.list_on.insert(*id, on.clone());
-               }
-               if let Some(Value::Str(aid)) = prop(props, Prop::ACCESSIBILITY_ID) {
-                  if aid == "composer" && !self.composer.iter().any(|(input, _)| input == id) {
-                     self.composer.push((*id, String::new()));
-                  }
-                  self.ids.insert(*id, aid.clone());
-               }
-               if kind.as_str() == "sheet" {
-                  self.sheets.insert(*id);
-               }
-               if *kind == ViewKind::Navigator && !self.navigators.contains(id) {
-                  self.navigators.push(*id);
-               }
-               if prop(props, Prop::STACK_HEADER).is_some() {
-                  self.stack_header = Some(props.clone());
-               }
+               self.create(*id, kind, props, capture);
             },
             Op::Children { id, ids } => {
                for kid in ids {
@@ -103,60 +73,100 @@ impl Mirror {
             },
             Op::Delete { ids } => {
                for id in ids {
-                  if self.root == Some(*id) {
-                     self.root = None;
-                  }
-                  self.kids.remove(id);
-                  self.parent.remove(id);
-                  self.ids.remove(id);
-                  self.kinds.remove(id);
-                  self.props.remove(id);
-                  self.sheets.remove(id);
-                  self.navigators.retain(|nav| nav != id);
-                  self.firsts.remove(id);
-                  self.list_on.remove(id);
-                  self.composer.retain(|(input, _)| input != id);
+                  self.delete(*id);
                }
                deleted.extend_from_slice(ids);
             },
             Op::Root { id } => {
                self.root = Some(*id);
             },
-            Op::Update { id, props } => {
-               if capture {
-                  let stored = self.props.entry(*id).or_default();
-                  for (key, value) in props {
-                     set_prop(stored, *key, Some(value.clone()));
-                  }
-               }
-               if let Some(Value::I32(first)) = prop(props, FIRST) {
-                  self.firsts.insert(*id, *first);
-               }
-               match prop(props, Prop::ACCESSIBILITY_ID) {
-                  Some(Value::Str(aid)) => {
-                     if aid == "composer" && !self.composer.iter().any(|(input, _)| input == id) {
-                        self.composer.push((*id, String::new()));
-                     }
-                     self.ids.insert(*id, aid.clone());
-                  },
-                  Some(Value::Null) => {
-                     self.ids.remove(id);
-                  },
-                  _ => {},
-               }
-               if (self.firsts.contains_key(id) || self.list_on.contains_key(id))
-                  && let Some(Value::Arr(on)) = prop(props, Prop::ON)
-               {
-                  self.list_on.insert(*id, on.clone());
-               }
-               if let Some(Value::Str(text)) = prop(props, Prop::VALUE) {
-                  self.set_composer_text(*id, text.clone());
-               }
-            },
+            Op::Update { id, props } => self.update(*id, props, capture),
             _ => {},
          }
       }
       (created, deleted)
+   }
+
+   fn create(&mut self, id: i32, kind: &ViewKind, props: &Props, capture: bool) {
+      if capture {
+         self.kinds.insert(id, kind.clone());
+         self.props.insert(id, props.clone());
+      }
+      let is_list = prop(props, FIRST).is_some();
+      if let Some(Value::I32(first)) = prop(props, FIRST) {
+         self.firsts.insert(id, *first);
+      }
+      if let Some(Value::Arr(on)) = prop(props, Prop::ON)
+         && (is_list
+            || on
+               .iter()
+               .any(|value| matches!(value, Value::Str(name) if name == "rowLongPress")))
+      {
+         self.list_on.insert(id, on.clone());
+      }
+      if let Some(Value::Str(aid)) = prop(props, Prop::ACCESSIBILITY_ID) {
+         self.name(id, aid);
+      }
+      if kind.as_str() == "sheet" {
+         self.sheets.insert(id);
+      }
+      if *kind == ViewKind::Navigator && !self.navigators.contains(&id) {
+         self.navigators.push(id);
+      }
+      if prop(props, Prop::STACK_HEADER).is_some() {
+         self.stack_header = Some(props.clone());
+      }
+   }
+
+   fn update(&mut self, id: i32, props: &Props, capture: bool) {
+      if capture {
+         let stored = self.props.entry(id).or_default();
+         for (key, value) in props {
+            set_prop(stored, *key, Some(value.clone()));
+         }
+      }
+      if let Some(Value::I32(first)) = prop(props, FIRST) {
+         self.firsts.insert(id, *first);
+      }
+      match prop(props, Prop::ACCESSIBILITY_ID) {
+         Some(Value::Str(aid)) => self.name(id, aid),
+         Some(Value::Null) => {
+            self.ids.remove(&id);
+         },
+         _ => {},
+      }
+      if (self.firsts.contains_key(&id) || self.list_on.contains_key(&id))
+         && let Some(Value::Arr(on)) = prop(props, Prop::ON)
+      {
+         self.list_on.insert(id, on.clone());
+      }
+      if let Some(Value::Str(text)) = prop(props, Prop::VALUE) {
+         self.set_composer_text(id, text.clone());
+      }
+   }
+
+   /// Records `aid` as the accessibility id of `id`.
+   fn name(&mut self, id: i32, aid: &str) {
+      if aid == "composer" && !self.composer.iter().any(|(input, _)| *input == id) {
+         self.composer.push((id, String::new()));
+      }
+      self.ids.insert(id, aid.to_owned());
+   }
+
+   fn delete(&mut self, id: i32) {
+      if self.root == Some(id) {
+         self.root = None;
+      }
+      self.kids.remove(&id);
+      self.parent.remove(&id);
+      self.ids.remove(&id);
+      self.kinds.remove(&id);
+      self.props.remove(&id);
+      self.sheets.remove(&id);
+      self.navigators.retain(|nav| *nav != id);
+      self.firsts.remove(&id);
+      self.list_on.remove(&id);
+      self.composer.retain(|(input, _)| *input != id);
    }
 
    /// The row at list index `index` of the virtualized list `id`.
@@ -357,7 +367,7 @@ impl Mirror {
 
    /// Header padding/height from Phoenix's own stack header, if seen.
    #[must_use]
-   pub fn stack_header(&self) -> Option<&Props> {
+   pub const fn stack_header(&self) -> Option<&Props> {
       self.stack_header.as_ref()
    }
 

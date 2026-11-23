@@ -166,7 +166,7 @@ pub fn copy(text: &str) -> Result<(), String> {
 }
 
 /// Shows a scrollable selectable text/code dialog over Phoenix's activity and
-/// waits for a button press (0..options.len()) or dismiss (-1).
+/// waits for a button press (`0..options.len()`) or dismiss (-1).
 pub fn view(
    title: Option<&str>,
    text: &str,
@@ -477,7 +477,7 @@ unsafe fn class(env: *mut JNIEnv) -> Result<jclass, String> {
          env,
          NewDirectByteBuffer,
          DEX.as_ptr().cast_mut().cast::<c_void>(),
-         DEX.len() as jlong,
+         jlong::try_from(DEX.len()).expect("the picker dex is a few KB"),
       );
       let loader_class = jni!(
          env,
@@ -577,12 +577,10 @@ unsafe extern "system" fn on_picked(
 ) {
    // SAFETY: Java passes live references or null, on its own attached thread.
    let picked = unsafe {
-      match jvm::read_string(env, error) {
-         Some(error) => Err(error),
-         None => {
-            Ok(jvm::read_string(env, name).map(|name| (name, jvm::read_bytes(env, data, None))))
-         },
-      }
+      jvm::read_string(env, error).map_or_else(
+         || Ok(jvm::read_string(env, name).map(|name| (name, jvm::read_bytes(env, data, None)))),
+         Err,
+      )
    };
    crate::settings::picked(picked);
 }

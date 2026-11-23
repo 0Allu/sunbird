@@ -288,19 +288,19 @@ fn run_loader_self_update() {
    let bytes = match crate::fetch::get(&url) {
       Ok(bytes) => bytes,
       Err(err) => {
-         fail_self_update(format!("Download failed: {err}"));
+         fail_self_update(&format!("Download failed: {err}"));
          return;
       },
    };
    if !bytes.starts_with(b"\x7fELF") || memmem::find(&bytes, b"phoenix-version:").is_none() {
-      fail_self_update("Downloaded loader is invalid".to_owned());
+      fail_self_update("Downloaded loader is invalid");
       return;
    }
 
    let keys: SigningKey = match serde_json::from_str(SIGNING_KEY_JSON) {
       Ok(keys) => keys,
       Err(err) => {
-         fail_self_update(format!("Signing key config invalid: {err}"));
+         fail_self_update(&format!("Signing key config invalid: {err}"));
          return;
       },
    };
@@ -314,24 +314,21 @@ fn run_loader_self_update() {
       &keys.lineage,
       SITE,
    ) {
-      fail_self_update(format!("Self-update failed: {err}"));
+      fail_self_update(&format!("Self-update failed: {err}"));
    }
 }
 
-fn fail_self_update(message: String) {
+fn fail_self_update(message: &str) {
    log::error!("self-update: {message}");
-   set_status(Some(message.clone()));
+   set_status(Some(message.to_owned()));
    BUSY.store(false, Ordering::Release);
-   let _ = crate::picker::toast(&message);
+   let _ = crate::picker::toast(message);
 }
 
 /// Callback invoked from `phx.Updater.onUpdateStatus(state, message)`.
 pub fn on_native_status(state: &str, message: &str) {
    log::info!("self-update [{state}]: {message}");
    match state {
-      "repacking" | "installing" => {
-         set_status(Some(message.to_owned()));
-      },
       "done" => {
          *FOUND.lock().unwrap_or_else(PoisonError::into_inner) = None;
          set_status(None);

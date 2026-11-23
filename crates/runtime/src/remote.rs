@@ -251,44 +251,14 @@ fn dispatch(
 ) -> (&'static str, &'static str, Vec<u8>) {
    match (method, path) {
       ("GET", "/" | "/status") => {
-         let plugins = crate::plugins()
-            .into_iter()
-            .map(|plugin| {
-               serde_json::json!({
-                  "name": plugin.name,
-                  "enabled": plugin.enabled,
-                  "installed": plugin.installed,
-                  "error": plugin.error,
-                  "version": plugin.header.version,
-                  "description": plugin.header.description,
-               })
-            })
-            .collect::<Vec<_>>();
-         let json = serde_json::json!({
+         ok_json(&serde_json::json!({
             "version": crate::update::VERSION,
             "staff": crate::staff_enabled(),
             "remote_shell": enabled(),
-            "plugins": plugins,
-         });
-         ok_json(&json)
+            "plugins": plugin_list(),
+         }))
       },
-      ("GET", "/plugins") => {
-         let plugins = crate::plugins()
-            .into_iter()
-            .map(|plugin| {
-               serde_json::json!({
-                  "name": plugin.name,
-                  "enabled": plugin.enabled,
-                  "installed": plugin.installed,
-                  "error": plugin.error,
-                  "version": plugin.header.version,
-                  "author": plugin.header.author,
-                  "description": plugin.header.description,
-               })
-            })
-            .collect::<Vec<_>>();
-         ok_json(&serde_json::Value::Array(plugins))
-      },
+      ("GET", "/plugins") => ok_json(&plugin_list()),
       ("GET", "/logs") => {
          let mut lines = crate::console::lines();
          lines.reverse();
@@ -308,44 +278,8 @@ fn dispatch(
             Err(message) => err("500 Internal Server Error", &message),
          }
       },
-      ("GET", "/ops") => {
-         let filter = query_param(query, "match");
-         let limit = query_param(query, "limit")
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(20);
-         let log = OPS_LOG.lock().unwrap_or_else(PoisonError::into_inner);
-         let items = log
-            .iter()
-            .rev()
-            .filter(|entry| {
-               filter.is_none_or(|needle| {
-                  serde_json::to_string(entry).is_ok_and(|text| text.contains(needle))
-               })
-            })
-            .take(limit)
-            .cloned()
-            .collect::<Vec<_>>();
-         ok_json(&serde_json::Value::Array(items))
-      },
-      ("GET", "/events") => {
-         let filter = query_param(query, "match");
-         let limit = query_param(query, "limit")
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(50);
-         let log = EVENTS_LOG.lock().unwrap_or_else(PoisonError::into_inner);
-         let items = log
-            .iter()
-            .rev()
-            .filter(|entry| {
-               filter.is_none_or(|needle| {
-                  serde_json::to_string(entry).is_ok_and(|text| text.contains(needle))
-               })
-            })
-            .take(limit)
-            .cloned()
-            .collect::<Vec<_>>();
-         ok_json(&serde_json::Value::Array(items))
-      },
+      ("GET", "/ops") => ok_json(&recent(&OPS_LOG, query, 20)),
+      ("GET", "/events") => ok_json(&recent(&EVENTS_LOG, query, 50)),
       ("POST", "/clear") => {
          OPS_LOG
             .lock()
@@ -372,20 +306,7 @@ fn dispatch(
             .unwrap_or(6);
          ok_json(&crate::patches::dump_tree(Some(id), depth))
       },
-      ("GET", "/update") => {
-         let found = crate::update::found().map(|u| {
-            serde_json::json!({
-               "loader": u.loader,
-               "plugins": u.plugins,
-            })
-         });
-         ok_json(&serde_json::json!({
-            "version": crate::update::VERSION,
-            "busy": crate::update::busy(),
-            "status": crate::update::status(),
-            "found": found,
-         }))
-      },
+      ("GET", "/update") => ok_json(&update_state()),
       ("POST", "/update/check") => {
          crate::update::check();
          ok_json(&serde_json::json!({ "started": true }))
@@ -418,11 +339,67 @@ fn dispatch(
    }
 }
 
+/// Every plugin and its state, for `/status` and `/plugins`.
+fn plugin_list() -> serde_json::Value {
+   crate::plugins()
+      .into_iter()
+      .map(|plugin| {
+         serde_json::json!({
+            "name": plugin.name,
+            "enabled": plugin.enabled,
+            "installed": plugin.installed,
+            "error": plugin.error,
+            "version": plugin.header.version,
+            "author": plugin.header.author,
+            "description": plugin.header.description,
+         })
+      })
+      .collect()
+}
+
+/// The newest entries of `log`, filtered by the `match` and `limit` query
+/// parameters.
+fn recent(
+   log: &Mutex<VecDeque<serde_json::Value>>,
+   query: &str,
+   default_limit: usize,
+) -> serde_json::Value {
+   let filter = query_param(query, "match");
+   let limit = query_param(query, "limit")
+      .and_then(|limit| limit.parse::<usize>().ok())
+      .unwrap_or(default_limit);
+   let entries = log.lock().unwrap_or_else(PoisonError::into_inner).clone();
+   entries
+      .into_iter()
+      .rev()
+      .filter(|entry| {
+         filter.is_none_or(|needle| {
+            serde_json::to_string(entry).is_ok_and(|text| text.contains(needle))
+         })
+      })
+      .take(limit)
+      .collect()
+}
+
+fn update_state() -> serde_json::Value {
+   let found = crate::update::found().map(|found| {
+      serde_json::json!({
+         "loader": found.loader,
+         "plugins": found.plugins,
+      })
+   });
+   serde_json::json!({
+      "version": crate::update::VERSION,
+      "busy": crate::update::busy(),
+      "status": crate::update::status(),
+      "found": found,
+   })
+}
+
 fn plugin_route(method: &str, rest: &str, body: &[u8]) -> (&'static str, &'static str, Vec<u8>) {
-   let (name, action) = match rest.split_once('/') {
-      Some((name, action)) => (name, Some(action)),
-      None => (rest, None),
-   };
+   let (name, action) = rest
+      .split_once('/')
+      .map_or((rest, None), |(name, action)| (name, Some(action)));
    let valid = !name.is_empty()
       && name
          .bytes()

@@ -339,7 +339,7 @@ unsafe extern "C" fn detour(
    result
 }
 
-/// Whether READY and USER_UPDATE carry the staff flag.
+/// Whether `READY` and `USER_UPDATE` carry the staff flag.
 static STAFF_UNLOCK: AtomicBool = AtomicBool::new(true);
 
 #[must_use]

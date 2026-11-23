@@ -221,7 +221,7 @@ pub fn plugins() -> Vec<PluginInfo> {
    engine().map_or_default(|engine| engine.plugins())
 }
 
-/// Whether READY and USER_UPDATE carry the staff flag.
+/// Whether `READY` and `USER_UPDATE` carry the staff flag.
 #[must_use]
 pub fn staff_enabled() -> bool {
    gateway::staff_enabled()
