@@ -29,6 +29,7 @@ fn version() {
       .args([
          "log",
          "-1",
+         "--no-show-signature",
          "--format=%cd-%h",
          "--date=format-local:%Y.%m.%d.%H%M",
       ])
