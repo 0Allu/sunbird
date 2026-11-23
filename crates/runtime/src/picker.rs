@@ -194,7 +194,13 @@ pub fn view(
          );
          for (index, option) in options.iter().enumerate() {
             let option = jstring_of(env, option);
-            jni!(env, SetObjectArrayElement, array, jni_sys::jsize::try_from(index).unwrap_or_default(), option);
+            jni!(
+               env,
+               SetObjectArrayElement,
+               array,
+               jni_sys::jsize::try_from(index).unwrap_or_default(),
+               option
+            );
          }
          (
             c"(Ljava/lang/Object;ILjava/lang/String;Ljava/lang/String;Z[Ljava/lang/String;)V",
@@ -209,16 +215,18 @@ pub fn view(
                jvalue {
                   l: jstring_of(env, text),
                },
-               jvalue {
-                  z: monospace,
-               },
+               jvalue { z: monospace },
                jvalue { l: array },
             ],
          )
       }
    });
    let forget = || {
-      if let Some(choices) = CHOICES.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
+      if let Some(choices) = CHOICES
+         .lock()
+         .unwrap_or_else(PoisonError::into_inner)
+         .as_mut()
+      {
          choices.remove(&id);
       }
    };
@@ -322,7 +330,8 @@ pub fn self_update(
    fallback_url: &str,
 ) -> Result<(), String> {
    let env = jvm::env().ok_or("no JNI env")?;
-   // SAFETY: `env` belongs to this thread and all local refs stay inside the frame.
+   // SAFETY: `env` belongs to this thread and all local refs stay inside the
+   // frame.
    unsafe {
       if jni!(env, PushLocalFrame, 32) != 0 {
          return Err(failure(env, "out of local references"));
@@ -532,7 +541,9 @@ unsafe fn class(env: *mut JNIEnv) -> Result<jclass, String> {
       if !updater.is_null() && !jni!(env, ExceptionCheck) {
          let updater_native = JNINativeMethod {
             name:      c"onUpdateStatus".as_ptr().cast_mut(),
-            signature: c"(Ljava/lang/String;Ljava/lang/String;)V".as_ptr().cast_mut(),
+            signature: c"(Ljava/lang/String;Ljava/lang/String;)V"
+               .as_ptr()
+               .cast_mut(),
             fnPtr:     on_update_status as *mut c_void,
          };
          if jni!(env, RegisterNatives, updater, &raw const updater_native, 1) == 0 {

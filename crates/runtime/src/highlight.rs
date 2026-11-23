@@ -10,10 +10,46 @@ pub enum Kind {
 }
 
 const KEYWORDS: &[&str] = &[
-   "async", "await", "break", "case", "catch", "class", "const", "continue", "default", "delete",
-   "do", "else", "export", "extends", "false", "finally", "for", "from", "function", "if",
-   "import", "in", "instanceof", "let", "new", "null", "of", "return", "static", "super",
-   "switch", "this", "throw", "true", "try", "typeof", "undefined", "var", "void", "while",
+   "async",
+   "await",
+   "break",
+   "case",
+   "catch",
+   "class",
+   "const",
+   "continue",
+   "default",
+   "delete",
+   "do",
+   "else",
+   "export",
+   "extends",
+   "false",
+   "finally",
+   "for",
+   "from",
+   "function",
+   "if",
+   "import",
+   "in",
+   "instanceof",
+   "let",
+   "new",
+   "null",
+   "of",
+   "return",
+   "static",
+   "super",
+   "switch",
+   "this",
+   "throw",
+   "true",
+   "try",
+   "typeof",
+   "undefined",
+   "var",
+   "void",
+   "while",
    "yield",
 ];
 
@@ -36,7 +72,9 @@ pub fn js(source: &str) -> Vec<(Kind, &str)> {
             Kind::Comment
          },
          b'/' if next == Some(b'*') => {
-            at = source[at + 2..].find("*/").map_or(len, |end| at + 2 + end + 2);
+            at = source[at + 2..]
+               .find("*/")
+               .map_or(len, |end| at + 2 + end + 2);
             Kind::Comment
          },
          b'"' | b'\'' | b'`' => {
@@ -105,13 +143,21 @@ mod tests {
       let source = "const a = \"x\\\"y\"; // hé\nlet n = 1.5 /* c */ + `t` + 'é\\é';\nreturn ünï;";
       let runs = js(source);
       assert_eq!(runs.iter().map(|(_, run)| *run).collect::<String>(), source);
-      let kind = |text: &str| runs.iter().find(|(_, run)| *run == text).map(|(kind, _)| *kind);
+      let kind = |text: &str| {
+         runs
+            .iter()
+            .find(|(_, run)| *run == text)
+            .map(|(kind, _)| *kind)
+      };
       assert_eq!(kind("const"), Some(Kind::Keyword));
       assert_eq!(kind("\"x\\\"y\""), Some(Kind::String));
       assert_eq!(kind("// hé"), Some(Kind::Comment));
       assert_eq!(kind("1.5"), Some(Kind::Number));
       assert_eq!(kind("/* c */"), Some(Kind::Comment));
       assert_eq!(kind("'é\\é'"), Some(Kind::String));
-      assert_eq!(js("\"unterminated \\"), vec![(Kind::String, "\"unterminated \\")]);
+      assert_eq!(js("\"unterminated \\"), vec![(
+         Kind::String,
+         "\"unterminated \\"
+      )]);
    }
 }

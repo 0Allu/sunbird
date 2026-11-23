@@ -1,3 +1,4 @@
+#[cfg(target_os = "android")] use std::str::FromStr;
 use std::{
    borrow::Cow,
    cell::RefCell,
@@ -49,9 +50,6 @@ use crate::{
    io_error,
    local,
 };
-#[cfg(target_os = "android")]
-use std::str::FromStr;
-
 #[cfg(target_os = "android")]
 use crate::{
    discord,
@@ -180,27 +178,27 @@ pub enum Before {
 /// stay JS values owned by the runtime, and the only thing plugins can reach is
 /// their own `phoenix` object.
 struct Registry<'js> {
-   gateway:      Object<'js>,
-   handles:      Vec<(EventId, Object<'js>)>,
-   hooks:        RefCell<HashMap<EventId, Vec<Hook<'js>>>>,
-   defined:      RefCell<BTreeMap<String, Vec<Definition<'js>>>>,
+   gateway:        Object<'js>,
+   handles:        Vec<(EventId, Object<'js>)>,
+   hooks:          RefCell<HashMap<EventId, Vec<Hook<'js>>>>,
+   defined:        RefCell<BTreeMap<String, Vec<Definition<'js>>>>,
    /// Kept across unloads, so a reloaded plugin sees what the user chose.
-   chosen:       RefCell<ChosenMap>,
+   chosen:         RefCell<ChosenMap>,
    /// `phoenix.onUnload` callbacks, run when the plugin is turned off,
    /// reloaded or removed.
-   unloads:      RefCell<HashMap<String, Vec<Function<'js>>>>,
+   unloads:        RefCell<HashMap<String, Vec<Function<'js>>>>,
    /// The resolve and reject of each promise a worker thread will settle, by
    /// id.
    #[cfg(target_os = "android")]
-   pending:      RefCell<HashMap<u64, (Function<'js>, Function<'js>)>>,
+   pending:        RefCell<HashMap<u64, (Function<'js>, Function<'js>)>>,
    #[cfg(target_os = "android")]
-   ui:           RefCell<HashMap<ContributionId, Callbacks<'js>>>,
+   ui:             RefCell<HashMap<ContributionId, Callbacks<'js>>>,
    /// Slash commands by lowercase name, with the plugin that registered each.
    #[cfg(target_os = "android")]
-   commands:     RefCell<HashMap<String, (String, Function<'js>)>>,
+   commands:       RefCell<HashMap<String, (String, Function<'js>)>>,
    /// `phoenix.messages.onSend` interceptors in registration order, by id.
    #[cfg(target_os = "android")]
-   interceptors:  RefCell<Vec<(u64, String, Function<'js>)>>,
+   interceptors:   RefCell<Vec<(u64, String, Function<'js>)>>,
    /// `phoenix.discord.onRequest` interceptors, by id.
    #[cfg(target_os = "android")]
    request_hooks:  RefCell<HashMap<u64, (String, Function<'js>)>>,
@@ -209,23 +207,25 @@ struct Registry<'js> {
    response_hooks: RefCell<HashMap<u64, (String, Function<'js>)>>,
    /// `phoenix.messages.onEmojiPick` handlers in registration order, by id.
    #[cfg(target_os = "android")]
-   pickers:       RefCell<Vec<(u64, String, Function<'js>)>>,
+   pickers:        RefCell<Vec<(u64, String, Function<'js>)>>,
    /// `phoenix.ui.onEvent` handlers, by id.
    #[cfg(target_os = "android")]
-   event_hooks:   RefCell<Vec<(u64, String, phoenix_wire::Key, bool, Function<'js>)>>,
+   event_hooks:    RefCell<Vec<(u64, String, phoenix_wire::Key, bool, Function<'js>)>>,
    /// `phoenix.ui.onNode` watchers, by id.
    #[cfg(target_os = "android")]
-   node_watchers: RefCell<HashMap<u64, (String, Function<'js>)>>,
+   node_watchers:  RefCell<HashMap<u64, (String, Function<'js>)>>,
    /// Open full-screen plugin pages (`phoenix.ui.openPage`) and their button
    /// callbacks, by page id.
    #[cfg(target_os = "android")]
-   open_pages:    RefCell<HashMap<u32, (String, Vec<Function<'js>>)>>,
-   /// Active in-app notification banner tap callbacks (`phoenix.ui.notify`), by banner id.
+   open_pages:     RefCell<HashMap<u32, (String, Vec<Function<'js>>)>>,
+   /// Active in-app notification banner tap callbacks (`phoenix.ui.notify`), by
+   /// banner id.
    #[cfg(target_os = "android")]
-   banners:       RefCell<HashMap<u32, (String, Function<'js>)>>,
-   /// Active raw JS-mounted subtrees (`phoenix.ui.mount`) and their callbacks, by mount id.
+   banners:        RefCell<HashMap<u32, (String, Function<'js>)>>,
+   /// Active raw JS-mounted subtrees (`phoenix.ui.mount`) and their callbacks,
+   /// by mount id.
    #[cfg(target_os = "android")]
-   mounts:        RefCell<HashMap<u32, (String, Vec<Function<'js>>)>>,
+   mounts:         RefCell<HashMap<u32, (String, Vec<Function<'js>>)>>,
 }
 
 /// A contribution's plugin callbacks. `evaluate` is `render`, or `visible`
@@ -356,7 +356,9 @@ impl Engine {
             let js_value = match &value {
                Chosen::Switch(on) => Ok(Value::new_bool(ctx.clone(), *on)),
                Chosen::Number(number) => Ok(Value::new_float(ctx.clone(), *number)),
-               Chosen::Text(text) => rquickjs::String::from_str(ctx.clone(), text).map(rquickjs::String::into_value),
+               Chosen::Text(text) => {
+                  rquickjs::String::from_str(ctx.clone(), text).map(rquickjs::String::into_value)
+               },
             };
             if let Ok(js_value) = js_value
                && let Err(err) = callback.call::<_, Value<'_>>((js_value,)).catch(&ctx)
@@ -479,7 +481,10 @@ impl Engine {
          let Some((plugin, handler)) = ctx.userdata::<Registry<'_>>().and_then(|registry| {
             let callbacks = registry.ui.borrow();
             let callbacks = callbacks.get(&id)?;
-            let handler = callbacks.pages.get(place)?.get(usize::try_from(index).ok()?)?;
+            let handler = callbacks
+               .pages
+               .get(place)?
+               .get(usize::try_from(index).ok()?)?;
             Some((callbacks.plugin.clone(), handler.clone()))
          }) else {
             return;
@@ -520,7 +525,8 @@ impl Engine {
       });
    }
 
-   /// Runs the tap callback for in-app notification banner `id` and cleans it up.
+   /// Runs the tap callback for in-app notification banner `id` and cleans it
+   /// up.
    #[cfg(target_os = "android")]
    pub fn banner_press(&self, id: u32) {
       self.context.with(|ctx| {
@@ -711,9 +717,9 @@ impl Engine {
       picked
    }
 
-   /// Runs `phoenix.ui.onEvent` handlers matching `event`. When `intercepted` is
-   /// true, returns whether any intercepting handler consumed the event (true)
-   /// or all returned `false` (false, re-injecting to Phoenix).
+   /// Runs `phoenix.ui.onEvent` handlers matching `event`. When `intercepted`
+   /// is true, returns whether any intercepting handler consumed the event
+   /// (true) or all returned `false` (false, re-injecting to Phoenix).
    #[cfg(target_os = "android")]
    pub fn view_event(
       &self,
@@ -1062,7 +1068,8 @@ impl Engine {
       result
    }
 
-   /// Runs matching `phoenix.discord.onRequest` hooks on an outgoing Discord API request.
+   /// Runs matching `phoenix.discord.onRequest` hooks on an outgoing Discord
+   /// API request.
    #[cfg(target_os = "android")]
    pub fn intercept_request(
       &self,
@@ -1221,7 +1228,9 @@ impl Engine {
             },
             Settlement::Int(Ok(number)) => Ok(Ok(Value::new_int(ctx.clone(), number))),
             Settlement::Int(Err(err)) => Ok(Err(err)),
-            Settlement::Text(Ok(text)) => rquickjs::String::from_str(ctx.clone(), &text).map(|text| Ok(text.into_value())),
+            Settlement::Text(Ok(text)) => {
+               rquickjs::String::from_str(ctx.clone(), &text).map(|text| Ok(text.into_value()))
+            },
             Settlement::Rows(Ok(rows)) => {
                serde_json::to_string(&rows)
                   .map_err(|err| Exception::throw_internal(&ctx, &err.to_string()))
@@ -1660,14 +1669,22 @@ fn outcome_of(target: Target, value: Option<&Value<'_>>) -> Outcome {
       }
       if let Some(object) = value.as_object() {
          let argb = |key: &str| {
-            object.get::<_, Option<f64>>(key).ok().flatten().map(|color| {
-               #[expect(clippy::cast_possible_truncation, reason = "colors are 32-bit ARGB")]
-               let color = color as i64;
-               color
-            })
+            object
+               .get::<_, Option<f64>>(key)
+               .ok()
+               .flatten()
+               .map(|color| {
+                  #[expect(clippy::cast_possible_truncation, reason = "colors are 32-bit ARGB")]
+                  let color = color as i64;
+                  color
+               })
          };
          return Some(Rendered {
-            text:  object.get::<_, Option<String>>("text").ok().flatten().unwrap_or_default(),
+            text:  object
+               .get::<_, Option<String>>("text")
+               .ok()
+               .flatten()
+               .unwrap_or_default(),
             color: argb("color"),
             tint:  argb("tint"),
          });
@@ -1724,7 +1741,11 @@ fn actions_of<'js>(
    key: &str,
    handler: &mut impl FnMut(&Object<'js>, &str) -> Option<u32>,
 ) -> Vec<patches::BlockAction> {
-   let Some(array) = object.get::<_, Option<rquickjs::Array<'js>>>(key).ok().flatten() else {
+   let Some(array) = object
+      .get::<_, Option<rquickjs::Array<'js>>>(key)
+      .ok()
+      .flatten()
+   else {
       return Vec::new();
    };
    array
@@ -1733,12 +1754,20 @@ fn actions_of<'js>(
          let action = action.ok()?;
          Some(patches::BlockAction {
             label:   action.get::<_, Option<String>>("label").ok().flatten()?,
-            danger:  action.get::<_, Option<bool>>("danger").ok().flatten().unwrap_or_default(),
-            color:   action.get::<_, Option<f64>>("color").ok().flatten().map(|color| {
-               #[expect(clippy::cast_possible_truncation, reason = "colors are 32-bit ARGB")]
-               let color = color as i64;
-               color
-            }),
+            danger:  action
+               .get::<_, Option<bool>>("danger")
+               .ok()
+               .flatten()
+               .unwrap_or_default(),
+            color:   action
+               .get::<_, Option<f64>>("color")
+               .ok()
+               .flatten()
+               .map(|color| {
+                  #[expect(clippy::cast_possible_truncation, reason = "colors are 32-bit ARGB")]
+                  let color = color as i64;
+                  color
+               }),
             handler: handler(&action, "onPress"),
          })
       })
@@ -1746,7 +1775,10 @@ fn actions_of<'js>(
 }
 
 #[cfg(target_os = "android")]
-fn block_of<'js>(object: &Object<'js>, handlers: &mut Vec<Function<'js>>) -> Option<patches::Block> {
+fn block_of<'js>(
+   object: &Object<'js>,
+   handlers: &mut Vec<Function<'js>>,
+) -> Option<patches::Block> {
    let text = |object: &Object<'js>, key: &str| object.get::<_, Option<String>>(key).ok().flatten();
    let flag = |object: &Object<'js>, key: &str| {
       object
@@ -1765,11 +1797,15 @@ fn block_of<'js>(object: &Object<'js>, handlers: &mut Vec<Function<'js>>) -> Opt
          patches::Block::Text {
             title: text(object, "title"),
             text:  text(object, "text")?,
-            color: object.get::<_, Option<f64>>("color").ok().flatten().map(|color| {
-               #[expect(clippy::cast_possible_truncation, reason = "colors are 32-bit ARGB")]
-               let color = color as i64;
-               color
-            }),
+            color: object
+               .get::<_, Option<f64>>("color")
+               .ok()
+               .flatten()
+               .map(|color| {
+                  #[expect(clippy::cast_possible_truncation, reason = "colors are 32-bit ARGB")]
+                  let color = color as i64;
+                  color
+               }),
          }
       },
       "entry" => {
@@ -1798,8 +1834,8 @@ fn block_of<'js>(object: &Object<'js>, handlers: &mut Vec<Function<'js>>) -> Opt
          let submit = handler(object, "onSubmit")?;
          patches::Block::Input {
             placeholder: text(object, "placeholder").unwrap_or_default(),
-            handler: submit,
-            send: flag(object, "sendButton"),
+            handler:     submit,
+            send:        flag(object, "sendButton"),
          }
       },
       "button" => {
@@ -1827,33 +1863,36 @@ fn remover<'js>(
    if let Some((id, target)) = update {
       function.set(
          "update",
-         Function::new(ctx.clone(), move |arg: rquickjs::function::Opt<Value<'_>>| {
-            if matches!(target, Target::Header | Target::Composer)
-               && let Some(object) = arg.0.as_ref().and_then(Value::as_object)
-            {
-               let icon = object.get::<_, Option<String>>("icon").ok().flatten();
-               let label = object.get::<_, Option<String>>("label").ok().flatten();
-               let tint = match object.get::<_, Value<'_>>("tint") {
-                  Ok(value) if value.is_null() => Some(None),
-                  Ok(value) if value.is_undefined() => None,
-                  Ok(value) => value.as_number().map(|color| Some(color as i64)),
-                  Err(_) => None,
-               };
-               patches::update_button(id, icon, label, tint);
-               return;
-            }
-            let at = arg
-               .0
-               .and_then(|value| value.as_string().and_then(|text| text.to_string().ok()));
-            let place = at.map(|at| {
-               if target == Target::Tab {
-                  Place::User(Some(at))
-               } else {
-                  Place::Message(at)
+         Function::new(
+            ctx.clone(),
+            move |arg: rquickjs::function::Opt<Value<'_>>| {
+               if matches!(target, Target::Header | Target::Composer)
+                  && let Some(object) = arg.0.as_ref().and_then(Value::as_object)
+               {
+                  let icon = object.get::<_, Option<String>>("icon").ok().flatten();
+                  let label = object.get::<_, Option<String>>("label").ok().flatten();
+                  let tint = match object.get::<_, Value<'_>>("tint") {
+                     Ok(value) if value.is_null() => Some(None),
+                     Ok(value) if value.is_undefined() => None,
+                     Ok(value) => value.as_number().map(|color| Some(color as i64)),
+                     Err(_) => None,
+                  };
+                  patches::update_button(id, icon, label, tint);
+                  return;
                }
-            });
-            patches::update(id, place);
-         })?,
+               let at = arg
+                  .0
+                  .and_then(|value| value.as_string().and_then(|text| text.to_string().ok()));
+               let place = at.map(|at| {
+                  if target == Target::Tab {
+                     Place::User(Some(at))
+                  } else {
+                     Place::Message(at)
+                  }
+               });
+               patches::update(id, place);
+            },
+         )?,
       )?;
    }
    Ok(function)
@@ -1886,17 +1925,28 @@ fn ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>>
          let message = options.get::<_, Option<String>>("message")?;
          let items = parse_menu_items(&options)?;
          if message.is_none() && items.is_empty() {
-            return Err(Exception::throw_type(&ctx, "choose needs options or a message"));
+            return Err(Exception::throw_type(
+               &ctx,
+               "choose needs options or a message",
+            ));
          }
          in_background(&ctx, move || {
-            let labels = items.iter().map(|item| item.label.clone()).collect::<Vec<_>>();
-            // A list goes in a sheet like Discord's own menus when one can be drawn.
+            let labels = items
+               .iter()
+               .map(|item| item.label.clone())
+               .collect::<Vec<_>>();
+            // A list goes in a sheet like Discord's own menus when one can be
+            // drawn.
             if message.is_none()
                && let Some(index) = patches::menu(title.clone(), items)
             {
                return Settlement::Int(Ok(index));
             }
-            Settlement::Int(crate::picker::choose(title.as_deref(), message.as_deref(), &labels))
+            Settlement::Int(crate::picker::choose(
+               title.as_deref(),
+               message.as_deref(),
+               &labels,
+            ))
          })
       })?,
    )?;
@@ -1913,7 +1963,10 @@ fn ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>>
             .unwrap_or_default();
          let items = parse_menu_items(&options)?;
          in_background(&ctx, move || {
-            let labels = items.iter().map(|item| item.label.clone()).collect::<Vec<_>>();
+            let labels = items
+               .iter()
+               .map(|item| item.label.clone())
+               .collect::<Vec<_>>();
             let body = patches::SheetBody {
                text: text.clone(),
                monospace,
@@ -2000,7 +2053,10 @@ fn ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>>
             .insert(id, (owner.clone(), handlers));
          patches::open_page(id, title, sections);
          let handle = Object::new(ctx.clone())?;
-         handle.set("close", Function::new(ctx, move || patches::close_page(id))?)?;
+         handle.set(
+            "close",
+            Function::new(ctx, move || patches::close_page(id))?,
+         )?;
          Ok::<_, rquickjs::Error>(handle)
       })?,
    )?;
@@ -2017,10 +2073,7 @@ fn ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>>
       "onEvent",
       Function::new(
          ctx.clone(),
-         move |ctx: Ctx<'js>,
-               event: String,
-               handler: Function<'js>,
-               options: Opt<Object<'js>>| {
+         move |ctx: Ctx<'js>, event: String, handler: Function<'js>, options: Opt<Object<'js>>| {
             on_view_event(&ctx, &owner, &event, handler, options.0)
          },
       )?,
@@ -2034,9 +2087,7 @@ fn ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>>
                Exception::throw_type(&ctx, &format!("unknown Phoenix event {event:?}"))
             })?;
             let wire = match payload.0 {
-               Some(value) if !value.is_undefined() && !value.is_null() => {
-                  js_to_wire(&ctx, value)?
-               },
+               Some(value) if !value.is_undefined() && !value.is_null() => js_to_wire(&ctx, value)?,
                _ => phoenix_wire::Value::Obj(Vec::new()),
             };
             Ok::<_, rquickjs::Error>(patches::dispatch_event(node, prop.key(), &wire))
@@ -2090,19 +2141,29 @@ fn ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>>
                },
                None => (PatchTarget::Node, false, None),
             };
-            let handle =
-               patches::add_prop_patch(owner.clone(), matcher, target, props, add_on, once, timeout);
+            let handle = patches::add_prop_patch(
+               owner.clone(),
+               matcher,
+               target,
+               props,
+               add_on,
+               once,
+               timeout,
+            );
             remover(&ctx, move |_| patches::remove_prop_patch(handle), None)
          },
       )?,
    )?;
    ui.set(
       "update",
-      Function::new(ctx.clone(), |ctx: Ctx<'js>, node: i32, patch: Object<'js>| {
-         let props = parse_props(&ctx, &patch, None)?;
-         patches::update_node(node, props);
-         Ok::<_, rquickjs::Error>(())
-      })?,
+      Function::new(
+         ctx.clone(),
+         |ctx: Ctx<'js>, node: i32, patch: Object<'js>| {
+            let props = parse_props(&ctx, &patch, None)?;
+            patches::update_node(node, props);
+            Ok::<_, rquickjs::Error>(())
+         },
+      )?,
    )?;
    ui.set(
       "find",
@@ -2123,28 +2184,27 @@ fn ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>>
    )?;
    ui.set(
       "node",
-      Function::new(ctx.clone(), |ctx: Ctx<'js>, id: i32| -> rquickjs::Result<Value<'js>> {
-         match patches::node_info(id) {
-            Some(info) => Ok(node_info_object(&ctx, &info)?.into_value()),
-            None => Ok(Value::new_null(ctx)),
-         }
-      })?,
+      Function::new(
+         ctx.clone(),
+         |ctx: Ctx<'js>, id: i32| -> rquickjs::Result<Value<'js>> {
+            match patches::node_info(id) {
+               Some(info) => Ok(node_info_object(&ctx, &info)?.into_value()),
+               None => Ok(Value::new_null(ctx)),
+            }
+         },
+      )?,
    )?;
-   ui.set(
-      "root",
-      Function::new(ctx.clone(), || patches::root_id())?,
-   )?;
+   ui.set("root", Function::new(ctx.clone(), || patches::root_id())?)?;
    let owner = plugin.to_owned();
    ui.set(
       "mount",
       Function::new(
          ctx.clone(),
-         move |ctx: Ctx<'js>,
-               parent: Value<'js>,
-               node: Object<'js>,
-               options: Opt<Object<'js>>| {
+         move |ctx: Ctx<'js>, parent: Value<'js>, node: Object<'js>, options: Opt<Object<'js>>| {
             static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
-            let parent_id = if parent.as_string().is_some_and(|s| s.to_string().ok().as_deref() == Some("root"))
+            let parent_id = if parent
+               .as_string()
+               .is_some_and(|s| s.to_string().ok().as_deref() == Some("root"))
                || parent.is_null()
                || parent.is_undefined()
             {
@@ -2152,7 +2212,10 @@ fn ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>>
             } else if let Some(id) = parent.as_int() {
                Some(id)
             } else if let Some(num) = parent.as_float() {
-               #[expect(clippy::cast_possible_truncation, reason = "Phoenix node ids fit in i32")]
+               #[expect(
+                  clippy::cast_possible_truncation,
+                  reason = "Phoenix node ids fit in i32"
+               )]
                Some(num as i32)
             } else {
                return Err(Exception::throw_type(
@@ -2160,13 +2223,24 @@ fn ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>>
                   "mount(parent, node) expects a node id or \"root\"",
                ));
             };
-            let before = match options.0.and_then(|opts| opts.get::<_, Value<'js>>("before").ok()) {
-               Some(val) if val.as_string().is_some_and(|s| s.to_string().ok().as_deref() == Some("start")) => {
+            let before = match options
+               .0
+               .and_then(|opts| opts.get::<_, Value<'js>>("before").ok())
+            {
+               Some(val)
+                  if val
+                     .as_string()
+                     .is_some_and(|s| s.to_string().ok().as_deref() == Some("start")) =>
+               {
                   patches::MountBefore::Start
                },
                Some(val) if let Some(sib) = val.as_int() => patches::MountBefore::Node(sib),
-               Some(val) if let Some(num) = val.as_float() => {
-                  #[expect(clippy::cast_possible_truncation, reason = "Phoenix node ids fit in i32")]
+               Some(val) if let Some(num) = val.as_float() =>
+               {
+                  #[expect(
+                     clippy::cast_possible_truncation,
+                     reason = "Phoenix node ids fit in i32"
+                  )]
                   patches::MountBefore::Node(num as i32)
                },
                _ => patches::MountBefore::End,
@@ -2254,7 +2328,11 @@ fn parse_menu_items<'js>(options: &Object<'js>) -> rquickjs::Result<Vec<patches:
          Some(patches::MenuItem {
             label:  option.get::<_, Option<String>>("label").ok().flatten()?,
             icon:   option.get::<_, Option<String>>("icon").ok().flatten(),
-            danger: option.get::<_, Option<bool>>("danger").ok().flatten().unwrap_or_default(),
+            danger: option
+               .get::<_, Option<bool>>("danger")
+               .ok()
+               .flatten()
+               .unwrap_or_default(),
          })
       })
       .collect())
@@ -2640,10 +2718,14 @@ fn parse_mount_node<'js>(
    };
    let on_press = match object.get::<_, Option<Function<'js>>>("onPress")? {
       Some(cb) => {
-         #[expect(clippy::cast_possible_truncation, reason = "mounted trees have few callbacks")]
+         #[expect(
+            clippy::cast_possible_truncation,
+            reason = "mounted trees have few callbacks"
+         )]
          let idx = handlers.len() as u32;
          handlers.push(cb);
-         // Automatically wire `on: ["press"]` if the caller didn't add it manually.
+         // Automatically wire `on: ["press"]` if the caller didn't add it
+         // manually.
          let has_press = props.iter().any(|(k, v)| {
             *k == phoenix_ui::Prop::ON
                && matches!(v, phoenix_wire::Value::Arr(arr) if arr.iter().any(|x| x.as_str() == Some("press")))
@@ -2652,13 +2734,19 @@ fn parse_mount_node<'js>(
             let mut on = props
                .iter()
                .find(|(k, _)| *k == phoenix_ui::Prop::ON)
-               .and_then(|(_, v)| match v {
-                  phoenix_wire::Value::Arr(arr) => Some(arr.clone()),
-                  _ => None,
+               .and_then(|(_, v)| {
+                  match v {
+                     phoenix_wire::Value::Arr(arr) => Some(arr.clone()),
+                     _ => None,
+                  }
                })
                .unwrap_or_default();
             on.push(phoenix_wire::Value::Str("press".to_owned()));
-            phoenix_ui::set_prop(&mut props, phoenix_ui::Prop::ON, Some(phoenix_wire::Value::Arr(on)));
+            phoenix_ui::set_prop(
+               &mut props,
+               phoenix_ui::Prop::ON,
+               Some(phoenix_wire::Value::Arr(on)),
+            );
          }
          Some(idx)
       },
@@ -2666,7 +2754,10 @@ fn parse_mount_node<'js>(
    };
    let on_dismiss = match object.get::<_, Option<Function<'js>>>("onDismiss")? {
       Some(cb) => {
-         #[expect(clippy::cast_possible_truncation, reason = "mounted trees have few callbacks")]
+         #[expect(
+            clippy::cast_possible_truncation,
+            reason = "mounted trees have few callbacks"
+         )]
          let idx = handlers.len() as u32;
          handlers.push(cb);
          Some(idx)
@@ -2674,10 +2765,12 @@ fn parse_mount_node<'js>(
       None => None,
    };
    let kids = match object.get::<_, Option<Vec<Object<'js>>>>("children")? {
-      Some(raw_kids) => raw_kids
-         .iter()
-         .map(|kid| parse_mount_node(ctx, kid, handlers))
-         .collect::<rquickjs::Result<Vec<_>>>()?,
+      Some(raw_kids) => {
+         raw_kids
+            .iter()
+            .map(|kid| parse_mount_node(ctx, kid, handlers))
+            .collect::<rquickjs::Result<Vec<_>>>()?
+      },
       None => Vec::new(),
    };
    Ok(patches::MountNode {
@@ -2697,15 +2790,9 @@ fn bridge_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
       "invoke",
       Function::new(
          ctx.clone(),
-         |ctx: Ctx<'js>,
-          module: u16,
-          method: u16,
-          args: Opt<Value<'js>>,
-          body: Opt<String>| {
+         |ctx: Ctx<'js>, module: u16, method: u16, args: Opt<Value<'js>>, body: Opt<String>| {
             let wire_args = match args.0 {
-               Some(val) if !val.is_undefined() && !val.is_null() => {
-                  js_to_host_wire(&ctx, val)?
-               },
+               Some(val) if !val.is_undefined() && !val.is_null() => js_to_host_wire(&ctx, val)?,
                _ => phoenix_wire::Value::Obj(Vec::new()),
             };
             let call = phoenix_wire::HostCall {
@@ -2743,7 +2830,10 @@ fn js_to_host_wire<'js>(
                .map_err(|_| {
                   Exception::throw_type(
                      ctx,
-                     &format!("unknown host field key {name:?} (pass numeric hh.jb key or known prop name)"),
+                     &format!(
+                        "unknown host field key {name:?} (pass numeric hh.jb key or known prop \
+                         name)"
+                     ),
                   )
                })?
          };
@@ -2797,7 +2887,10 @@ fn js_to_wire<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<phoeni
    }
    if let Some(num) = value.as_float() {
       if num.fract() == 0.0 && num > f64::from(i32::MAX) && num <= (1i64 << 53) as f64 {
-         #[expect(clippy::cast_possible_truncation, reason = "checked finite integer range")]
+         #[expect(
+            clippy::cast_possible_truncation,
+            reason = "checked finite integer range"
+         )]
          return Ok(phoenix_wire::Value::I64(num as i64));
       }
       return Ok(phoenix_wire::Value::F64(num));
@@ -3030,7 +3123,8 @@ fn extract_hook_body<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> Option<Vec<u8>>
 }
 
 /// Chains matching `onResponse` hooks sequentially, supporting both synchronous
-/// and Promise-returning handlers without blocking Phoenix's `wasm-guest` thread.
+/// and Promise-returning handlers without blocking Phoenix's `wasm-guest`
+/// thread.
 #[cfg(target_os = "android")]
 fn run_response_chain<'js>(
    ctx: &Ctx<'js>,
@@ -3131,7 +3225,8 @@ fn run_response_chain<'js>(
       })();
       if let Err(err) = attach.catch(ctx) {
          log::error!("[{plugin}] onResponse promise: {err}");
-         // Dropping the sender causes `run_response_hooks` to deliver the original frame.
+         // Dropping the sender causes `run_response_hooks` to deliver the
+         // original frame.
          let _ = shared_done
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3235,7 +3330,10 @@ fn discord_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<
          let client_id = options.get::<_, Option<String>>("clientId")?;
          let redirect_uri = options.get::<_, Option<String>>("redirectUri")?;
          let (Some(client_id), Some(redirect_uri)) = (client_id, redirect_uri) else {
-            return Err(Exception::throw_type(&ctx, "authorize needs clientId and redirectUri"));
+            return Err(Exception::throw_type(
+               &ctx,
+               "authorize needs clientId and redirectUri",
+            ));
          };
          let request = discord::Authorization {
             client_id,

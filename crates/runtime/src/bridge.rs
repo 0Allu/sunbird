@@ -112,7 +112,8 @@ static ENQUEUE_METHOD: AtomicPtr<_jmethodID> = AtomicPtr::new(ptr::null_mut());
 /// `phoenix.discord.onResponse` replies) to be delivered on `wasm-guest`.
 static DEFERRED_DISPATCHES: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 /// Sentinel passed through `GuestHost.d` to wake `wasm-guest` and drain
-/// [`DEFERRED_DISPATCHES`]. Never matches a real view frame (`00 00 00 00 01 01`).
+/// [`DEFERRED_DISPATCHES`]. Never matches a real view frame (`00 00 00 00 01
+/// 01`).
 const WAKE_SENTINEL: &[u8] = b"\0\0\0\0PHXW";
 
 pub fn install(sink: Box<dyn Sink>) {

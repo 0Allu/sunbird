@@ -247,7 +247,8 @@ impl NodeMatch {
 pub enum PatchTarget {
    /// The matching node itself.
    Node,
-   /// The enclosing sheet (and its created outer wrapper), for zero-flash suppression.
+   /// The enclosing sheet (and its created outer wrapper), for zero-flash
+   /// suppression.
    Sheet,
    /// The enclosing virtualized/row-gesture list.
    List,
@@ -549,7 +550,10 @@ enum Job {
       answer: Sender<i32>,
    },
    /// Close menu `menu`, answering `index`.
-   CloseMenu { menu: u32, index: i32 },
+   CloseMenu {
+      menu:  u32,
+      index: i32,
+   },
    /// Push a full-screen page onto the active navigator.
    OpenPage {
       id:       u32,
@@ -559,7 +563,10 @@ enum Job {
    /// Pop plugin full-screen page `id`.
    ClosePage(u32),
    /// Run button `index` on plugin full-screen page `page`.
-   PagePress { page: u32, index: u32 },
+   PagePress {
+      page:  u32,
+      index: u32,
+   },
    /// Reconcile `hidden: true` across live nodes matching `self.hidden`.
    RefreshHidden,
    /// A press on custom emoji `id` in the picker, held for the `onEmojiPick`
@@ -599,7 +606,8 @@ enum Job {
    DismissBanner(u32),
    /// User tapped in-app notification banner `id`.
    BannerPressed(u32),
-   /// Mount a raw JS-built subtree onto `parent` (or `mirror.root()` when None).
+   /// Mount a raw JS-built subtree onto `parent` (or `mirror.root()` when
+   /// None).
    Mount {
       id:     u32,
       parent: Option<i32>,
@@ -617,56 +625,57 @@ enum Job {
 
 #[derive(Default)]
 struct Patches {
-   mirror:          Mirror,
-   templates:       Templates,
-   seen:            Seen,
-   contributions:   Vec<Contribution>,
-   commands:        Vec<Command>,
-   interceptors:    usize,
-   pickers:         usize,
-   event_hooks:     Vec<EventHookMeta>,
-   node_watchers:   Vec<NodeWatcher>,
-   prop_patches:    Vec<PropPatch>,
-   /// Live lists discovered for each `PatchTarget::List` prop patch (by patch id).
-   patched_lists:   HashMap<i32, HashSet<u64>>,
-   slots:           Vec<Slot>,
-   anchors:       HashMap<Target, HashSet<i32>>,
-   handlers:      HashMap<i32, Handler>,
-   results:       HashMap<(ContributionId, Place), Outcome>,
-   pending:       HashSet<(ContributionId, Place)>,
-   next_id:       i32,
+   mirror:                 Mirror,
+   templates:              Templates,
+   seen:                   Seen,
+   contributions:          Vec<Contribution>,
+   commands:               Vec<Command>,
+   interceptors:           usize,
+   pickers:                usize,
+   event_hooks:            Vec<EventHookMeta>,
+   node_watchers:          Vec<NodeWatcher>,
+   prop_patches:           Vec<PropPatch>,
+   /// Live lists discovered for each `PatchTarget::List` prop patch (by patch
+   /// id).
+   patched_lists:          HashMap<i32, HashSet<u64>>,
+   slots:                  Vec<Slot>,
+   anchors:                HashMap<Target, HashSet<i32>>,
+   handlers:               HashMap<i32, Handler>,
+   results:                HashMap<(ContributionId, Place), Outcome>,
+   pending:                HashSet<(ContributionId, Place)>,
+   next_id:                i32,
    /// The channel last seen open.
-   channel:       Option<String>,
-   suggestions:   commands::Suggestions,
+   channel:                Option<String>,
+   suggestions:            commands::Suggestions,
    /// Sends plugins already saw, let through once when Rust gets them back.
-   resent:        Vec<Vec<u8>>,
+   resent:                 Vec<Vec<u8>>,
    /// Message text color plugins asked for, by message id.
-   tints:         HashMap<String, i64>,
+   tints:                  HashMap<String, i64>,
    /// Phoenix's author and content text nodes: their message and props as
    /// Phoenix set them.
-   texts:         HashMap<i32, (String, Props)>,
+   texts:                  HashMap<i32, (String, Props)>,
    /// The plugin tab open on each profile pager.
-   shown:         HashMap<i32, ContributionId>,
+   shown:                  HashMap<i32, ContributionId>,
    /// The height Rust last gave each pager.
-   rust_heights:  HashMap<i32, Value>,
+   rust_heights:           HashMap<i32, Value>,
    /// The height of each plugin page, by pager.
-   page_heights:  HashMap<(i32, ContributionId), f64>,
+   page_heights:           HashMap<(i32, ContributionId), f64>,
    /// What is typed in the text boxes of plugin pages, so a redraw keeps it.
-   typed:         HashMap<(ContributionId, Place, u32), String>,
+   typed:                  HashMap<(ContributionId, Place, u32), String>,
    /// A plugin tab's text and bar, by the tab.
-   tab_parts:     HashMap<i32, (i32, i32)>,
+   tab_parts:              HashMap<i32, (i32, i32)>,
    /// Open menu sheets and who waits for them.
-   menus:         HashMap<u32, Sender<i32>>,
+   menus:                  HashMap<u32, Sender<i32>>,
    /// Last seen parent container that hosts sheets, kept so sheets can open
    /// even after a message action sheet dismisses.
-   sheet_host:    Option<i32>,
+   sheet_host:             Option<i32>,
    /// Pagers whose own tab labels we color, since a plugin tab was opened:
    /// their animation stops at Phoenix's last tab and would light it up.
-   static_tabs:    HashSet<i32>,
+   static_tabs:            HashSet<i32>,
    /// Accessibility ids hidden by `phoenix.ui.hide`, with active refcount.
-   hidden:         HashMap<String, usize>,
+   hidden:                 HashMap<String, usize>,
    /// `(handle, plugin, aid)` entries for `phoenix.ui.hide`.
-   hidden_entries: Vec<(u64, String, String)>,
+   hidden_entries:         Vec<(u64, String, String)>,
    /// Node ids on which `phoenix.ui.hide` currently holds `hidden: true`
    /// (`View.GONE`). Reconciled on every batch so dynamic swaps (like
    /// `"Record Voice Message"` -> `"send"` inside the same wrapper) restore
@@ -930,7 +939,9 @@ fn run(job: Job) -> Vec<Op> {
          if let Some(engine) = crate::engine() {
             engine.ui_block(contribution, &place, index, Some(text.unwrap_or_default()));
          }
-         input.map(|input| vec![commands::force_text(input, "")]).unwrap_or_default()
+         input
+            .map(|input| vec![commands::force_text(input, "")])
+            .unwrap_or_default()
       },
       Job::Menu {
          title,
@@ -968,21 +979,23 @@ fn run(job: Job) -> Vec<Op> {
          if let Some(engine) = crate::engine() {
             engine.ui_block(contribution, &place, index, text);
          }
-         input.map(|input| vec![commands::force_text(input, "")]).unwrap_or_default()
+         input
+            .map(|input| vec![commands::force_text(input, "")])
+            .unwrap_or_default()
       },
       Job::Evaluate(contribution, place) => {
          let context = UiContext {
-            channel_id: patches().channel.clone(),
-            message_id: match &place {
+            channel_id:      patches().channel.clone(),
+            message_id:      match &place {
                Place::Message(id) => Some(id.clone()),
                _ => None,
             },
-            user_id:    match &place {
+            user_id:         match &place {
                Place::User(id) => id.clone(),
                _ => None,
             },
             current_user_id: None,
-            message:    None,
+            message:         None,
          };
          let outcome =
             crate::engine().and_then(|engine| engine.ui_evaluate(contribution, &place, &context));
@@ -1251,11 +1264,7 @@ pub fn update_button(
    tint: Option<Option<i64>>,
 ) {
    let mut state = patches();
-   let Some(contribution) = state
-      .contributions
-      .iter_mut()
-      .find(|known| known.id == id)
-   else {
+   let Some(contribution) = state.contributions.iter_mut().find(|known| known.id == id) else {
       return;
    };
    if let Some(icon) = icon {
@@ -1371,7 +1380,8 @@ pub fn root_id() -> Option<i32> {
    patches().mirror.root()
 }
 
-/// Serializes the live mirrored view tree for the debug inspector (`GET /tree`).
+/// Serializes the live mirrored view tree for the debug inspector (`GET
+/// /tree`).
 pub fn dump_tree(root: Option<i32>, max_depth: usize) -> serde_json::Value {
    let state = patches();
    let Some(id) = root.or_else(|| state.mirror.root()) else {
@@ -1398,7 +1408,11 @@ pub fn hide(plugin: String, aid: String) -> u64 {
 /// Undoes a [`hide`] call and restores the node if no other plugin hides it.
 pub fn unhide(handle: u64) {
    let mut state = patches();
-   let Some(pos) = state.hidden_entries.iter().position(|(id, ..)| *id == handle) else {
+   let Some(pos) = state
+      .hidden_entries
+      .iter()
+      .position(|(id, ..)| *id == handle)
+   else {
       return;
    };
    let (_, _, aid) = state.hidden_entries.remove(pos);
@@ -1528,7 +1542,8 @@ pub fn remove_prop_patch(id: u64) {
    }
 }
 
-/// Injects a raw view event (`phoenix.ui.dispatch`) straight to Phoenix's Rust guest.
+/// Injects a raw view event (`phoenix.ui.dispatch`) straight to Phoenix's Rust
+/// guest.
 pub fn dispatch_event(node: i32, event: Key, payload: &Value) -> bool {
    let frame = encode_view_event(node, event, payload);
    patches().resent.push(frame.clone());
@@ -1547,12 +1562,11 @@ pub fn update_node(node: i32, props: Props) {
 
 /// Finds all live nodes matching `matcher` (`phoenix.ui.find`).
 pub fn find_nodes(matcher: &NodeMatch) -> Vec<i32> {
-   patches()
-      .mirror
-      .nodes_where(&|aid| matcher.matches(aid))
+   patches().mirror.nodes_where(&|aid| matcher.matches(aid))
 }
 
-/// Finds the first node at or under `root` matching `matcher` (`phoenix.ui.findDown`).
+/// Finds the first node at or under `root` matching `matcher`
+/// (`phoenix.ui.findDown`).
 pub fn find_down(root: i32, matcher: &NodeMatch, max_depth: usize) -> Option<i32> {
    patches()
       .mirror
@@ -1609,7 +1623,9 @@ pub fn forget(plugin: &str) {
       }
    }
    state.event_hooks.retain(|hook| hook.plugin != plugin);
-   state.node_watchers.retain(|watcher| watcher.plugin != plugin);
+   state
+      .node_watchers
+      .retain(|watcher| watcher.plugin != plugin);
    let had_list_patches = state
       .prop_patches
       .iter()
@@ -1660,7 +1676,10 @@ impl Patches {
          for op in &ops {
             if let Op::Update { id, props } = op
                && let Some(height) = prop(props, Prop::HEIGHT)
-               && self.anchors.get(&Target::Tab).is_some_and(|pagers| pagers.contains(id))
+               && self
+                  .anchors
+                  .get(&Target::Tab)
+                  .is_some_and(|pagers| pagers.contains(id))
             {
                self.rust_heights.insert(*id, height.clone());
             }
@@ -1683,7 +1702,8 @@ impl Patches {
          // Expire timed prop patches before matching.
          if !self.prop_patches.is_empty() {
             let now = Instant::now();
-            self.prop_patches
+            self
+               .prop_patches
                .retain(|patch| patch.deadline.is_none_or(|deadline| now <= deadline));
          }
          // Apply declarative Rust-side prop patches synchronously.
@@ -1749,11 +1769,13 @@ impl Patches {
                }
             }
             if !consumed_once.is_empty() {
-               self.prop_patches
+               self
+                  .prop_patches
                   .retain(|patch| !consumed_once.contains(&patch.id));
             }
          }
-         // Notify raw node watchers (`phoenix.ui.onNode`) for matching newly created nodes.
+         // Notify raw node watchers (`phoenix.ui.onNode`) for matching newly
+         // created nodes.
          if !self.node_watchers.is_empty() {
             for id in &named {
                let Some(aid) = self.mirror.accessibility_id(*id) else {
@@ -1852,10 +1874,10 @@ impl Patches {
             matches!(op, Op::Update { id, props }
                if self.hidden_nodes.contains(id) && prop(props, HIDDEN).is_some())
          });
-      let tabbed = ops
-         .iter()
-         .any(|op| matches!(op, Op::Update { id, .. }
-            if self.shown.contains_key(id) || self.static_tabs.contains(id)));
+      let tabbed = ops.iter().any(|op| {
+         matches!(op, Op::Update { id, .. }
+            if self.shown.contains_key(id) || self.static_tabs.contains(id))
+      });
       let recolors = !self.tints.is_empty()
          && ops.iter().any(|op| {
             matches!(op, Op::Create { id, .. } | Op::Update { id, .. } if self.tint_of(*id).is_some())
@@ -1886,17 +1908,28 @@ impl Patches {
       let mut recolor = Vec::new();
       for op in ops {
          match op {
-            Op::Create { id, kind, mut props } if patch_ops.contains_key(&id) => {
+            Op::Create {
+               id,
+               kind,
+               mut props,
+            } if patch_ops.contains_key(&id) => {
                if let Some((extra_props, add_on)) = patch_ops.get(&id) {
                   apply_prop_patch(&mut props, extra_props, add_on, None);
                }
                out.push(Op::Create { id, kind, props });
             },
-            Op::Create { id, kind, mut props }
-               if self.patched_lists.contains_key(&id) && prop(&props, Prop::ON).is_some() =>
-            {
+            Op::Create {
+               id,
+               kind,
+               mut props,
+            } if self.patched_lists.contains_key(&id) && prop(&props, Prop::ON).is_some() => {
                let (extra_props, add_on) = self.list_patch_for(id);
-               apply_prop_patch(&mut props, &extra_props, &add_on, Some(self.mirror.list_on(id)));
+               apply_prop_patch(
+                  &mut props,
+                  &extra_props,
+                  &add_on,
+                  Some(self.mirror.list_on(id)),
+               );
                list_updates.remove(&id);
                out.push(Op::Create { id, kind, props });
             },
@@ -1904,7 +1937,12 @@ impl Patches {
                if self.patched_lists.contains_key(&id) && prop(&props, Prop::ON).is_some() =>
             {
                let (extra_props, add_on) = self.list_patch_for(id);
-               apply_prop_patch(&mut props, &extra_props, &add_on, Some(self.mirror.list_on(id)));
+               apply_prop_patch(
+                  &mut props,
+                  &extra_props,
+                  &add_on,
+                  Some(self.mirror.list_on(id)),
+               );
                list_updates.remove(&id);
                out.push(Op::Update { id, props });
             },
@@ -2090,8 +2128,7 @@ impl Patches {
          {
             self.seen.long_pressed = self.row_message(*node, index);
          }
-         if !self.event_hooks.is_empty()
-            && self.event_hooks.iter().any(|hook| hook.event == *event)
+         if !self.event_hooks.is_empty() && self.event_hooks.iter().any(|hook| hook.event == *event)
          {
             let intercept = self
                .event_hooks
@@ -2269,7 +2306,9 @@ impl Patches {
                if self.typed.len() >= RESULTS_CAP {
                   self.typed.clear();
                }
-               self.typed.insert((contribution, place, index), text.to_owned());
+               self
+                  .typed
+                  .insert((contribution, place, index), text.to_owned());
             } else if event == Prop::SUBMIT.key() {
                let text = self.typed.remove(&(contribution, place.clone(), index));
                queue(Job::Block {
@@ -2306,10 +2345,9 @@ impl Patches {
             queue(Job::MountCallback { mount, callback });
          },
          Handler::Page { contribution } if event == LAYOUT => {
-            if let (Some(slot), Some(height)) = (
-               slot,
-               payload.field(Prop::HEIGHT.key()).and_then(number),
-            ) {
+            if let (Some(slot), Some(height)) =
+               (slot, payload.field(Prop::HEIGHT.key()).and_then(number))
+            {
                queue(Job::PageHeight {
                   pager: slot.anchor,
                   contribution,
@@ -2354,7 +2392,9 @@ impl Patches {
             }
          })
          .collect();
-      let draft = self.templates.menu(title, body, rows, Handler::Choice { menu, index: -1 });
+      let draft = self
+         .templates
+         .menu(title, body, rows, Handler::Choice { menu, index: -1 });
       let (Some(host), Some(draft)) = (host, draft) else {
          let _ = answer.send(-2);
          return Vec::new();
@@ -2383,7 +2423,11 @@ impl Patches {
       if let Some(answer) = self.menus.remove(&menu) {
          let _ = answer.send(index);
       }
-      let Some(at) = self.slots.iter().position(|slot| slot.kind == SlotKind::Menu(menu)) else {
+      let Some(at) = self
+         .slots
+         .iter()
+         .position(|slot| slot.kind == SlotKind::Menu(menu))
+      else {
          return Vec::new();
       };
       let slot = self.slots.remove(at);
@@ -2401,9 +2445,11 @@ impl Patches {
 
    /// The topmost plugin page pushed onto `navigator`, if any.
    fn top_page_on(&self, navigator: i32) -> Option<u32> {
-      self.slots.iter().rev().find_map(|slot| match slot.kind {
-         SlotKind::Page(id) if slot.parent == navigator => Some(id),
-         _ => None,
+      self.slots.iter().rev().find_map(|slot| {
+         match slot.kind {
+            SlotKind::Page(id) if slot.parent == navigator => Some(id),
+            _ => None,
+         }
       })
    }
 
@@ -2433,21 +2479,18 @@ impl Patches {
       if let Some(title_node) = page.find(PAGE_TITLE) {
          title_node.set(Prop::TEXT, Some(Value::Str(title.to_owned())));
       }
-      let (header_padding, header_height) = self
-         .mirror
-         .stack_header()
-         .map_or_else(
-            || (Value::Rect([6.0, 44.0, 6.0, 0.0]), Value::F64(100.0)),
-            |header| {
-               let padding = prop(header, Prop::PADDING)
-                  .cloned()
-                  .unwrap_or_else(|| Value::Rect([6.0, 44.0, 6.0, 0.0]));
-               let height = prop(header, Prop::HEIGHT)
-                  .cloned()
-                  .unwrap_or(Value::F64(100.0));
-               (padding, height)
-            },
-         );
+      let (header_padding, header_height) = self.mirror.stack_header().map_or_else(
+         || (Value::Rect([6.0, 44.0, 6.0, 0.0]), Value::F64(100.0)),
+         |header| {
+            let padding = prop(header, Prop::PADDING)
+               .cloned()
+               .unwrap_or_else(|| Value::Rect([6.0, 44.0, 6.0, 0.0]));
+            let height = prop(header, Prop::HEIGHT)
+               .cloned()
+               .unwrap_or(Value::F64(100.0));
+            (padding, height)
+         },
+      );
       if let Some(node) = page.find(PAGE_HEADER) {
          node.set(Prop::PADDING, Some(header_padding));
          node.set(Prop::HEIGHT, Some(header_height.clone()));
@@ -2456,7 +2499,10 @@ impl Patches {
          node.set(Prop::HEIGHT, Some(header_height));
       }
       if let Some(back) = page.find(PAGE_BACK) {
-         back.set(Prop::ACCESSIBILITY_LABEL, Some(Value::Str("Back".to_owned())));
+         back.set(
+            Prop::ACCESSIBILITY_LABEL,
+            Some(Value::Str("Back".to_owned())),
+         );
          back.press = Some(Handler::PageBack(id));
       }
 
@@ -2649,7 +2695,7 @@ impl Patches {
          let ids = self.merged(slot.parent);
          let index = i32::try_from(ids.len().saturating_sub(1)).unwrap_or(i32::MAX);
          out.push(Op::Children {
-            id:  slot.parent,
+            id: slot.parent,
             ids,
          });
          out.push(Op::Update {
@@ -2667,9 +2713,9 @@ impl Patches {
       }
       if !self.pending_banners.is_empty() && !self.banner_flush_scheduled {
          self.banner_flush_scheduled = true;
-         let delay = self
-            .root_ready_at
-            .map_or(Duration::ZERO, |at| BANNER_STARTUP_DELAY.saturating_sub(at.elapsed()));
+         let delay = self.root_ready_at.map_or(Duration::ZERO, |at| {
+            BANNER_STARTUP_DELAY.saturating_sub(at.elapsed())
+         });
          thread::spawn(move || {
             if !delay.is_zero() {
                thread::sleep(delay);
@@ -2726,9 +2772,11 @@ impl Patches {
       let existing = self
          .slots
          .iter()
-         .filter_map(|slot| match slot.kind {
-            SlotKind::Banner(id) => Some(id),
-            _ => None,
+         .filter_map(|slot| {
+            match slot.kind {
+               SlotKind::Banner(id) => Some(id),
+               _ => None,
+            }
          })
          .collect::<Vec<_>>();
       for old_id in existing {
@@ -2973,7 +3021,10 @@ impl Patches {
    }
 
    fn press_banner(&mut self, id: u32) -> (Vec<Op>, BannerAction) {
-      let action = self.banner_actions.remove(&id).unwrap_or(BannerAction::None);
+      let action = self
+         .banner_actions
+         .remove(&id)
+         .unwrap_or(BannerAction::None);
       let (ops, _) = self.close_banner(id);
       (ops, action)
    }
@@ -2994,13 +3045,12 @@ impl Patches {
          return Vec::new();
       }
       fn to_draft(mount: u32, node: MountNode) -> Draft {
-         let press = (node.on_press.is_some() || node.on_dismiss.is_some()).then_some(
-            Handler::Mounted {
+         let press =
+            (node.on_press.is_some() || node.on_dismiss.is_some()).then_some(Handler::Mounted {
                mount,
                press: node.on_press,
                dismiss: node.on_dismiss,
-            },
-         );
+            });
          Draft {
             kind: node.kind,
             props: node.props,
@@ -3090,7 +3140,11 @@ impl Patches {
 
    /// Whether a page event on `node` is about a page past Rust's.
    fn beyond_rust(&self, node: i32, payload: &Value) -> bool {
-      if !self.anchors.get(&Target::Tab).is_some_and(|pagers| pagers.contains(&node)) {
+      if !self
+         .anchors
+         .get(&Target::Tab)
+         .is_some_and(|pagers| pagers.contains(&node))
+      {
          return false;
       }
       let Some(row) = self.mirror.kids(node).first() else {
@@ -3099,7 +3153,10 @@ impl Patches {
       let last = self.mirror.kids(*row).len().saturating_sub(1);
       #[expect(clippy::cast_precision_loss, reason = "a handful of pages")]
       let last = last as f64;
-      let page = payload.field(PAGE.key()).and_then(Value::as_i32).map(f64::from);
+      let page = payload
+         .field(PAGE.key())
+         .and_then(Value::as_i32)
+         .map(f64::from);
       let offset = payload.field(Prop::named("offset").key()).and_then(number);
       page.or(offset).is_some_and(|at| at > last + 0.001)
    }
@@ -3146,7 +3203,10 @@ impl Patches {
             out.push(Op::ScrollTo {
                id:    strip,
                value: Value::Obj(vec![
-                  (Prop::INDEX.key(), Value::I32(i32::try_from(index).unwrap_or_default())),
+                  (
+                     Prop::INDEX.key(),
+                     Value::I32(i32::try_from(index).unwrap_or_default()),
+                  ),
                   (Prop::named("align").key(), Value::Str("reveal".to_owned())),
                   (Prop::named("offset").key(), Value::F64(16.0)),
                   (Prop::named("animated").key(), Value::Bool(true)),
@@ -3322,7 +3382,12 @@ impl Patches {
       }
       let (extra_props, add_on) = self.list_patch_for(list_id);
       let mut props = Vec::new();
-      apply_prop_patch(&mut props, &extra_props, &add_on, Some(self.mirror.list_on(list_id)));
+      apply_prop_patch(
+         &mut props,
+         &extra_props,
+         &add_on,
+         Some(self.mirror.list_on(list_id)),
+      );
       if props.is_empty() {
          return None;
       }
@@ -3342,7 +3407,11 @@ impl Patches {
       for (patch_id, matcher) in &list_patches {
          for node in self.mirror.nodes_where(&|aid| matcher.matches(aid)) {
             if let Some(list_id) = self.mirror.enclosing_list(node) {
-               self.patched_lists.entry(list_id).or_default().insert(*patch_id);
+               self
+                  .patched_lists
+                  .entry(list_id)
+                  .or_default()
+                  .insert(*patch_id);
                affected.insert(list_id);
             }
          }
@@ -3358,7 +3427,8 @@ impl Patches {
          }
          let (extra_props, add_on) = self.list_patch_for(list_id);
          let mut props = Vec::new();
-         // Always emit Prop::ON so removed `addOn` entries restore Rust's original list.
+         // Always emit Prop::ON so removed `addOn` entries restore Rust's
+         // original list.
          let mut on = self.mirror.list_on(list_id).to_vec();
          for event in &add_on {
             if !on.iter().any(|v| matches!(v, Value::Str(s) if s == event)) {
@@ -3430,7 +3500,10 @@ impl Patches {
             queue(Job::Evaluate(contribution.id, place.clone()));
          }
       }
-      let ids = contributions.iter().map(|contribution| contribution.id).collect::<Vec<_>>();
+      let ids = contributions
+         .iter()
+         .map(|contribution| contribution.id)
+         .collect::<Vec<_>>();
       let drafts = self
          .templates
          .draw(target, &contributions, &place, &|contribution| {
@@ -3458,7 +3531,9 @@ impl Patches {
       }
       // The content's tint, once no answer for it is outstanding.
       if target == Target::Content
-         && !ids.iter().any(|id| self.pending.contains(&(*id, place.clone())))
+         && !ids
+            .iter()
+            .any(|id| self.pending.contains(&(*id, place.clone())))
       {
          let tint = ids.iter().find_map(|id| {
             match self.results.get(&(*id, place.clone())) {
@@ -3502,7 +3577,10 @@ impl Patches {
 
    /// The message whose author or content text `id` is.
    fn text_message(&self, id: i32) -> Option<String> {
-      let own = self.mirror.accessibility_id(id).and_then(|aid| aid.strip_prefix("message.author:"));
+      let own = self
+         .mirror
+         .accessibility_id(id)
+         .and_then(|aid| aid.strip_prefix("message.author:"));
       let parent = self
          .mirror
          .parent(id)
@@ -3512,7 +3590,11 @@ impl Patches {
    }
 
    fn tint_of(&self, id: i32) -> Option<i64> {
-      self.texts.get(&id).and_then(|(message, _)| self.tints.get(message)).copied()
+      self
+         .texts
+         .get(&id)
+         .and_then(|(message, _)| self.tints.get(message))
+         .copied()
    }
 
    fn emit(
@@ -3552,9 +3634,7 @@ impl Patches {
          let Some(parent) = self.mirror.parent(id) else {
             break;
          };
-         if self.mirror.accessibility_id(parent).is_some()
-            || self.mirror.kids(parent).len() != 1
-         {
+         if self.mirror.accessibility_id(parent).is_some() || self.mirror.kids(parent).len() != 1 {
             break;
          }
          id = parent;
@@ -3564,7 +3644,8 @@ impl Patches {
 
    /// Reconciles `hidden: true` (`View.GONE`) across all live wrappers matching
    /// `self.hidden`, restoring `hidden: false` whenever a node stops matching
-   /// (e.g. `"Record Voice Message"` swapping to `"send"` inside the same slot).
+   /// (e.g. `"Record Voice Message"` swapping to `"send"` inside the same
+   /// slot).
    fn reconcile_hidden(&mut self) -> Vec<Op> {
       if self.hidden.is_empty() && self.hidden_nodes.is_empty() {
          return Vec::new();
@@ -3669,7 +3750,8 @@ impl Patches {
       if self.results.len() >= RESULTS_CAP {
          self.results.clear();
       }
-      let shows = |outcome: &Outcome| !matches!(outcome, Outcome::Text(None) | Outcome::Shown(false));
+      let shows =
+         |outcome: &Outcome| !matches!(outcome, Outcome::Text(None) | Outcome::Shown(false));
       let visible = shows(&outcome);
       let place = key.1.clone();
       let was = self.results.insert(key, outcome);
@@ -3786,8 +3868,14 @@ fn page_op(pager: i32, page: usize) -> Op {
       props: vec![(
          PAGE,
          Value::Obj(vec![
-            (Prop::named("seq").key(), Value::I32(SEQUENCE.fetch_add(1, Ordering::Relaxed))),
-            (Prop::INDEX.key(), Value::I32(i32::try_from(page).unwrap_or_default())),
+            (
+               Prop::named("seq").key(),
+               Value::I32(SEQUENCE.fetch_add(1, Ordering::Relaxed)),
+            ),
+            (
+               Prop::INDEX.key(),
+               Value::I32(i32::try_from(page).unwrap_or_default()),
+            ),
             (Prop::named("animated").key(), Value::Bool(true)),
          ]),
       )],

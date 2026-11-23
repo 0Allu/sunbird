@@ -2,7 +2,8 @@
 //! blocks it shows.
 //!
 //! - The tabs sit in a row with Phoenix's, before its sliding indicator, and
-//!   the pages go after Phoenix's in the paging `hscroll` (`profile-tab-pages`).
+//!   the pages go after Phoenix's in the paging `hscroll`
+//!   (`profile-tab-pages`).
 //! - Phoenix's tab presses set the pager's `page`; a plugin tab sets it too,
 //!   past Phoenix's pages. The pager's `pageSelect`/`pageSettle`/`pageScroll`
 //!   events about those pages never reach Rust, which knows only its own.
@@ -99,11 +100,17 @@ pub fn tab(template: &Node, contribution: &Contribution) -> Draft {
    for key in ANIMATED {
       tab.set(Prop::named(key), None);
    }
-   tab.set(Prop::named("accessibilitySelected"), Some(Value::Bool(false)));
+   tab.set(
+      Prop::named("accessibilitySelected"),
+      Some(Value::Bool(false)),
+   );
    tab.set(Prop::ACCESSIBILITY_LABEL, Some(str(&contribution.label)));
    tab.set(
       Prop::ACCESSIBILITY_ID,
-      Some(str(&format!("phoenix.{}.{}", contribution.plugin, contribution.id))),
+      Some(str(&format!(
+         "phoenix.{}.{}",
+         contribution.plugin, contribution.id
+      ))),
    );
    tab.set(Prop::named("direction"), Some(str("column")));
    tab.set(Prop::named("align"), Some(str("center")));
@@ -135,8 +142,8 @@ pub fn tab(template: &Node, contribution: &Contribution) -> Draft {
    tab
 }
 
-/// The page of `contribution`'s tab: `page > scroll > content > blocks`. `content`
-/// reports its height.
+/// The page of `contribution`'s tab: `page > scroll > content > blocks`.
+/// `content` reports its height.
 pub fn page(
    width: Option<Value>,
    colors: Palette,
@@ -161,7 +168,11 @@ pub fn page(
       let entry = matches!(block, Block::Entry { .. });
       if entry && after_entry {
          kids.push(view(
-            vec![("width", str("fill")), ("height", Value::F64(1.0)), ("background", colors.wash(0x26))],
+            vec![
+               ("width", str("fill")),
+               ("height", Value::F64(1.0)),
+               ("background", colors.wash(0x26)),
+            ],
             Vec::new(),
          ));
       }
@@ -208,11 +219,7 @@ fn block_handler(contribution: crate::patches::ContributionId, index: u32) -> Ha
    }
 }
 
-fn draw(
-   block: Block,
-   contribution: crate::patches::ContributionId,
-   colors: Palette,
-) -> Draft {
+fn draw(block: Block, contribution: crate::patches::ContributionId, colors: Palette) -> Draft {
    let (text_color, muted) = (colors.text, colors.muted);
    match block {
       Block::Text { title, text, color } => {
@@ -222,7 +229,11 @@ fn draw(
          }
          kids.push(label(&text, 14.0, 400, color.unwrap_or(text_color)));
          view(
-            vec![("direction", str("column")), ("gap", Value::F64(4.0)), ("align", str("stretch"))],
+            vec![
+               ("direction", str("column")),
+               ("gap", Value::F64(4.0)),
+               ("align", str("stretch")),
+            ],
             kids,
          )
       },
@@ -252,7 +263,11 @@ fn draw(
          }
          let mut kids = vec![
             view(
-               vec![("direction", str("row")), ("gap", Value::F64(6.0)), ("align", str("center"))],
+               vec![
+                  ("direction", str("row")),
+                  ("gap", Value::F64(6.0)),
+                  ("align", str("center")),
+               ],
                head,
             ),
             rich(&text, text_color),
@@ -269,7 +284,9 @@ fn draw(
             let row = actions
                .into_iter()
                .map(|action| {
-                  let color = action.color.unwrap_or(if action.danger { DANGER } else { muted });
+                  let color = action
+                     .color
+                     .unwrap_or(if action.danger { DANGER } else { muted });
                   let mut piece = label(&action.label, 13.0, 600, color);
                   piece.set(Prop::PADDING, Some(Value::Rect([2.0, 4.0, 2.0, 4.0])));
                   match action.handler {
@@ -279,7 +296,11 @@ fn draw(
                })
                .collect();
             kids.push(view(
-               vec![("direction", str("row")), ("gap", Value::F64(14.0)), ("align", str("center"))],
+               vec![
+                  ("direction", str("row")),
+                  ("gap", Value::F64(14.0)),
+                  ("align", str("center")),
+               ],
                row,
             ));
          }
@@ -301,7 +322,9 @@ fn draw(
             let column = side
                .into_iter()
                .map(|action| {
-                  let color = action.color.unwrap_or(if action.danger { DANGER } else { muted });
+                  let color = action
+                     .color
+                     .unwrap_or(if action.danger { DANGER } else { muted });
                   let mut piece = label(&action.label, 14.0, 700, color);
                   piece.set(Prop::PADDING, Some(Value::Rect([8.0, 2.0, 8.0, 2.0])));
                   match action.handler {
@@ -311,7 +334,11 @@ fn draw(
                })
                .collect();
             row.push(view(
-               vec![("direction", str("column")), ("align", str("center")), ("gap", Value::F64(2.0))],
+               vec![
+                  ("direction", str("column")),
+                  ("align", str("center")),
+                  ("gap", Value::F64(2.0)),
+               ],
                column,
             ));
          }
@@ -339,16 +366,27 @@ fn draw(
             .filter_map(|action| {
                let mut button = button(&action.label, action.danger, colors);
                button.set(Prop::named("flex"), Some(Value::F64(1.0)));
-               Some(pressable(button, block_handler(contribution, action.handler?)))
+               Some(pressable(
+                  button,
+                  block_handler(contribution, action.handler?),
+               ))
             })
             .collect();
-         view(vec![("direction", str("row")), ("gap", Value::F64(8.0))], kids)
+         view(
+            vec![("direction", str("row")), ("gap", Value::F64(8.0))],
+            kids,
+         )
       },
       Block::Button {
          label: text,
          danger,
          handler,
-      } => pressable(button(&text, danger, colors), block_handler(contribution, handler)),
+      } => {
+         pressable(
+            button(&text, danger, colors),
+            block_handler(contribution, handler),
+         )
+      },
       Block::Input {
          placeholder,
          handler,
@@ -387,7 +425,10 @@ fn rich(text: &str, color: i64) -> Draft {
          Piece::Emoji(uri) => kids.push(image(&uri, 20.0, 0.0)),
       }
    }
-   let mut flow = view(vec![("direction", str("row")), ("align", str("center"))], kids);
+   let mut flow = view(
+      vec![("direction", str("row")), ("align", str("center"))],
+      kids,
+   );
    flow.kind = ViewKind::Other("flow".to_owned());
    flow
 }
@@ -410,10 +451,14 @@ fn emoji_pieces(text: &str) -> Vec<Piece> {
             None => (false, inner.strip_prefix(':')?),
          };
          let (name, id) = inner.split_once(':')?;
-         let valid = !name.is_empty() && !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit());
+         let valid =
+            !name.is_empty() && !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit());
          valid.then(|| {
             let ext = if animated { "gif" } else { "webp" };
-            (format!("https://cdn.discordapp.com/emojis/{id}.{ext}?size=48"), after)
+            (
+               format!("https://cdn.discordapp.com/emojis/{id}.{ext}?size=48"),
+               after,
+            )
          })
       });
       match parsed {
@@ -457,20 +502,25 @@ mod tests {
 
 fn button(text: &str, danger: bool, colors: Palette) -> Draft {
    view(
-            vec![
-               ("direction", str("row")),
-               ("padding", Value::Rect([16.0, 10.0, 16.0, 10.0])),
-               ("minHeight", Value::F64(40.0)),
-               ("align", str("center")),
-               ("justify", str("center")),
-               ("background", colors.wash(0x1F)),
-               ("activeBackground", colors.wash(0x33)),
-               ("radius", Value::F64(8.0)),
-               ("borderColor", colors.wash(0x26)),
-               ("borderWidth", Value::F64(1.0)),
-               ("accessibilityLabel", str(text)),
-            ],
-            vec![label(text, 14.0, 600, if danger { DANGER } else { colors.text })],
+      vec![
+         ("direction", str("row")),
+         ("padding", Value::Rect([16.0, 10.0, 16.0, 10.0])),
+         ("minHeight", Value::F64(40.0)),
+         ("align", str("center")),
+         ("justify", str("center")),
+         ("background", colors.wash(0x1F)),
+         ("activeBackground", colors.wash(0x33)),
+         ("radius", Value::F64(8.0)),
+         ("borderColor", colors.wash(0x26)),
+         ("borderWidth", Value::F64(1.0)),
+         ("accessibilityLabel", str(text)),
+      ],
+      vec![label(
+         text,
+         14.0,
+         600,
+         if danger { DANGER } else { colors.text },
+      )],
    )
 }
 
@@ -483,7 +533,11 @@ fn input(
    colors: Palette,
 ) -> Draft {
    let mut root = Draft::from_node(&templates().input);
-   let Some(row) = root.kids.first_mut().and_then(|frame| frame.kids.first_mut()) else {
+   let Some(row) = root
+      .kids
+      .first_mut()
+      .and_then(|frame| frame.kids.first_mut())
+   else {
       return root;
    };
    if row.kids.len() > 1 {
@@ -495,12 +549,18 @@ fn input(
       input.set(Prop::VALUE, Some(str("")));
       input.set(Prop::RETURN_KEY, Some(str("send")));
       input.set(Prop::COLOR, Some(Value::I64(colors.text)));
-      input.set(Prop::named("placeholderColor"), Some(Value::I64(colors.muted)));
+      input.set(
+         Prop::named("placeholderColor"),
+         Some(Value::I64(colors.muted)),
+      );
       input.set(Prop::ROLE, None);
       input.set(Prop::ACCESSIBILITY_ID, None);
       input.set(Prop::named("autoCapitalize"), Some(str("sentences")));
       input.set(Prop::named("autoCorrect"), Some(Value::Bool(true)));
-      input.set(Prop::ON, Some(Value::Arr(vec![str("changeText"), str("submit")])));
+      input.set(
+         Prop::ON,
+         Some(Value::Arr(vec![str("changeText"), str("submit")])),
+      );
       input.press = Some(Handler::Input {
          contribution,
          index,
@@ -520,7 +580,10 @@ fn input(
          ],
          vec![icon],
       );
-      row.kids.push(pressable(wrap, Handler::Send { contribution, index }));
+      row.kids.push(pressable(wrap, Handler::Send {
+         contribution,
+         index,
+      }));
    }
    root
 }

@@ -183,7 +183,8 @@ fn engine() -> Option<std::sync::MutexGuard<'static, js::Engine>> {
    )
 }
 
-/// Runs matching `phoenix.discord.onRequest` hooks on an outgoing Discord API request.
+/// Runs matching `phoenix.discord.onRequest` hooks on an outgoing Discord API
+/// request.
 #[cfg(target_os = "android")]
 pub(crate) fn intercept_request(
    matched: &[u64],
@@ -196,8 +197,8 @@ pub(crate) fn intercept_request(
    })
 }
 
-/// Runs matching `phoenix.discord.onResponse` hooks (sync or async) on an incoming
-/// Discord API reply and delivers the final body through `done`.
+/// Runs matching `phoenix.discord.onResponse` hooks (sync or async) on an
+/// incoming Discord API reply and delivers the final body through `done`.
 #[cfg(target_os = "android")]
 pub(crate) fn intercept_response(
    matched: Vec<u64>,

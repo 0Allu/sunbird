@@ -463,7 +463,9 @@ pub fn wire_to_json(value: &Value) -> serde_json::Value {
       },
       Value::Rect(rect) => serde_json::json!(rect),
       Value::Words(words) => serde_json::json!({ "$words": words.len() }),
-      Value::WPatch { list, set } => serde_json::json!({ "$wpatch": { "list": list, "len": set.len() } }),
+      Value::WPatch { list, set } => {
+         serde_json::json!({ "$wpatch": { "list": list, "len": set.len() } })
+      },
    }
 }
 
@@ -584,10 +586,22 @@ mod tests {
                kind:  ViewKind::View,
                props: vec![],
             },
-            Op::Children { id: 1, ids: vec![10, 20, 30] },
-            Op::Children { id: 10, ids: vec![30] },
-            Op::Children { id: 20, ids: vec![21] },
-            Op::Children { id: 30, ids: vec![31] },
+            Op::Children {
+               id:  1,
+               ids: vec![10, 20, 30],
+            },
+            Op::Children {
+               id:  10,
+               ids: vec![30],
+            },
+            Op::Children {
+               id:  20,
+               ids: vec![21],
+            },
+            Op::Children {
+               id:  30,
+               ids: vec![31],
+            },
          ],
          true,
       );

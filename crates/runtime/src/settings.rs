@@ -1,4 +1,5 @@
-//! A "Phoenix Unlocker" row in Discord's Settings that opens phoenix's own pages.
+//! A "Phoenix Unlocker" row in Discord's Settings that opens phoenix's own
+//! pages.
 //!
 //! Phoenix builds its UI as a stream of UI-op batches from Rust to Java. This
 //! module rewrites those batches to splice in nodes built from Phoenix's own
@@ -57,14 +58,14 @@ use crate::{
    Chosen,
    Control,
    PluginInfo,
-   highlight::{
-      self,
-      Kind,
-   },
    bridge::{
       self,
       Action,
       Sink,
+   },
+   highlight::{
+      self,
+      Kind,
    },
 };
 
@@ -267,12 +268,20 @@ fn same_shape(old: &Tree, new: &Tree) -> bool {
       && old.press == new.press
       && old.slot == new.slot
       && match (&old.animate, &new.animate) {
-         (None, None) => old.props.iter().all(|(key, _)| new.props.iter().any(|(k, _)| k == key)),
+         (None, None) => {
+            old.props
+               .iter()
+               .all(|(key, _)| new.props.iter().any(|(k, _)| k == key))
+         },
          (Some(a), Some(b)) => std::ptr::eq(a.worklet, b.worklet),
          _ => false,
       }
       && old.kids.len() == new.kids.len()
-      && old.kids.iter().zip(&new.kids).all(|(a, b)| same_shape(a, b))
+      && old
+         .kids
+         .iter()
+         .zip(&new.kids)
+         .all(|(a, b)| same_shape(a, b))
 }
 
 fn text(value: &str) -> Value {
@@ -340,40 +349,40 @@ struct Screen {
 }
 
 struct Settings {
-   next_id:    i32,
-   slots:      SlotPool,
+   next_id:        i32,
+   slots:          SlotPool,
    /// Motion words for nodes built since the last batch went out. They run
    /// after the batch attaches those nodes.
-   motion:     Vec<i32>,
-   navigators: HashSet<i32>,
-   screen:     Option<Screen>,
-   handlers:   HashMap<i32, Press>,
-   plugins:    Vec<PluginInfo>,
-   drafts:     HashMap<Field, String>,
+   motion:         Vec<i32>,
+   navigators:     HashSet<i32>,
+   screen:         Option<Screen>,
+   handlers:       HashMap<i32, Press>,
+   plugins:        Vec<PluginInfo>,
+   drafts:         HashMap<Field, String>,
    /// The line nodes in each console log box, replaced on every refresh.
-   log_rows:   HashMap<i32, Vec<i32>>,
+   log_rows:       HashMap<i32, Vec<i32>>,
    /// A counter for `forceValue`, which the host applies when it changes.
-   force_seq:  i64,
+   force_seq:      i64,
    /// What the last install did, shown on the install page.
    install_status: Option<(String, i64)>,
 }
 
 static SETTINGS: LazyLock<Mutex<Settings>> = LazyLock::new(|| {
    Mutex::new(Settings {
-      next_id:    FIRST_ID,
-      slots:      SlotPool {
+      next_id:        FIRST_ID,
+      slots:          SlotPool {
          next:  SLOT_END,
          free:  Vec::new(),
          owned: HashMap::new(),
       },
-      motion:     Vec::new(),
-      navigators: HashSet::new(),
-      screen:     None,
-      handlers:   HashMap::new(),
-      plugins:    Vec::new(),
-      drafts:     HashMap::new(),
-      log_rows:   HashMap::new(),
-      force_seq:  1 << 40,
+      motion:         Vec::new(),
+      navigators:     HashSet::new(),
+      screen:         None,
+      handlers:       HashMap::new(),
+      plugins:        Vec::new(),
+      drafts:         HashMap::new(),
+      log_rows:       HashMap::new(),
+      force_seq:      1 << 40,
       install_status: None,
    })
 });
@@ -490,7 +499,8 @@ fn act(job: &Job) {
       Job::Press(Press::PickFile) => {
          if let Err(err) = crate::picker::pick() {
             log::error!("file picker: {err}");
-            settings().install_status = Some((format!("The file picker failed: {err}"), COLOR_ERROR));
+            settings().install_status =
+               Some((format!("The file picker failed: {err}"), COLOR_ERROR));
          }
       },
       Job::Picked(ref picked) => {
@@ -499,7 +509,8 @@ fn act(job: &Job) {
             Ok(None) => {},
             Err(err) => {
                log::error!("file picker: {err}");
-               settings().install_status = Some((format!("The file picker failed: {err}"), COLOR_ERROR));
+               settings().install_status =
+                  Some((format!("The file picker failed: {err}"), COLOR_ERROR));
             },
          }
       },
@@ -592,7 +603,10 @@ fn installed(result: Result<String, crate::Error>, from: &str) {
    let status = match result {
       Ok(name) => {
          log::info!("installed {name} from {from}");
-         (format!("Installed {name}. It is on the {TITLE} page now."), COLOR_STRING)
+         (
+            format!("Installed {name}. It is on the {TITLE} page now."),
+            COLOR_STRING,
+         )
       },
       Err(err) => {
          log::error!("install failed: {err}");
@@ -839,7 +853,10 @@ impl Settings {
             .iter_mut()
             .map(|line| self.build(line, None, &mut ops))
             .collect::<Vec<i32>>();
-         let old = self.log_rows.insert(log_box, ids.clone()).unwrap_or_default();
+         let old = self
+            .log_rows
+            .insert(log_box, ids.clone())
+            .unwrap_or_default();
          if let Some(page) = self.screen.as_mut().and_then(|screen| {
             screen
                .stack
@@ -891,14 +908,18 @@ impl Settings {
       match job {
          Job::Draft(field, draft) => {
             let ops = match field {
-               Field::Code(_) => self
-                  .slots()
-                  .filter(|(_, slot)| *slot == Slot::Input(field))
-                  .map(|(id, _)| Op::Update {
-                     id,
-                     props: vec![(Prop::named("valueSpans"), code_spans(&draft))],
-                  })
-                  .collect(),
+               Field::Code(_) => {
+                  self
+                     .slots()
+                     .filter(|(_, slot)| *slot == Slot::Input(field))
+                     .map(|(id, _)| {
+                        Op::Update {
+                           id,
+                           props: vec![(Prop::named("valueSpans"), code_spans(&draft))],
+                        }
+                     })
+                     .collect()
+               },
                _ => Vec::new(),
             };
             self.drafts.insert(field, draft);
@@ -931,9 +952,7 @@ impl Settings {
             | Press::Choose(..)
             | Press::ToggleStaff
             | Press::ToggleRemoteShell),
-         ) => {
-            self.rerender_all(Some(press))
-         },
+         ) => self.rerender_all(Some(press)),
          Job::Submit(Field::Install | Field::Setting(..))
          | Job::Press(Press::Reload(_) | Press::ApplyUpdate) => self.rerender_all(None),
          Job::Press(Press::Back) => self.close_top(),
@@ -961,10 +980,18 @@ impl Settings {
       match kind {
          PageKind::Main => (TITLE.to_owned(), main_sections(&self.plugins)),
          PageKind::Console => ("Console".to_owned(), console_sections()),
-         PageKind::Install => ("Install plugin".to_owned(), install_sections(self.install_status.as_ref())),
+         PageKind::Install => {
+            (
+               "Install plugin".to_owned(),
+               install_sections(self.install_status.as_ref()),
+            )
+         },
          PageKind::Code(index) => {
             let source = self.drafts.get(&Field::Code(index)).map(String::as_str);
-            let name = self.plugins.get(index).map_or("plugin", |plugin| plugin.name.as_str());
+            let name = self
+               .plugins
+               .get(index)
+               .map_or("plugin", |plugin| plugin.name.as_str());
             ("Edit code".to_owned(), code_sections(index, name, source))
          },
          PageKind::Plugin(index) => {
@@ -1010,11 +1037,16 @@ impl Settings {
             .and_then(|screen| screen.stack.get_mut(position))
             .map(|page| std::mem::take(&mut page.trees))
             .unwrap_or_default();
-         if old.len() == sections.len() && old.iter().zip(&sections).all(|(a, b)| same_shape(a, b)) {
+         if old.len() == sections.len() && old.iter().zip(&sections).all(|(a, b)| same_shape(a, b))
+         {
             for (old, new) in old.iter().zip(&mut sections) {
                self.patch(old, new, &mut ops);
             }
-            if let Some(page) = self.screen.as_mut().and_then(|screen| screen.stack.get_mut(position)) {
+            if let Some(page) = self
+               .screen
+               .as_mut()
+               .and_then(|screen| screen.stack.get_mut(position))
+            {
                page.trees = sections;
             }
             continue;
@@ -1054,7 +1086,11 @@ impl Settings {
          if old.props != new.props
             && let Some(&(first, _)) = self.slots.owned.get(&old.id)
          {
-            let commands = animate.worklet.bind(first).spring(&old.props, &new.props, Spring::SWITCH);
+            let commands =
+               animate
+                  .worklet
+                  .bind(first)
+                  .spring(&old.props, &new.props, Spring::SWITCH);
             self.motion.extend(motion::words(&commands));
          }
       } else {
@@ -1446,11 +1482,7 @@ fn select_row(label: &str, selected: bool, press: Press) -> Tree {
    let mut root = button_row(label, ICON_PLUGIN, Some(press), selected);
    if let Some(row) = root.kids.first_mut() {
       row.kids.remove(0);
-      if let Some(check) = row
-         .kids
-         .get_mut(1)
-         .and_then(|wrap| wrap.kids.first_mut())
-      {
+      if let Some(check) = row.kids.get_mut(1).and_then(|wrap| wrap.kids.first_mut()) {
          check.set(Prop::URI, Some(text(ICON_CHECK)));
       }
    }
@@ -1594,10 +1626,12 @@ fn main_sections(plugins: &[PluginInfo]) -> Vec<Tree> {
          } else {
             match (&update.loader, update.plugins.len()) {
                (Some(version), 0) => format!("Install update ({version})"),
-               (Some(version), n) => format!(
-                  "Install update ({version}) + {n} plugin{}",
-                  if n == 1 { "" } else { "s" }
-               ),
+               (Some(version), n) => {
+                  format!(
+                     "Install update ({version}) + {n} plugin{}",
+                     if n == 1 { "" } else { "s" }
+                  )
+               },
                (None, _) => format!("Update plugins now: {}", update.plugins.join(", ")),
             }
          };
@@ -1608,7 +1642,11 @@ fn main_sections(plugins: &[PluginInfo]) -> Vec<Tree> {
             !update_busy,
          );
          if let Some(label) = row.kids.first_mut().and_then(|row| row.kids.get_mut(1)) {
-            let color = if update_busy { COLOR_ACCENT } else { COLOR_STRING };
+            let color = if update_busy {
+               COLOR_ACCENT
+            } else {
+               COLOR_STRING
+            };
             label.set(Prop::COLOR, Some(Value::I64(color)));
          }
          update_rows.push(row);
@@ -1636,7 +1674,10 @@ fn main_sections(plugins: &[PluginInfo]) -> Vec<Tree> {
       switch_row(
          None,
          "Staff unlock",
-         Some("Grant the staff flag on READY/USER_UPDATE to unlock Discord experiments (restart to apply)"),
+         Some(
+            "Grant the staff flag on READY/USER_UPDATE to unlock Discord experiments (restart to \
+             apply)",
+         ),
          crate::staff_enabled(),
          Press::ToggleStaff,
          Press::ToggleStaff,
@@ -1644,28 +1685,33 @@ fn main_sections(plugins: &[PluginInfo]) -> Vec<Tree> {
       switch_row(
          None,
          "Remote debug shell",
-         Some("Listen on 127.0.0.1:4242 for ADB eval, logs & plugin hot-reload (adb forward tcp:4242 tcp:4242)"),
+         Some(
+            "Listen on 127.0.0.1:4242 for ADB eval, logs & plugin hot-reload (adb forward \
+             tcp:4242 tcp:4242)",
+         ),
          crate::remote_shell_enabled(),
          Press::ToggleRemoteShell,
          Press::ToggleRemoteShell,
       ),
    ];
-   update.into_iter().chain([
-      section("Plugins", rows),
-      section("", vec![
-         button_row("Install plugin", ICON_FILE, Some(Press::OpenInstall), true),
-         button_row("Console", ICON_CONSOLE, Some(Press::OpenConsole), true),
-      ]),
-      section("Debug", debug_rows),
-      section("About", vec![
-         value_row("Version", crate::update::VERSION),
-         value_row("Runtime", "rquickjs"),
-         value_row("Gateway hooks", "registry pointer swap"),
-         value_row("Hook library", HOOK_LIBRARY),
-         value_row("Enabled", &format!("{enabled} of {}", plugins.len())),
-      ]),
-   ])
-   .collect()
+   update
+      .into_iter()
+      .chain([
+         section("Plugins", rows),
+         section("", vec![
+            button_row("Install plugin", ICON_FILE, Some(Press::OpenInstall), true),
+            button_row("Console", ICON_CONSOLE, Some(Press::OpenConsole), true),
+         ]),
+         section("Debug", debug_rows),
+         section("About", vec![
+            value_row("Version", crate::update::VERSION),
+            value_row("Runtime", "rquickjs"),
+            value_row("Gateway hooks", "registry pointer swap"),
+            value_row("Hook library", HOOK_LIBRARY),
+            value_row("Enabled", &format!("{enabled} of {}", plugins.len())),
+         ]),
+      ])
+      .collect()
 }
 
 /// A colored piece of a text's `spans`.
@@ -1700,9 +1746,16 @@ fn code_spans(source: &str) -> Value {
 fn log_lines() -> Vec<Tree> {
    let lines = crate::console::lines();
    if lines.is_empty() {
-      return vec![log_line(vec![("Nothing logged yet".to_owned(), COLOR_MUTED)])];
+      return vec![log_line(vec![(
+         "Nothing logged yet".to_owned(),
+         COLOR_MUTED,
+      )])];
    }
-   lines.iter().take(LOG_LINES).map(|line| log_line(line_spans(line))).collect()
+   lines
+      .iter()
+      .take(LOG_LINES)
+      .map(|line| log_line(line_spans(line)))
+      .collect()
 }
 
 fn line_spans(line: &crate::console::Line) -> Vec<(String, i64)> {
@@ -1741,11 +1794,19 @@ fn log_line(pieces: Vec<(String, i64)>) -> Tree {
    let mut node = Tree::from_template(&templates().header);
    node.set(Prop::ROLE, None);
    node.set(Prop::MARGIN, None);
-   let whole = pieces.iter().map(|(piece, _)| piece.as_str()).collect::<String>();
+   let whole = pieces
+      .iter()
+      .map(|(piece, _)| piece.as_str())
+      .collect::<String>();
    node.set(Prop::TEXT, Some(text(&whole)));
    node.set(
       Prop::named("spans"),
-      Some(Value::Arr(pieces.iter().map(|(piece, color)| span(piece, *color)).collect())),
+      Some(Value::Arr(
+         pieces
+            .iter()
+            .map(|(piece, color)| span(piece, *color))
+            .collect(),
+      )),
    );
    node.set(Prop::COLOR, Some(Value::I64(COLOR_TEXT)));
    node.set(Prop::FONT_SIZE, Some(Value::F64(12.0)));
@@ -1849,7 +1910,12 @@ fn console_sections() -> Vec<Tree> {
    let mut log_box = Tree::from_template(&templates().button_row);
    log_box.kids.clear();
    log_box.props.retain(|(key, _)| !is_radius(*key));
-   for key in [Prop::ON, Prop::ROLE, Prop::ACCESSIBILITY_LABEL, Prop::ACCESSIBILITY_ID] {
+   for key in [
+      Prop::ON,
+      Prop::ROLE,
+      Prop::ACCESSIBILITY_LABEL,
+      Prop::ACCESSIBILITY_ID,
+   ] {
       log_box.set(key, None);
    }
    log_box.set(Prop::PADDING, Some(Value::Rect([12.0, 10.0, 12.0, 10.0])));
@@ -1866,9 +1932,19 @@ fn code_sections(index: usize, name: &str, source: Option<&str>) -> Vec<Tree> {
    let Some(source) = source.filter(|source| source.len() <= MAX_EDIT) else {
       let why = source.map_or_else(
          || "This plugin's code is not available".to_owned(),
-         |source| format!("This plugin is {} KB, too large to edit here", source.len() / 1024),
+         |source| {
+            format!(
+               "This plugin is {} KB, too large to edit here",
+               source.len() / 1024
+            )
+         },
       );
-      return vec![section("", vec![button_row(&why, ICON_CONSOLE, None, false)])];
+      return vec![section("", vec![button_row(
+         &why,
+         ICON_CONSOLE,
+         None,
+         false,
+      )])];
    };
    let mut editor = text_field(Field::Code(index), None, "", source, InputKind::Text);
    if let Some(input) = editor
@@ -1970,7 +2046,12 @@ fn plugin_sections(index: usize, plugin: &PluginInfo) -> Vec<Tree> {
    }
    sections.extend(fields);
    let mut actions = vec![
-      button_row("Edit code", ICON_CONSOLE, Some(Press::EditCode(index)), true),
+      button_row(
+         "Edit code",
+         ICON_CONSOLE,
+         Some(Press::EditCode(index)),
+         true,
+      ),
       button_row("Reload", ICON_RELOAD, Some(Press::Reload(index)), false),
    ];
    if plugin.installed {

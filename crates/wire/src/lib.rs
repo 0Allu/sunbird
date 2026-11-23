@@ -559,7 +559,10 @@ pub fn encode_batch(frames: &[Vec<u8>]) -> Vec<u8> {
 /// 0 and unchanged otherwise.
 #[must_use]
 pub fn without_frames(bytes: &[u8], offsets: &[usize]) -> Vec<u8> {
-   let edits = offsets.iter().map(|offset| (*offset, None)).collect::<Vec<_>>();
+   let edits = offsets
+      .iter()
+      .map(|offset| (*offset, None))
+      .collect::<Vec<_>>();
    edit_frames(bytes, &edits)
 }
 
@@ -567,7 +570,12 @@ pub fn without_frames(bytes: &[u8], offsets: &[usize]) -> Vec<u8> {
 /// (`None`) or replaced. Any other input is one frame at offset 0.
 #[must_use]
 pub fn edit_frames(bytes: &[u8], edits: &[(usize, Option<Vec<u8>>)]) -> Vec<u8> {
-   let edit = |offset: usize| edits.iter().find(|(at, _)| *at == offset).map(|(_, new)| new);
+   let edit = |offset: usize| {
+      edits
+         .iter()
+         .find(|(at, _)| *at == offset)
+         .map(|(_, new)| new)
+   };
    if bytes.first() != Some(&BATCH) {
       return match edit(0) {
          Some(Some(new)) => new.clone(),

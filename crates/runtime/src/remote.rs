@@ -187,7 +187,8 @@ fn handle(mut stream: TcpStream) {
    };
    let (status, content_type, response) = dispatch(&method, &path, &query, &body);
    let header = format!(
-      "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+      "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: \
+       close\r\n\r\n",
       response.len()
    );
    let _ = stream.write_all(header.as_bytes());
@@ -198,7 +199,10 @@ fn read_request(stream: &TcpStream) -> std::io::Result<(String, String, String, 
    let mut reader = BufReader::new(stream);
    let mut request_line = String::new();
    if reader.read_line(&mut request_line)? == 0 {
-      return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "eof"));
+      return Err(std::io::Error::new(
+         std::io::ErrorKind::UnexpectedEof,
+         "eof",
+      ));
    }
    let mut parts = request_line.split_whitespace();
    let method = parts.next().unwrap_or_default().to_owned();
@@ -315,8 +319,7 @@ fn dispatch(
             .rev()
             .filter(|entry| {
                filter.is_none_or(|needle| {
-                  serde_json::to_string(entry)
-                     .is_ok_and(|text| text.contains(needle))
+                  serde_json::to_string(entry).is_ok_and(|text| text.contains(needle))
                })
             })
             .take(limit)
@@ -335,8 +338,7 @@ fn dispatch(
             .rev()
             .filter(|entry| {
                filter.is_none_or(|needle| {
-                  serde_json::to_string(entry)
-                     .is_ok_and(|text| text.contains(needle))
+                  serde_json::to_string(entry).is_ok_and(|text| text.contains(needle))
                })
             })
             .take(limit)
@@ -404,10 +406,15 @@ fn dispatch(
          ok_json(&serde_json::json!({ "staff": crate::staff_enabled() }))
       },
       _ if path.starts_with("/plugins/") => plugin_route(method, &path["/plugins/".len()..], body),
-      _ => err(
-         "404 Not Found",
-         "endpoints: GET /status, GET /plugins, GET|PUT|DELETE /plugins/<name>, POST /plugins/<name>/{reload,enable,disable}, POST /eval, GET /logs, GET /ops[?match=&limit=], GET /events[?match=&limit=], GET /tree[/<id>][?depth=], POST /clear",
-      ),
+      _ => {
+         err(
+            "404 Not Found",
+            "endpoints: GET /status, GET /plugins, GET|PUT|DELETE /plugins/<name>, POST \
+             /plugins/<name>/{reload,enable,disable}, POST /eval, GET /logs, GET \
+             /ops[?match=&limit=], GET /events[?match=&limit=], GET /tree[/<id>][?depth=], POST \
+             /clear",
+         )
+      },
    }
 }
 
@@ -424,9 +431,17 @@ fn plugin_route(method: &str, rest: &str, body: &[u8]) -> (&'static str, &'stati
       return err("400 Bad Request", "invalid plugin name");
    }
    match (method, action) {
-      ("GET", None) => match crate::source(name) {
-         Some(source) => ("200 OK", "text/javascript; charset=utf-8", source.into_bytes()),
-         None => err("404 Not Found", "plugin not found"),
+      ("GET", None) => {
+         match crate::source(name) {
+            Some(source) => {
+               (
+                  "200 OK",
+                  "text/javascript; charset=utf-8",
+                  source.into_bytes(),
+               )
+            },
+            None => err("404 Not Found", "plugin not found"),
+         }
       },
       ("PUT" | "POST", None) => {
          let Ok(source) = String::from_utf8(body.to_vec()) else {
@@ -440,12 +455,14 @@ fn plugin_route(method: &str, rest: &str, body: &[u8]) -> (&'static str, &'stati
             Err(message) => err("500 Internal Server Error", &message.to_string()),
          }
       },
-      ("DELETE", None) => match crate::uninstall(name) {
-         Ok(()) => {
-            crate::settings::refresh();
-            ok_json(&serde_json::json!({ "uninstalled": name }))
-         },
-         Err(message) => err("500 Internal Server Error", &message.to_string()),
+      ("DELETE", None) => {
+         match crate::uninstall(name) {
+            Ok(()) => {
+               crate::settings::refresh();
+               ok_json(&serde_json::json!({ "uninstalled": name }))
+            },
+            Err(message) => err("500 Internal Server Error", &message.to_string()),
+         }
       },
       ("POST", Some("reload")) => {
          crate::reload(name);
@@ -475,5 +492,9 @@ fn ok_json(value: &serde_json::Value) -> (&'static str, &'static str, Vec<u8>) {
 }
 
 fn err(status: &'static str, message: &str) -> (&'static str, &'static str, Vec<u8>) {
-   (status, "text/plain; charset=utf-8", message.as_bytes().to_vec())
+   (
+      status,
+      "text/plain; charset=utf-8",
+      message.as_bytes().to_vec(),
+   )
 }

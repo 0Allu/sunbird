@@ -221,19 +221,25 @@ pub fn forget_request_hooks(plugin: &str) {
 }
 
 pub fn add_response_hook(id: u64, plugin: String, filter: RequestFilter) {
-   let mut hooks = RESPONSE_HOOKS.lock().unwrap_or_else(PoisonError::into_inner);
+   let mut hooks = RESPONSE_HOOKS
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner);
    hooks.push(RequestHook { id, plugin, filter });
    RESPONSE_HOOK_COUNT.store(hooks.len(), Ordering::Relaxed);
 }
 
 pub fn remove_response_hook(id: u64) {
-   let mut hooks = RESPONSE_HOOKS.lock().unwrap_or_else(PoisonError::into_inner);
+   let mut hooks = RESPONSE_HOOKS
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner);
    hooks.retain(|hook| hook.id != id);
    RESPONSE_HOOK_COUNT.store(hooks.len(), Ordering::Relaxed);
 }
 
 pub fn forget_response_hooks(plugin: &str) {
-   let mut hooks = RESPONSE_HOOKS.lock().unwrap_or_else(PoisonError::into_inner);
+   let mut hooks = RESPONSE_HOOKS
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner);
    hooks.retain(|hook| hook.plugin != plugin);
    RESPONSE_HOOK_COUNT.store(hooks.len(), Ordering::Relaxed);
 }
@@ -290,7 +296,12 @@ pub fn intercept_call(frame: &[u8]) -> Action {
    if REQUEST_HOOK_COUNT.load(Ordering::Relaxed) == 0 {
       return Action::Pass;
    }
-   let Some(method) = call.args.field(METHOD).and_then(Value::as_str).map(str::to_owned) else {
+   let Some(method) = call
+      .args
+      .field(METHOD)
+      .and_then(Value::as_str)
+      .map(str::to_owned)
+   else {
       return Action::Pass;
    };
    let Some(path) = call
@@ -318,7 +329,8 @@ pub fn intercept_call(frame: &[u8]) -> Action {
       RequestAction::Drop => Action::Drop,
       RequestAction::Replace(body) => {
          call.body = body;
-         // Drop any stale content-length header so OkHttp uses the new body length.
+         // Drop any stale content-length header so OkHttp uses the new body
+         // length.
          if let Value::Obj(ref mut fields) = call.args {
             for (key, value) in fields.iter_mut() {
                if *key == HEADERS
@@ -347,7 +359,9 @@ fn observe_decoded(call: &HostCall) {
          .and_then(api_path)
    {
       let matched = {
-         let hooks = RESPONSE_HOOKS.lock().unwrap_or_else(PoisonError::into_inner);
+         let hooks = RESPONSE_HOOKS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
          hooks
             .iter()
             .filter(|hook| hook.filter.matches(method, path))
@@ -367,7 +381,12 @@ fn observe_decoded(call: &HostCall) {
          });
       }
    }
-   if let Some(id) = call.args.field(URL).and_then(Value::as_str).and_then(profile_of) {
+   if let Some(id) = call
+      .args
+      .field(URL)
+      .and_then(Value::as_str)
+      .and_then(profile_of)
+   {
       *LAST_PROFILE.lock().unwrap_or_else(PoisonError::into_inner) = Some((id, Instant::now()));
    }
    if let Some(url) = call.args.field(URL).and_then(Value::as_str)
@@ -421,7 +440,10 @@ pub fn filter(bytes: &[u8]) -> Action {
       .as_ref()
       .is_some_and(|authorizing| authorizing.call.is_some());
    let has_in_flight = RESPONSE_HOOK_COUNT.load(Ordering::Relaxed) > 0
-      && !IN_FLIGHT.lock().unwrap_or_else(PoisonError::into_inner).is_empty();
+      && !IN_FLIGHT
+         .lock()
+         .unwrap_or_else(PoisonError::into_inner)
+         .is_empty();
    if !watching
       && !has_in_flight
       && PENDING
@@ -628,23 +650,31 @@ pub fn authorize(request: &Authorization) -> Result<String, DiscordError> {
    // A newer authorize drops the older one's sender, which rejects it.
    *AUTHORIZING.lock().unwrap_or_else(PoisonError::into_inner) = Some(Authorizing {
       client_id: request.client_id.clone(),
-      call:      None,
-      waiter:    sender,
+      call: None,
+      waiter: sender,
       turn,
    });
    if let Err(message) = crate::picker::open(&link) {
-      AUTHORIZING.lock().unwrap_or_else(PoisonError::into_inner).take();
+      AUTHORIZING
+         .lock()
+         .unwrap_or_else(PoisonError::into_inner)
+         .take();
       return Err(DiscordError::Refused { status: 0, message });
    }
    let location = receiver.recv_timeout(AUTHORIZE_TIMEOUT);
    let mut authorizing = AUTHORIZING.lock().unwrap_or_else(PoisonError::into_inner);
-   if authorizing.as_ref().is_some_and(|current| current.turn == turn) {
+   if authorizing
+      .as_ref()
+      .is_some_and(|current| current.turn == turn)
+   {
       authorizing.take();
    }
    drop(authorizing);
-   location.map_err(|_| DiscordError::Refused {
-      status:  0,
-      message: "not authorized".to_owned(),
+   location.map_err(|_| {
+      DiscordError::Refused {
+         status:  0,
+         message: "not authorized".to_owned(),
+      }
    })
 }
 

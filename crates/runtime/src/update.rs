@@ -80,10 +80,7 @@ static BUSY: AtomicBool = AtomicBool::new(false);
 
 /// The update the last check found, if any.
 pub fn found() -> Option<Update> {
-   FOUND
-      .lock()
-      .unwrap_or_else(PoisonError::into_inner)
-      .clone()
+   FOUND.lock().unwrap_or_else(PoisonError::into_inner).clone()
 }
 
 /// Human-readable status of the current or last update attempt, if any.
@@ -157,7 +154,12 @@ pub fn check() {
                if update.plugins.len() == 1 { "" } else { "s" }
             )
          },
-         (None, false) => format!("Updated plugins: {} — tap to update now", update.plugins.join(", ")),
+         (None, false) => {
+            format!(
+               "Updated plugins: {} — tap to update now",
+               update.plugins.join(", ")
+            )
+         },
          (None, true) => String::new(),
       };
       *FOUND.lock().unwrap_or_else(PoisonError::into_inner) = Some(update);
@@ -213,8 +215,12 @@ pub fn apply() {
          {
             let mut guard = FOUND.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(pending) = guard.as_mut() {
-               pending.plugins.retain(|name| !updated_plugins.contains(name));
-               pending.plugin_crcs.retain(|name, _| !updated_plugins.contains(name));
+               pending
+                  .plugins
+                  .retain(|name| !updated_plugins.contains(name));
+               pending
+                  .plugin_crcs
+                  .retain(|name, _| !updated_plugins.contains(name));
                if pending.loader.is_none() && pending.plugins.is_empty() {
                   *guard = None;
                }
@@ -265,7 +271,9 @@ fn update_plugin(name: &str, expected_crc: Option<u32>) -> Result<(), String> {
    if let Some(expected) = expected_crc {
       let actual = crc32fast::hash(&bytes);
       if actual != expected {
-         return Err(format!("CRC mismatch (got {actual:#x}, expected {expected:#x})"));
+         return Err(format!(
+            "CRC mismatch (got {actual:#x}, expected {expected:#x})"
+         ));
       }
    }
    let source = String::from_utf8(bytes).map_err(|err| format!("invalid UTF-8: {err}"))?;
