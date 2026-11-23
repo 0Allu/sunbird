@@ -1,5 +1,7 @@
 //! Java-to-Rust view events: presses on plugin nodes, page events and sends.
 
+use std::sync::atomic::Ordering;
+
 use phoenix_ui::{
    Prop,
    inspect::WireJson,
@@ -14,8 +16,11 @@ use phoenix_wire::{
 };
 
 use crate::{
+   bridge,
    bridge::Action,
    patches::{
+      ACTIVE,
+      EventHookMeta,
       FIRST_ID,
       Handler,
       Patches,
@@ -23,6 +28,7 @@ use crate::{
       commands,
       message_id,
       number,
+      patches,
       worker::{
          Job,
          queue,
@@ -30,6 +36,33 @@ use crate::{
    },
    remote::Trace,
 };
+
+/// Registers a raw view event hook (`phoenix.ui.onEvent`).
+pub fn add_event_hook(id: u64, plugin: String, event: Key, intercept: bool) {
+   ACTIVE.store(true, Ordering::Release);
+   patches().event_hooks.push(EventHookMeta {
+      id,
+      plugin,
+      event,
+      intercept,
+   });
+}
+
+pub fn remove_event_hook(id: u64) {
+   patches().event_hooks.retain(|hook| hook.id != id);
+}
+
+/// Injects a raw view event (`phoenix.ui.dispatch`) straight to Phoenix's Rust
+/// guest.
+pub fn dispatch_event(node: i32, event: Key, payload: &Value) -> bool {
+   let frame = encode_view_event(node, event, payload);
+   patches().resent.push(frame.clone());
+   if !bridge::inject(&frame) {
+      patches().resent.retain(|sent| *sent != frame);
+      return false;
+   }
+   true
+}
 
 const DISMISS: Key = Prop::named("dismiss").key();
 const ROW_LONG_PRESS: Key = Prop::named("rowLongPress").key();

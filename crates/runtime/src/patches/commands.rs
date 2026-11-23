@@ -20,6 +20,7 @@ use phoenix_wire::{
 use crate::{
    bridge,
    patches::{
+      ACTIVE,
       Before,
       Draft,
       FORCE_VALUE,
@@ -30,9 +31,42 @@ use crate::{
       Slot,
       SlotKind,
       patches,
-      worker::press_context,
+      worker::{
+         Job,
+         press_context,
+         queue,
+      },
    },
 };
+
+/// A slash command, as the `/` suggestions list it.
+#[derive(Clone)]
+pub struct Command {
+   pub name:        String,
+   pub description: String,
+   pub icon:        Option<String>,
+   pub plugin:      String,
+}
+
+pub fn add_command(command: Command) {
+   ACTIVE.store(true, Ordering::Release);
+   let mut state = patches();
+   state
+      .commands
+      .retain(|existing| existing.name != command.name);
+   state.commands.push(command);
+   drop(state);
+   queue(Job::Suggest);
+}
+
+pub fn remove_command(name: &str) {
+   patches().commands.retain(|command| command.name != name);
+   queue(Job::Suggest);
+}
+
+pub fn commands() -> Vec<Command> {
+   patches().commands.clone()
+}
 
 /// From the `suggestions` scroll to the list of rows: stack, view, the second
 /// view, then four more views down.

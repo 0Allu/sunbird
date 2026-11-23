@@ -365,7 +365,7 @@ impl Engine {
                .collect::<Vec<_>>();
             for id in closed {
                open_pages.remove(&id);
-               patches::close_page(id);
+               patches::pages::close_page(id);
             }
             drop(open_pages);
             let mut banners = registry.banners.borrow_mut();
@@ -376,7 +376,7 @@ impl Engine {
                .collect::<Vec<_>>();
             for id in dismissed {
                banners.remove(&id);
-               patches::dismiss_banner(id);
+               patches::banners::dismiss_banner(id);
             }
             drop(banners);
             let mut mounts = registry.mounts.borrow_mut();
@@ -387,7 +387,7 @@ impl Engine {
                .collect::<Vec<_>>();
             for id in unmounted {
                mounts.remove(&id);
-               patches::unmount(id);
+               patches::mount::unmount(id);
             }
             drop(mounts);
             patches::forget(name);

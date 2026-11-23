@@ -30,10 +30,12 @@ use crate::{
    },
    patches::{
       self,
-      NodeInfo,
-      NodeMatch,
-      PatchTarget,
       UiContext,
+      nodes::{
+         NodeInfo,
+         NodeMatch,
+      },
+      props::PatchTarget,
    },
 };
 
@@ -152,8 +154,8 @@ pub fn add_view_hooks<'js>(ctx: &Ctx<'js>, plugin: &str, ui: &Object<'js>) -> rq
    ui.set(
       "hide",
       Function::new(ctx.clone(), move |ctx: Ctx<'js>, aid: String| {
-         let handle = patches::hide(owner.clone(), aid);
-         remover(&ctx, move |_| patches::unhide(handle), None)
+         let handle = patches::hidden::hide(owner.clone(), aid);
+         remover(&ctx, move |_| patches::hidden::unhide(handle), None)
       })?,
    )?;
    let owner = plugin.to_owned();
@@ -180,7 +182,7 @@ pub fn add_view_hooks<'js>(ctx: &Ctx<'js>, plugin: &str, ui: &Object<'js>) -> rq
                },
                _ => phoenix_wire::Value::Obj(Vec::new()),
             };
-            Ok::<_, rquickjs::Error>(patches::dispatch_event(node, prop.key(), &wire))
+            Ok::<_, rquickjs::Error>(patches::events::dispatch_event(node, prop.key(), &wire))
          },
       )?,
    )?;
@@ -210,7 +212,7 @@ pub fn add_view_hooks<'js>(ctx: &Ctx<'js>, plugin: &str, ui: &Object<'js>) -> rq
                .unwrap_or_default();
             let props = parse_props(&ctx, &patch, Some("addOn"))?;
             let (target, once, timeout) = patch_options(&ctx, options.0)?;
-            let handle = patches::add_prop_patch(
+            let handle = patches::props::add_prop_patch(
                owner.clone(),
                matcher,
                target,
@@ -219,7 +221,11 @@ pub fn add_view_hooks<'js>(ctx: &Ctx<'js>, plugin: &str, ui: &Object<'js>) -> rq
                once,
                timeout,
             );
-            remover(&ctx, move |_| patches::remove_prop_patch(handle), None)
+            remover(
+               &ctx,
+               move |_| patches::props::remove_prop_patch(handle),
+               None,
+            )
          },
       )?,
    )?;
@@ -261,7 +267,7 @@ pub fn add_view_queries<'js>(ctx: &Ctx<'js>, ui: &Object<'js>) -> rquickjs::Resu
          ctx.clone(),
          |ctx: Ctx<'js>, node: i32, patch: Object<'js>| {
             let props = parse_props(&ctx, &patch, None)?;
-            patches::update_node(node, props);
+            patches::nodes::update_node(node, props);
             Ok::<_, rquickjs::Error>(())
          },
       )?,
@@ -270,7 +276,7 @@ pub fn add_view_queries<'js>(ctx: &Ctx<'js>, ui: &Object<'js>) -> rquickjs::Resu
       "find",
       Function::new(ctx.clone(), |ctx: Ctx<'js>, matcher: Value<'js>| {
          let matcher = parse_node_match(&ctx, &matcher)?;
-         Ok::<_, rquickjs::Error>(patches::find_nodes(&matcher))
+         Ok::<_, rquickjs::Error>(patches::nodes::find_nodes(&matcher))
       })?,
    )?;
    ui.set(
@@ -279,7 +285,11 @@ pub fn add_view_queries<'js>(ctx: &Ctx<'js>, ui: &Object<'js>) -> rquickjs::Resu
          ctx.clone(),
          |ctx: Ctx<'js>, root: i32, matcher: Value<'js>, depth: Opt<usize>| {
             let matcher = parse_node_match(&ctx, &matcher)?;
-            Ok::<_, rquickjs::Error>(patches::find_down(root, &matcher, depth.0.unwrap_or(8)))
+            Ok::<_, rquickjs::Error>(patches::nodes::find_down(
+               root,
+               &matcher,
+               depth.0.unwrap_or(8),
+            ))
          },
       )?,
    )?;
@@ -288,7 +298,7 @@ pub fn add_view_queries<'js>(ctx: &Ctx<'js>, ui: &Object<'js>) -> rquickjs::Resu
       Function::new(
          ctx.clone(),
          |ctx: Ctx<'js>, id: i32| -> rquickjs::Result<Value<'js>> {
-            match patches::node_info(id) {
+            match patches::nodes::node_info(id) {
                Some(info) => Ok(node_info_object(&ctx, &info)?.into_value()),
                None => Ok(Value::new_null(ctx)),
             }
@@ -326,7 +336,7 @@ fn on_view_event<'js>(
       function,
    });
    drop(registry);
-   patches::add_event_hook(id, plugin.to_owned(), key, intercept);
+   patches::events::add_event_hook(id, plugin.to_owned(), key, intercept);
    remover(
       ctx,
       move |ctx| {
@@ -336,7 +346,7 @@ fn on_view_event<'js>(
                .borrow_mut()
                .retain(|hook| hook.id != id);
          }
-         patches::remove_event_hook(id);
+         patches::events::remove_event_hook(id);
       },
       None,
    )
@@ -359,14 +369,14 @@ fn on_node_created<'js>(
       .borrow_mut()
       .insert(id, (plugin.to_owned(), function));
    drop(registry);
-   patches::add_node_watcher(id, plugin.to_owned(), matcher);
+   patches::nodes::add_node_watcher(id, plugin.to_owned(), matcher);
    remover(
       ctx,
       move |ctx| {
          if let Some(registry) = ctx.userdata::<Registry<'js>>() {
             registry.node_watchers.borrow_mut().remove(&id);
          }
-         patches::remove_node_watcher(id);
+         patches::nodes::remove_node_watcher(id);
       },
       None,
    )

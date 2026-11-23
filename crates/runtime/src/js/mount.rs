@@ -88,18 +88,18 @@ pub fn add_mount<'js>(ctx: &Ctx<'js>, plugin: &str, ui: &Object<'js>) -> rquickj
                      .as_string()
                      .is_some_and(|s| s.to_string().ok().as_deref() == Some("start")) =>
                {
-                  patches::MountBefore::Start
+                  patches::mount::MountBefore::Start
                },
-               Some(val) if let Some(sib) = val.as_int() => patches::MountBefore::Node(sib),
+               Some(val) if let Some(sib) = val.as_int() => patches::mount::MountBefore::Node(sib),
                Some(val) if let Some(num) = val.as_float() =>
                {
                   #[expect(
                      clippy::cast_possible_truncation,
                      reason = "Phoenix node ids fit in i32"
                   )]
-                  patches::MountBefore::Node(num as i32)
+                  patches::mount::MountBefore::Node(num as i32)
                },
-               _ => patches::MountBefore::End,
+               _ => patches::mount::MountBefore::End,
             };
             let mut handlers = Vec::new();
             let parsed = parse_mount_node(&ctx, &node, &mut handlers)?;
@@ -109,8 +109,8 @@ pub fn add_mount<'js>(ctx: &Ctx<'js>, plugin: &str, ui: &Object<'js>) -> rquickj
                .mounts
                .borrow_mut()
                .insert(id, (owner.clone(), handlers));
-            patches::mount(id, parent_id, before, parsed);
-            remover(&ctx, move |_| patches::unmount(id), None)
+            patches::mount::mount(id, parent_id, before, parsed);
+            remover(&ctx, move |_| patches::mount::unmount(id), None)
          },
       )?,
    )?;
@@ -121,7 +121,7 @@ fn parse_mount_node<'js>(
    ctx: &Ctx<'js>,
    object: &Object<'js>,
    handlers: &mut Vec<Function<'js>>,
-) -> rquickjs::Result<patches::MountNode> {
+) -> rquickjs::Result<patches::mount::MountNode> {
    let kind_str = object
       .get::<_, Option<String>>("kind")?
       .unwrap_or_else(|| "view".to_owned());
@@ -184,7 +184,7 @@ fn parse_mount_node<'js>(
       },
       None => Vec::new(),
    };
-   Ok(patches::MountNode {
+   Ok(patches::mount::MountNode {
       kind: kind_str.into(),
       props,
       kids,

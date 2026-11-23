@@ -383,7 +383,7 @@ fn add_sheets<'js>(ctx: &Ctx<'js>, ui: &Object<'js>) -> rquickjs::Result<()> {
             // A list goes in a sheet like Discord's own menus when one can be
             // drawn.
             if message.is_none()
-               && let Some(index) = patches::menu(title.clone(), items)
+               && let Some(index) = patches::menu::menu(title.clone(), items)
             {
                return Settlement::Int(Ok(index));
             }
@@ -412,12 +412,12 @@ fn add_sheets<'js>(ctx: &Ctx<'js>, ui: &Object<'js>) -> rquickjs::Result<()> {
                .iter()
                .map(|item| item.label.clone())
                .collect::<Vec<_>>();
-            let body = patches::SheetBody {
+            let body = patches::menu::SheetBody {
                text: text.clone(),
                monospace,
                highlight,
             };
-            if let Some(index) = patches::sheet(title.clone(), body, items) {
+            if let Some(index) = patches::menu::sheet(title.clone(), body, items) {
                return Settlement::Int(Ok(index));
             }
             Settlement::Int(crate::picker::view(
@@ -449,11 +449,11 @@ fn add_notify<'js>(ctx: &Ctx<'js>, plugin: &str, ui: &Object<'js>) -> rquickjs::
             .map_or(5000, |ms| if ms <= 0.0 { 0 } else { millis(ms) });
          let on_press = options.get::<_, Option<Function<'js>>>("onPress")?;
          let action = if on_press.is_some() {
-            patches::BannerAction::JsCallback
+            patches::banners::BannerAction::JsCallback
          } else {
-            patches::BannerAction::None
+            patches::banners::BannerAction::None
          };
-         let id = patches::show_banner(title, body, icon, accent, duration_ms, action);
+         let id = patches::banners::show_banner(title, body, icon, accent, duration_ms, action);
          if let Some(callback) = on_press {
             ctx.userdata::<Registry<'js>>()
                .ok_or_else(|| Exception::throw_internal(&ctx, "no registry"))?
@@ -461,27 +461,27 @@ fn add_notify<'js>(ctx: &Ctx<'js>, plugin: &str, ui: &Object<'js>) -> rquickjs::
                .borrow_mut()
                .insert(id, (owner.clone(), callback));
          }
-         remover(&ctx, move |_| patches::dismiss_banner(id), None)
+         remover(&ctx, move |_| patches::banners::dismiss_banner(id), None)
       })?,
    )?;
    Ok(())
 }
 
-fn parse_menu_items<'js>(options: &Object<'js>) -> rquickjs::Result<Vec<patches::MenuItem>> {
+fn parse_menu_items<'js>(options: &Object<'js>) -> rquickjs::Result<Vec<patches::menu::MenuItem>> {
    Ok(options
       .get::<_, Option<Vec<Value<'js>>>>("options")?
       .unwrap_or_default()
       .into_iter()
       .filter_map(|option| {
          if let Some(label) = option.as_string() {
-            return Some(patches::MenuItem {
+            return Some(patches::menu::MenuItem {
                label:  label.to_string().ok()?,
                icon:   None,
                danger: false,
             });
          }
          let option = option.as_object()?;
-         Some(patches::MenuItem {
+         Some(patches::menu::MenuItem {
             label:  option.get::<_, Option<String>>("label").ok().flatten()?,
             icon:   option.get::<_, Option<String>>("icon").ok().flatten(),
             danger: option

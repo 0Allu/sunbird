@@ -5,7 +5,10 @@ use std::sync::{
       AtomicU64,
       Ordering,
    },
-   mpsc::Sender,
+   mpsc::{
+      Sender,
+      channel,
+   },
 };
 
 use phoenix_ui::Op;
@@ -13,14 +16,62 @@ use phoenix_ui::Op;
 use crate::patches::{
    Before,
    Handler,
-   MenuItem,
    Patches,
    Place,
-   SheetBody,
    Slot,
    SlotKind,
    targets,
+   worker::{
+      Job,
+      queue,
+   },
 };
+
+/// A menu sheet row a plugin asked for.
+pub struct MenuItem {
+   pub label:  String,
+   pub icon:   Option<String>,
+   pub danger: bool,
+}
+
+/// Scrollable text content shown inside a plugin sheet.
+pub struct SheetBody {
+   pub text:      String,
+   pub monospace: bool,
+   pub highlight: bool,
+}
+
+/// Shows a menu sheet like the message long-press one and waits for the
+/// choice: the row's index, -1 when it was swiped away, or `None` when no
+/// such sheet can be drawn yet.
+pub fn menu(title: Option<String>, items: Vec<MenuItem>) -> Option<i32> {
+   let (answer, receiver) = channel();
+   queue(Job::Menu {
+      title,
+      body: None,
+      items,
+      answer,
+   });
+   match receiver.recv() {
+      Ok(-2) | Err(_) => None,
+      Ok(index) => Some(index),
+   }
+}
+
+/// Shows a scrollable text/code viewer sheet with optional action rows.
+pub fn sheet(title: Option<String>, body: SheetBody, items: Vec<MenuItem>) -> Option<i32> {
+   let (answer, receiver) = channel();
+   queue(Job::Menu {
+      title,
+      body: Some(body),
+      items,
+      answer,
+   });
+   match receiver.recv() {
+      Ok(-2) | Err(_) => None,
+      Ok(index) => Some(index),
+   }
+}
 
 impl Patches {
    /// Shows a menu sheet over the top sheet, like the message long-press one.

@@ -164,13 +164,13 @@ pub fn check() {
       };
       *FOUND.lock().unwrap_or_else(PoisonError::into_inner) = Some(update);
       crate::settings::refresh();
-      crate::patches::show_banner(
+      crate::patches::banners::show_banner(
          "Phoenix Unlock update available".to_owned(),
          Some(body),
          Some("res://ic_mana_puzzle_piece_retry".to_owned()),
          Some(0xFF23_A55A),
          8000,
-         crate::patches::BannerAction::ApplyUpdate,
+         crate::patches::banners::BannerAction::ApplyUpdate,
       );
    });
 }
@@ -244,13 +244,13 @@ pub fn apply() {
       set_status(None);
       BUSY.store(false, Ordering::Release);
       crate::settings::refresh();
-      crate::patches::show_banner(
+      crate::patches::banners::show_banner(
          "Plugins updated".to_owned(),
          Some(format!("Reloaded: {}", updated_plugins.join(", "))),
          Some("res://ic_mana_checkmark_large".to_owned()),
          Some(0xFF23_A55A),
          4500,
-         crate::patches::BannerAction::None,
+         crate::patches::banners::BannerAction::None,
       );
    });
 }
@@ -333,13 +333,13 @@ pub fn on_native_status(state: &str, message: &str) {
          *FOUND.lock().unwrap_or_else(PoisonError::into_inner) = None;
          set_status(None);
          BUSY.store(false, Ordering::Release);
-         crate::patches::show_banner(
+         crate::patches::banners::show_banner(
             "Phoenix Unlock updated".to_owned(),
             Some(message.to_owned()),
             Some("res://ic_mana_checkmark_large".to_owned()),
             Some(0xFF23_A55A),
             4000,
-            crate::patches::BannerAction::None,
+            crate::patches::banners::BannerAction::None,
          );
       },
       "permission" | "fallback" | "cancelled" | "error" => {

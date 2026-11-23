@@ -5,7 +5,14 @@ use std::{
       HashMap,
       HashSet,
    },
-   time::Instant,
+   sync::atomic::{
+      AtomicU64,
+      Ordering,
+   },
+   time::{
+      Duration,
+      Instant,
+   },
 };
 
 use phoenix_ui::{
@@ -21,10 +28,72 @@ use phoenix_ui::{
 use phoenix_wire::Value;
 
 use crate::patches::{
+   ACTIVE,
    HIDDEN,
-   PatchTarget,
    Patches,
+   PropPatch,
+   nodes::NodeMatch,
+   patches,
+   worker::{
+      Job,
+      queue,
+   },
 };
+
+/// Which node a declarative [`PropPatch`] targets when a matching node mounts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PatchTarget {
+   /// The matching node itself.
+   Node,
+   /// The enclosing sheet (and its created outer wrapper), for zero-flash
+   /// suppression.
+   Sheet,
+   /// The enclosing virtualized/row-gesture list.
+   List,
+}
+
+/// Registers a declarative Rust-side prop patch (`phoenix.ui.patchProps`).
+pub fn add_prop_patch(
+   plugin: String,
+   matcher: NodeMatch,
+   target: PatchTarget,
+   props: Props,
+   add_on: Vec<String>,
+   once: bool,
+   timeout: Option<Duration>,
+) -> u64 {
+   static NEXT: AtomicU64 = AtomicU64::new(1);
+   let id = NEXT.fetch_add(1, Ordering::Relaxed);
+   ACTIVE.store(true, Ordering::Release);
+   let is_list = target == PatchTarget::List;
+   patches().prop_rules.push(PropPatch {
+      id,
+      plugin,
+      matcher,
+      target,
+      props,
+      add_on,
+      once,
+      deadline: timeout.map(|dur| Instant::now() + dur),
+   });
+   if is_list {
+      queue(Job::RefreshPropPatches);
+   }
+   id
+}
+
+pub fn remove_prop_patch(id: u64) {
+   let mut state = patches();
+   let was_list = state
+      .prop_rules
+      .iter()
+      .any(|patch| patch.id == id && patch.target == PatchTarget::List);
+   state.prop_rules.retain(|patch| patch.id != id);
+   drop(state);
+   if was_list {
+      queue(Job::RefreshPropPatches);
+   }
+}
 
 impl Patches {
    pub fn match_prop_patches(

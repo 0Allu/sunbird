@@ -18,7 +18,7 @@ use crate::patches::{
    Outcome,
    Place,
    Rendered,
-   SheetBody,
+   menu::SheetBody,
    tabs,
 };
 

@@ -10,17 +10,17 @@
 //!   main thread can be waited on with the UI lock held. Plugin callbacks run
 //!   on a worker, and their results reach the screen as follow-up batches.
 
-mod banners;
-mod commands;
+pub mod banners;
+pub mod commands;
 mod emoji;
-mod events;
-mod hidden;
-mod menu;
-mod mount;
-mod nodes;
-mod pages;
+pub mod events;
+pub mod hidden;
+pub mod menu;
+pub mod mount;
+pub mod nodes;
+pub mod pages;
 mod profile;
-mod props;
+pub mod props;
 mod sink;
 mod slots;
 mod tabs;
@@ -43,7 +43,6 @@ use std::{
       atomic::{
          AtomicBool,
          AtomicI32,
-         AtomicU32,
          AtomicU64,
          Ordering,
       },
@@ -53,10 +52,7 @@ use std::{
       },
    },
    thread,
-   time::{
-      Duration,
-      Instant,
-   },
+   time::Instant,
 };
 
 use phoenix_ui::{
@@ -72,12 +68,18 @@ use phoenix_ui::{
 use phoenix_wire::{
    Key,
    Value,
-   encode_view_event,
 };
 
 use crate::{
    bridge,
    patches::{
+      banners::{
+         BannerAction,
+         BannerSpec,
+      },
+      commands::Command,
+      nodes::NodeMatch,
+      props::PatchTarget,
       sink::PatchSink,
       targets::{
          Seen,
@@ -128,15 +130,6 @@ pub struct Contribution {
    pub priority:    i32,
    /// Shown only where the plugin's `visible` says so.
    pub conditional: bool,
-}
-
-/// A slash command, as the `/` suggestions list it.
-#[derive(Clone)]
-pub struct Command {
-   pub name:        String,
-   pub description: String,
-   pub icon:        Option<String>,
-   pub plugin:      String,
 }
 
 /// What a contribution's nodes are about.
@@ -220,47 +213,6 @@ pub enum Sent {
    Cancel,
    Text(String),
    Unchanged,
-}
-
-/// Matches a Phoenix node's `accessibilityId`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum NodeMatch {
-   Exact(String),
-   Prefix(String),
-}
-
-impl NodeMatch {
-   pub fn matches(&self, aid: &str) -> bool {
-      match self {
-         Self::Exact(expected) => aid == expected,
-         Self::Prefix(prefix) => aid.starts_with(prefix.as_str()),
-      }
-   }
-}
-
-/// Which node a declarative [`PropPatch`] targets when a matching node mounts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PatchTarget {
-   /// The matching node itself.
-   Node,
-   /// The enclosing sheet (and its created outer wrapper), for zero-flash
-   /// suppression.
-   Sheet,
-   /// The enclosing virtualized/row-gesture list.
-   List,
-}
-
-/// Snapshot of a live Phoenix node from [`Mirror`], exposed to plugins.
-#[derive(Clone, Debug)]
-pub struct NodeInfo {
-   pub id:               i32,
-   pub kind:             Option<String>,
-   pub accessibility_id: Option<String>,
-   pub parent:           Option<i32>,
-   pub children:         Vec<i32>,
-   pub sheet:            Option<i32>,
-   pub list:             Option<i32>,
-   pub on:               Vec<String>,
 }
 
 /// A synchronous Rust-side prop patch applied inside `rewrite` with zero JS
@@ -396,81 +348,6 @@ enum SlotKind {
    Banner(u32),
    /// A raw JS-mounted subtree (`phoenix.ui.mount`).
    Mounted(u32),
-}
-
-/// Placement of a raw JS-mounted subtree inside its parent.
-#[derive(Clone, Copy)]
-pub enum MountBefore {
-   Start,
-   End,
-   Node(i32),
-}
-
-/// A raw node specification for `phoenix.ui.mount`.
-pub struct MountNode {
-   pub kind:       ViewKind,
-   pub props:      Props,
-   pub kids:       Vec<Self>,
-   pub on_press:   Option<u32>,
-   pub on_dismiss: Option<u32>,
-}
-
-/// What happens when the user taps an in-app notification banner.
-pub enum BannerAction {
-   None,
-   ApplyUpdate,
-   JsCallback,
-}
-
-/// Specification for a native Discord in-app notification banner.
-pub struct BannerSpec {
-   pub id:          u32,
-   pub title:       String,
-   pub body:        Option<String>,
-   pub icon:        Option<String>,
-   pub accent:      Option<i64>,
-   pub duration_ms: u64,
-   pub action:      BannerAction,
-}
-
-/// A button row on a plugin full-screen page.
-pub struct PageButton {
-   pub label:  String,
-   pub icon:   Option<String>,
-   pub danger: bool,
-   pub index:  u32,
-}
-
-/// A section on a plugin full-screen page.
-pub enum PageSection {
-   Code {
-      title:     Option<String>,
-      text:      String,
-      monospace: bool,
-      highlight: bool,
-   },
-   Text {
-      title: Option<String>,
-      text:  String,
-   },
-   Buttons {
-      title:   Option<String>,
-      buttons: Vec<PageButton>,
-   },
-}
-
-/// A menu sheet row a plugin asked for.
-pub struct MenuItem {
-   pub label:  String,
-   pub icon:   Option<String>,
-   pub danger: bool,
-}
-
-/// Scrollable text content shown inside a plugin sheet.
-pub struct SheetBody {
-   pub text:      String,
-   pub monospace: bool,
-   pub highlight: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -705,100 +582,6 @@ pub fn update_button(
    queue(Job::Refresh(target));
 }
 
-/// Shows a menu sheet like the message long-press one and waits for the
-/// choice: the row's index, -1 when it was swiped away, or `None` when no
-/// such sheet can be drawn yet.
-pub fn menu(title: Option<String>, items: Vec<MenuItem>) -> Option<i32> {
-   let (answer, receiver) = mpsc::channel();
-   queue(Job::Menu {
-      title,
-      body: None,
-      items,
-      answer,
-   });
-   match receiver.recv() {
-      Ok(-2) | Err(_) => None,
-      Ok(index) => Some(index),
-   }
-}
-
-/// Shows a scrollable text/code viewer sheet with optional action rows.
-pub fn sheet(title: Option<String>, body: SheetBody, items: Vec<MenuItem>) -> Option<i32> {
-   let (answer, receiver) = mpsc::channel();
-   queue(Job::Menu {
-      title,
-      body: Some(body),
-      items,
-      answer,
-   });
-   match receiver.recv() {
-      Ok(-2) | Err(_) => None,
-      Ok(index) => Some(index),
-   }
-}
-
-/// Pushes a full-screen page onto Phoenix's active navigator.
-pub fn open_page(id: u32, title: String, sections: Vec<PageSection>) {
-   ACTIVE.store(true, Ordering::Release);
-   queue(Job::OpenPage {
-      id,
-      title,
-      sections,
-   });
-}
-
-/// Closes a plugin full-screen page pushed with [`open_page`].
-pub fn close_page(id: u32) {
-   queue(Job::ClosePage(id));
-}
-
-/// Shows a native Discord in-app notification banner at the top of the screen.
-/// Returns the banner id so it can be dismissed early with [`dismiss_banner`].
-pub fn show_banner(
-   title: String,
-   body: Option<String>,
-   icon: Option<String>,
-   accent: Option<i64>,
-   duration_ms: u64,
-   action: BannerAction,
-) -> u32 {
-   static NEXT: AtomicU32 = AtomicU32::new(1);
-   let id = NEXT.fetch_add(1, Ordering::Relaxed);
-   ACTIVE.store(true, Ordering::Release);
-   queue(Job::ShowBanner(BannerSpec {
-      id,
-      title,
-      body,
-      icon,
-      accent,
-      duration_ms,
-      action,
-   }));
-   id
-}
-
-/// Dismisses an in-app notification banner early if it is still visible.
-pub fn dismiss_banner(id: u32) {
-   queue(Job::DismissBanner(id));
-}
-
-/// Mounts a raw JS-constructed Phoenix subtree onto `parent` (or the root view
-/// when `parent` is `None`).
-pub fn mount(id: u32, parent: Option<i32>, before: MountBefore, node: MountNode) {
-   ACTIVE.store(true, Ordering::Release);
-   queue(Job::Mount {
-      id,
-      parent,
-      before,
-      node,
-   });
-}
-
-/// Unmounts a raw JS-constructed subtree mounted with [`mount`].
-pub fn unmount(id: u32) {
-   queue(Job::Unmount(id));
-}
-
 /// The current Phoenix root view id, if seen.
 pub fn root_id() -> Option<i32> {
    patches().mirror.root()
@@ -816,65 +599,9 @@ pub fn with_tree<R>(
    with(id.map(|id| TreeJson::new(&state.mirror, id, depth)))
 }
 
-/// Hides every Phoenix node with accessibility id `aid` by setting
-/// `hidden: true` (`View.GONE`) on it (or its unnamed single-child wrapper).
-/// Returns a handle for [`unhide`].
-pub fn hide(plugin: String, aid: String) -> u64 {
-   static NEXT: AtomicU64 = AtomicU64::new(1);
-   let handle = NEXT.fetch_add(1, Ordering::Relaxed);
-   ACTIVE.store(true, Ordering::Release);
-   let mut state = patches();
-   *state.hidden.entry(aid.clone()).or_default() += 1;
-   state.hidden_entries.push((handle, plugin, aid));
-   drop(state);
-   queue(Job::RefreshHidden);
-   handle
-}
-
-/// Undoes a [`hide`] call and restores the node if no other plugin hides it.
-pub fn unhide(handle: u64) {
-   let mut state = patches();
-   let Some(pos) = state
-      .hidden_entries
-      .iter()
-      .position(|(id, ..)| *id == handle)
-   else {
-      return;
-   };
-   let (_, _, aid) = state.hidden_entries.remove(pos);
-   if let Some(count) = state.hidden.get_mut(&aid) {
-      *count = count.saturating_sub(1);
-      if *count == 0 {
-         state.hidden.remove(&aid);
-      }
-   }
-   drop(state);
-   queue(Job::RefreshHidden);
-}
-
 /// A plugin settled a `render` or `visible` it returned as a promise.
 pub fn evaluated(contribution: ContributionId, place: Place, outcome: Outcome) {
    queue(Job::Evaluated(contribution, place, outcome));
-}
-
-pub fn add_command(command: Command) {
-   ACTIVE.store(true, Ordering::Release);
-   let mut state = patches();
-   state
-      .commands
-      .retain(|existing| existing.name != command.name);
-   state.commands.push(command);
-   drop(state);
-   queue(Job::Suggest);
-}
-
-pub fn remove_command(name: &str) {
-   patches().commands.retain(|command| command.name != name);
-   queue(Job::Suggest);
-}
-
-pub fn commands() -> Vec<Command> {
-   patches().commands.clone()
 }
 
 /// How many `onSend` interceptors plugins hold, so sends are taken only
@@ -894,115 +621,6 @@ pub fn set_emoji_pickers(count: usize) {
    }
    patches().pickers = count;
    emoji::unlock(count > 0);
-}
-
-/// Registers a raw view event hook (`phoenix.ui.onEvent`).
-pub fn add_event_hook(id: u64, plugin: String, event: Key, intercept: bool) {
-   ACTIVE.store(true, Ordering::Release);
-   patches().event_hooks.push(EventHookMeta {
-      id,
-      plugin,
-      event,
-      intercept,
-   });
-}
-
-pub fn remove_event_hook(id: u64) {
-   patches().event_hooks.retain(|hook| hook.id != id);
-}
-
-/// Registers a raw node creation watcher (`phoenix.ui.onNode`).
-pub fn add_node_watcher(id: u64, plugin: String, matcher: NodeMatch) {
-   ACTIVE.store(true, Ordering::Release);
-   patches().node_watchers.push(NodeWatcher {
-      id,
-      plugin,
-      matcher,
-   });
-}
-
-pub fn remove_node_watcher(id: u64) {
-   patches().node_watchers.retain(|watcher| watcher.id != id);
-}
-
-/// Registers a declarative Rust-side prop patch (`phoenix.ui.patchProps`).
-pub fn add_prop_patch(
-   plugin: String,
-   matcher: NodeMatch,
-   target: PatchTarget,
-   props: Props,
-   add_on: Vec<String>,
-   once: bool,
-   timeout: Option<Duration>,
-) -> u64 {
-   static NEXT: AtomicU64 = AtomicU64::new(1);
-   let id = NEXT.fetch_add(1, Ordering::Relaxed);
-   ACTIVE.store(true, Ordering::Release);
-   let is_list = target == PatchTarget::List;
-   patches().prop_rules.push(PropPatch {
-      id,
-      plugin,
-      matcher,
-      target,
-      props,
-      add_on,
-      once,
-      deadline: timeout.map(|dur| Instant::now() + dur),
-   });
-   if is_list {
-      queue(Job::RefreshPropPatches);
-   }
-   id
-}
-
-pub fn remove_prop_patch(id: u64) {
-   let mut state = patches();
-   let was_list = state
-      .prop_rules
-      .iter()
-      .any(|patch| patch.id == id && patch.target == PatchTarget::List);
-   state.prop_rules.retain(|patch| patch.id != id);
-   drop(state);
-   if was_list {
-      queue(Job::RefreshPropPatches);
-   }
-}
-
-/// Injects a raw view event (`phoenix.ui.dispatch`) straight to Phoenix's Rust
-/// guest.
-pub fn dispatch_event(node: i32, event: Key, payload: &Value) -> bool {
-   let frame = encode_view_event(node, event, payload);
-   patches().resent.push(frame.clone());
-   if !bridge::inject(&frame) {
-      patches().resent.retain(|sent| *sent != frame);
-      return false;
-   }
-   true
-}
-
-/// Sends a raw `Op::Update` (`phoenix.ui.update`) on the patches worker thread.
-pub fn update_node(node: i32, props: Props) {
-   ACTIVE.store(true, Ordering::Release);
-   queue(Job::UpdateNode { node, props });
-}
-
-/// Finds all live nodes matching `matcher` (`phoenix.ui.find`).
-pub fn find_nodes(matcher: &NodeMatch) -> Vec<i32> {
-   patches().mirror.nodes_where(&|aid| matcher.matches(aid))
-}
-
-/// Finds the first node at or under `root` matching `matcher`
-/// (`phoenix.ui.findDown`).
-pub fn find_down(root: i32, matcher: &NodeMatch, max_depth: usize) -> Option<i32> {
-   patches()
-      .mirror
-      .find_down(root, &|aid| matcher.matches(aid), max_depth)
-}
-
-/// Snapshot of a live node (`phoenix.ui.node`).
-pub fn node_info(id: i32) -> Option<NodeInfo> {
-   let state = patches();
-   state.mirror.exists(id).then(|| state.build_node_info(id))
 }
 
 /// Drops everything `plugin` added.

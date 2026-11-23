@@ -247,7 +247,7 @@ pub fn add_page<'js>(ctx: &Ctx<'js>, plugin: &str, ui: &Object<'js>) -> rquickjs
             let heading = sec.get::<_, Option<String>>("title")?;
             match kind.as_str() {
                "code" => {
-                  sections.push(patches::PageSection::Code {
+                  sections.push(patches::pages::PageSection::Code {
                      title:     heading,
                      text:      sec.get::<_, Option<String>>("text")?.unwrap_or_default(),
                      monospace: sec.get::<_, Option<bool>>("monospace")?.unwrap_or(true),
@@ -255,7 +255,7 @@ pub fn add_page<'js>(ctx: &Ctx<'js>, plugin: &str, ui: &Object<'js>) -> rquickjs
                   });
                },
                "text" => {
-                  sections.push(patches::PageSection::Text {
+                  sections.push(patches::pages::PageSection::Text {
                      title: heading,
                      text:  sec.get::<_, Option<String>>("text")?.unwrap_or_default(),
                   });
@@ -275,14 +275,14 @@ pub fn add_page<'js>(ctx: &Ctx<'js>, plugin: &str, ui: &Object<'js>) -> rquickjs
                      #[expect(clippy::cast_possible_truncation, reason = "pages have few buttons")]
                      let index = handlers.len() as u32;
                      handlers.push(on_press);
-                     buttons.push(patches::PageButton {
+                     buttons.push(patches::pages::PageButton {
                         label,
                         icon: btn.get::<_, Option<String>>("icon")?,
                         danger: btn.get::<_, Option<bool>>("danger")?.unwrap_or(false),
                         index,
                      });
                   }
-                  sections.push(patches::PageSection::Buttons {
+                  sections.push(patches::pages::PageSection::Buttons {
                      title: heading,
                      buttons,
                   });
@@ -295,11 +295,11 @@ pub fn add_page<'js>(ctx: &Ctx<'js>, plugin: &str, ui: &Object<'js>) -> rquickjs
             .open_pages
             .borrow_mut()
             .insert(id, (owner.clone(), handlers));
-         patches::open_page(id, title, sections);
+         patches::pages::open_page(id, title, sections);
          let handle = Object::new(ctx.clone())?;
          handle.set(
             "close",
-            Function::new(ctx, move || patches::close_page(id))?,
+            Function::new(ctx, move || patches::pages::close_page(id))?,
          )?;
          Ok::<_, rquickjs::Error>(handle)
       })?,

@@ -1,19 +1,62 @@
 //! `phoenix.ui.mount`: raw plugin-built subtrees under any Phoenix node.
 
-use phoenix_ui::Op;
+use std::sync::atomic::Ordering;
+
+use phoenix_ui::{
+   Op,
+   Props,
+   ViewKind,
+};
 
 use crate::patches::{
+   ACTIVE,
    Before,
    Draft,
    Handler,
-   MountBefore,
-   MountNode,
    Patches,
    Place,
    Slot,
    SlotKind,
    patches,
+   worker::{
+      Job,
+      queue,
+   },
 };
+
+/// Placement of a raw JS-mounted subtree inside its parent.
+#[derive(Clone, Copy)]
+pub enum MountBefore {
+   Start,
+   End,
+   Node(i32),
+}
+
+/// A raw node specification for `phoenix.ui.mount`.
+pub struct MountNode {
+   pub kind:       ViewKind,
+   pub props:      Props,
+   pub kids:       Vec<Self>,
+   pub on_press:   Option<u32>,
+   pub on_dismiss: Option<u32>,
+}
+
+/// Mounts a raw JS-constructed Phoenix subtree onto `parent` (or the root view
+/// when `parent` is `None`).
+pub fn mount(id: u32, parent: Option<i32>, before: MountBefore, node: MountNode) {
+   ACTIVE.store(true, Ordering::Release);
+   queue(Job::Mount {
+      id,
+      parent,
+      before,
+      node,
+   });
+}
+
+/// Unmounts a raw JS-constructed subtree mounted with [`mount`].
+pub fn unmount(id: u32) {
+   queue(Job::Unmount(id));
+}
 
 impl Patches {
    pub fn open_mount(
@@ -97,7 +140,7 @@ fn to_draft(mount: u32, node: MountNode) -> Draft {
    }
 }
 
-pub fn unmount(id: u32) -> Vec<Op> {
+pub fn close(id: u32) -> Vec<Op> {
    let ops = patches().close_mount(id);
    if let Some(engine) = crate::engine() {
       engine.mount_closed(id);

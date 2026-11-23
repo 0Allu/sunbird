@@ -1,6 +1,10 @@
 //! Native in-app notification banners over the root view.
 
 use std::{
+   sync::atomic::{
+      AtomicU32,
+      Ordering,
+   },
    thread,
    time::{
       Duration,
@@ -18,9 +22,8 @@ use phoenix_wire::Value;
 use crate::{
    bridge,
    patches::{
+      ACTIVE,
       BACKGROUND,
-      BannerAction,
-      BannerSpec,
       Before,
       Draft,
       Handler,
@@ -35,6 +38,54 @@ use crate::{
       },
    },
 };
+
+/// What happens when the user taps an in-app notification banner.
+pub enum BannerAction {
+   None,
+   ApplyUpdate,
+   JsCallback,
+}
+
+/// Specification for a native Discord in-app notification banner.
+pub struct BannerSpec {
+   pub id:          u32,
+   pub title:       String,
+   pub body:        Option<String>,
+   pub icon:        Option<String>,
+   pub accent:      Option<i64>,
+   pub duration_ms: u64,
+   pub action:      BannerAction,
+}
+
+/// Shows a native Discord in-app notification banner at the top of the screen.
+/// Returns the banner id so it can be dismissed early with [`dismiss_banner`].
+pub fn show_banner(
+   title: String,
+   body: Option<String>,
+   icon: Option<String>,
+   accent: Option<i64>,
+   duration_ms: u64,
+   action: BannerAction,
+) -> u32 {
+   static NEXT: AtomicU32 = AtomicU32::new(1);
+   let id = NEXT.fetch_add(1, Ordering::Relaxed);
+   ACTIVE.store(true, Ordering::Release);
+   queue(Job::ShowBanner(BannerSpec {
+      id,
+      title,
+      body,
+      icon,
+      accent,
+      duration_ms,
+      action,
+   }));
+   id
+}
+
+/// Dismisses an in-app notification banner early if it is still visible.
+pub fn dismiss_banner(id: u32) {
+   queue(Job::DismissBanner(id));
+}
 
 /// Delay after the first `Op::Root` before showing cold-start banners so they
 /// appear over the live screen rather than behind the splash animation.

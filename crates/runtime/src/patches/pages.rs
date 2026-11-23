@@ -1,5 +1,7 @@
 //! Full-screen plugin pages pushed onto Phoenix's active navigator.
 
+use std::sync::atomic::Ordering;
+
 use phoenix_ui::{
    Op,
    Prop,
@@ -9,17 +11,61 @@ use phoenix_ui::{
 use phoenix_wire::Value;
 
 use crate::patches::{
+   ACTIVE,
    Before,
    Draft,
    Handler,
-   PageButton,
-   PageSection,
    Patches,
    Place,
    Slot,
    SlotKind,
    patches,
+   worker::{
+      Job,
+      queue,
+   },
 };
+
+/// A button row on a plugin full-screen page.
+pub struct PageButton {
+   pub label:  String,
+   pub icon:   Option<String>,
+   pub danger: bool,
+   pub index:  u32,
+}
+
+/// A section on a plugin full-screen page.
+pub enum PageSection {
+   Code {
+      title:     Option<String>,
+      text:      String,
+      monospace: bool,
+      highlight: bool,
+   },
+   Text {
+      title: Option<String>,
+      text:  String,
+   },
+   Buttons {
+      title:   Option<String>,
+      buttons: Vec<PageButton>,
+   },
+}
+
+/// Pushes a full-screen page onto Phoenix's active navigator.
+pub fn open_page(id: u32, title: String, sections: Vec<PageSection>) {
+   ACTIVE.store(true, Ordering::Release);
+   queue(Job::OpenPage {
+      id,
+      title,
+      sections,
+   });
+}
+
+/// Closes a plugin full-screen page pushed with [`open_page`].
+pub fn close_page(id: u32) {
+   queue(Job::ClosePage(id));
+}
 
 const PAGE_HEADER_SPACER: u32 = 0x4E1;
 const PAGE_CONTENT: u32 = 0x4E4;

@@ -26,9 +26,9 @@ use crate::{
    },
    patches::{
       self,
-      Command,
       Sent,
       UiContext,
+      commands::Command,
    },
 };
 
@@ -263,7 +263,7 @@ fn commands_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object
             .commands
             .borrow_mut()
             .insert(name.clone(), (owner.clone(), execute.clone()));
-         patches::add_command(Command {
+         patches::commands::add_command(Command {
             name:        name.clone(),
             description: options
                .get::<_, Option<String>>("description")?
@@ -281,7 +281,7 @@ fn commands_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object
                      .is_some_and(|(_, current)| *current == execute)
                   {
                      commands.remove(&name);
-                     patches::remove_command(&name);
+                     patches::commands::remove_command(&name);
                   }
                }
             },
@@ -293,7 +293,7 @@ fn commands_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object
       "list",
       Function::new(ctx.clone(), |ctx: Ctx<'js>| {
          let list = rquickjs::Array::new(ctx.clone())?;
-         for (index, command) in patches::commands().into_iter().enumerate() {
+         for (index, command) in patches::commands::commands().into_iter().enumerate() {
             let entry = Object::new(ctx.clone())?;
             entry.set("name", command.name)?;
             entry.set("description", command.description)?;
