@@ -1,120 +1,187 @@
 # AGENTS.md
 
-Notes for coding agents working on Phoenix Unlock (this repo): a patcher and plugin runtime for
-Phoenix, Discord's native Rust Android client (356.7 Alpha, versionCode 356207). "Phoenix" is
-Discord's client; our tool is "Phoenix Unlock" (the code calls its runtime `phoenix`).
+Phoenix Unlock patches Phoenix, Discord's native Rust Android client, and runs TypeScript plugins
+inside it. Target build is 356.7 Alpha, versionCode 356207. "Phoenix" is Discord's client. The
+runtime, the crates and the plugin global are all named `phoenix`.
 
-## Rules from the owner
+Read this file before changing code. Every fact here cost someone hours to learn.
 
-- **Attribution.** Agents may credit themselves in commit messages, e.g. with an
-  `Assisted-By: <agent>` trailer.
-- **API in Rust.** Plugin API features and their machinery (UI ops, patch targets, settings pages,
-  stores) live in the Rust crates and reach plugins through the `phoenix` object. Plugins are
-  TypeScript; keep JS out of the runtime itself.
-- **One signing identity.** Every APK, from the patcher, the site or `node-build`, is signed with
-  `crates/patcher/keys/` (`web/signing-key.json` holds the same key for the site): v3 only, with
-  the proof of rotation from the old Valenced test key, so builds install over each other and over
-  older installs. The old private key must not be added to the repo. Read `keys/README.md`.
-- **No standalone loader commits.** When a change requires rebuilding `web/plugins/libphoenix-arm64.so`,
-  squash the updated `.so` into the feature commit instead of creating separate `"Update bundled arm64 loader"` commits.
-- **Push only what works.** Test on a device before pushing.
-- **Privacy.** Screenshots and logs from the owner's phone show private chats, emails and
-  accounts. Don't quote them, don't commit captures, delete screenshots after use. Some plugins
-  (`example`) log message text to the console.
-- **Phone.** The owner's arm64 phone has no root. Don't enter passwords. Install over the existing
-  `com.discord` (same key keeps the login). Don't tap around while the owner is using it; ask.
-  Remove test plugins and files you add.
+## Hard rules
+
+- Credentials. Phoenix's HTTP requests cross `GuestHost.invoke` carrying the user's
+  `authorization` header. Never log, print or save invoke frames, dispatch frames or request
+  headers. Filter before writing anything to disk, and delete any capture that holds a token.
+  `discord.rs` keeps the session headers in memory only.
+- Secrets in logs. Plugin settings of `type: "secret"` are scrubbed from every console line by
+  `console.rs`. A new credential-bearing setting must use that type.
+- Privacy. Screenshots and logs from the owners' phones show private chats, emails and accounts.
+  Never quote them in commits or replies, never commit them, delete them after use.
+- Real accounts. Never send account-mutating requests (friend adds, settings PATCHes, guild
+  joins) to test something. Test `phoenix.discord` writes against paths that return 404.
+  Never inject fake messages into real channels.
+- Signing. Every APK, from `crates/patcher`, the site or `node-build.mjs`, is signed with
+  `crates/patcher/keys/` (the site carries the same key in `web/signing-key.json`). v3 only, with
+  the rotation proof from the old Valenced test key, so builds install over each other and keep
+  the login. Never add the old private key. Read `keys/README.md` before touching signing.
+- Plugin API lives in Rust. UI ops, patch targets, settings pages, stores and HTTP live in the
+  crates and reach plugins through the `phoenix` object. Plugins are thin TypeScript. No JS
+  prelude in the runtime.
+- Typed boundaries. Plugins get opaque handles (`phoenix.gateway.messageCreate`), not strings
+  like `"MESSAGE_CREATE"`. Read lists of events, props and handlers live from the binary. Never
+  add a hand-maintained list file.
+- No committed build output. `picker.dex` is built by `crates/runtime/build.rs`,
+  `web/plugins/lib*.so` by `scripts/loader.nu`, plugin bundles by `web/tools/bundle-plugins.mjs`.
+  The Frida gadgets in `web/plugins/frida-*` are the one exception, kept for x86 WSA debugging.
+- Test on a device before pushing. A clean build proves nothing about the bridge.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `crates/loader` | `libphoenix.so`, injected as `libplm.so`: a constructor that starts the runtime inside the host. |
-| `crates/runtime` | rquickjs plugin runtime and the `phoenix` API: gateway hooks, UI bridge, Settings → Phoenix Unlocker pages (`settings.rs`), UI patch targets (`patches/`), console, in-app OTA plugin & APK self-updater (`update.rs` + `java/phx/Updater.java`), localhost debug shell (`remote.rs`), file picker (`picker.rs` + `java/phx/Picker.java`, compiled to dex by `build.rs`). `phoenix.d.ts` is the plugin API reference. |
-| `crates/hook` | ShadowHook (arm) / Dobby (elsewhere) inline hooks, bytehook PLT hooks, image scanner. |
-| `crates/sigs`, `crates/sigscan` | Hook-point rules and the per-build table; `sigscan` evaluates them against a library file. |
-| `crates/ui`, `crates/wire` | Codecs for Phoenix's UI-op batches, pure-Rust live `Mirror` (`crates/ui/src/mirror.rs`, host unit-testable), and bridge values/frames. `ui/src/props.in` is Phoenix's prop table, `templates.json` captured layouts. |
-| `crates/patcher` | CLI that patches the split APKs (dex launcher, host access check, `liblog.so` → `libplm.so`, adds the loader, shadowhook probe and plugin bundle) and signs them. |
-| `crates/stand-in*` | A fake Phoenix gateway library and an end-to-end demo, to test hooks without Discord. |
-| `plugins/*/src/index.ts` | Bundled plugins (TypeScript; `// @` header lines are kept as the bundle banner; `// @warning` renders a warning on the site). |
-| `docs/phoenix-356207.*` | Extracted Phoenix APK schema (`scripts/extract-schema.py`): all 29 `ViewKind`s, 855 props, 79 `hostModules` / 433 methods, 109 `@events`, 286 `ic_mana_*` icons, and `accessibilityId`s. Check this first instead of decompiling APKs. |
-| `scripts/dev.ps1` | Windows fast-iteration CLI (`dev-fast` builds, 200ms plugin hot-reload, live `/ops`/`/events`/`/tree`/`/eval` inspection, host unit tests, release builds). |
-| `web/` | The browser patcher (GitHub Pages, `.github/workflows/pages.yml`), a JS port of `crates/patcher` that must stay byte-identical to it: `lib/apk.js`, `host.js`, `dex.js`, `sign.js`, `zip.js`, `axml.js`, `arsc.js`, `frida.js`. `tools/node-build.mjs` is the same pipeline as a CLI, `tools/bundle-plugins.mjs` builds `web/plugins/*.js` + `index.json`, and `web/version.json` for the runtime's update check (`crates/runtime/src/update.rs`) from the loader's baked version and the bundles' CRC-32s (build output, not committed; CI runs it). `web/plugins/lib*.so` come from `scripts/loader.nu` (not committed, CI runs it). |
-| `frida/` | The optional Frida gadget bootstrap (`build.sh` → `web/plugins/frida-bootstrap.js`). |
-| `flake.nix`, `nix/`, `scripts/*.nu` | The Linux devshell and build/install scripts (`scripts/phoenix.nu` patches and installs on a phone). |
+| `crates/loader` | `libphoenix.so`, injected into the APK as `libplm.so`. Its constructor starts the runtime. |
+| `crates/runtime` | QuickJS plugin runtime and the `phoenix` API. `phoenix.d.ts` is the plugin API reference. |
+| `crates/runtime/src/gateway.rs` | Gateway event hooks by swapping handler pointers in Phoenix's event registry. |
+| `crates/runtime/src/bridge.rs` | JNI table patch on `GuestHost.invoke`/`applyOps` and the `nativeDispatch` rebind. Sinks return `Action::{Pass, Drop, Replace}`. |
+| `crates/runtime/src/settings.rs` | The Phoenix Unlock settings pages, built from UI ops. |
+| `crates/runtime/src/patches/` | UI patch targets, slash commands, profile tabs, emoji picker. |
+| `crates/runtime/src/discord.rs` | `phoenix.discord`, Discord's API through Phoenix's own `Networking` module and session. |
+| `crates/runtime/src/picker.rs`, `java/phx/` | File picker, link opening and the APK self-updater (`Updater.java`) through a small in-memory dex. |
+| `crates/runtime/src/update.rs` | Update checks against the site, one-tap plugin updates and the APK self-update. |
+| `crates/runtime/src/remote.rs` | The debug shell on `127.0.0.1:4242`, off by default, switched on in Settings, Phoenix Unlocker, Debug. |
+| `crates/ui` | Typed codec for Phoenix's UI-op batches. `src/props.in` is Phoenix's prop table, `templates.json` holds captured layouts, `motion.rs` drives native springs, `mirror.rs` keeps a live copy of the view tree that host tests can drive. |
+| `crates/wire` | Tagged values and bridge frames (`HostCall`, `DispatchEvent`). |
+| `crates/hook` | Image scanner, `swap_words`, ShadowHook and bytehook (linked, unused). |
+| `crates/sigs`, `crates/sigscan` | Hook-point rules and a CLI that evaluates them against a library. |
+| `crates/patcher` | Patches the split APKs and signs them. |
+| `crates/stand-in*` | A fake gateway library and a demo, to test hooks without Discord. |
+| `plugins/*/src/index.ts` | Bundled plugins. Leading `// @` lines are the bundle banner and metadata, and `// @warning` shows a warning on the site. |
+| `docs/phoenix-356207.*` | Phoenix's schema pulled from the APK by `scripts/extract-schema.py`: 29 view kinds, 855 props, 79 host modules with 433 methods, 109 events, 286 `ic_mana_*` icons and the accessibility ids. Read it before decompiling. |
+| `web/` | Browser patcher (GitHub Pages). A JS port of `crates/patcher` whose output must match it byte for byte, signature aside. |
+| `frida/` | Optional Frida gadget bootstrap, for debugging on x86. |
+| `scripts/*.nu` | `phoenix.nu` builds, patches and installs on a phone. `loader.nu` builds the site's native libs. |
+| `scripts/dev.ps1` | The Windows dev loop, described below. |
 
 ## Building
 
-- **Linux:** `nix develop`, then `nu scripts/phoenix.nu base.apk config.arm64_v8a.apk config.<dpi>.apk config.<lang>.apk`.
-  The devshell sets `SHADOWHOOK_SRC` / `BYTEHOOK_SRC` to the commits pinned in `flake.lock`.
-- **Windows (no nix):**
-  - Rust `stable-x86_64-pc-windows-gnu` with the `aarch64-linux-android` target, `cargo install cargo-ndk`, an NDK.
-  - Fetch bytedance `android-inline-hook` and `bhook` at the `flake.lock` revisions and point
-    `SHADOWHOOK_SRC` (`…/shadowhook/src/main/cpp`) and `BYTEHOOK_SRC` (`…/bytehook/src/main/cpp`) at them.
-  - `LIBCLANG_PATH` to an LLVM `bin` with `libclang.dll`, and set
-    `BINDGEN_EXTRA_CLANG_ARGS_aarch64-linux-android="--target=aarch64-linux-android28 --sysroot=<ndk>/toolchains/llvm/prebuilt/windows-x86_64/sysroot -isystem <ndk>/…/lib/clang/<ver>/include"`
-    (a hyphenated name: set it with `env`).
-  - Git for Windows' MinGW (gcc 12) can't link the host build scripts. Take it off `PATH` so rustc
-    links with its bundled MinGW, and put a dir with only `dlltool.exe` (from the toolchain's
-    `self-contained`) and `as.exe` (plus its DLLs) on `PATH`.
+- Linux. `nix develop`, then
+  `nu scripts/phoenix.nu base.apk config.arm64_v8a.apk config.<dpi>.apk config.<lang>.apk`.
+  The devshell pins ShadowHook and bytehook through `flake.lock` and provides the SDK, NDK and JDK.
+  `phoenix.nu` ends in a blocking `adb logcat` tail, so run it in the background from a tool.
+- Windows, without Nix.
+  - Rust `stable-x86_64-pc-windows-gnu` with the `aarch64-linux-android` target, `cargo-ndk`, an
+    NDK, a JDK and an Android SDK with a platform and build-tools in `ANDROID_SDK_ROOT`.
+  - Fetch bytedance `android-inline-hook` and `bhook` at the `flake.lock` revisions. Point
+    `SHADOWHOOK_SRC` at `.../shadowhook/src/main/cpp` and `BYTEHOOK_SRC` at
+    `.../bytehook/src/main/cpp`.
+  - Set `LIBCLANG_PATH` to an LLVM `bin` holding `libclang.dll`, and set
+    `BINDGEN_EXTRA_CLANG_ARGS_aarch64-linux-android="--target=aarch64-linux-android28 --sysroot=<ndk>/toolchains/llvm/prebuilt/windows-x86_64/sysroot -isystem <ndk>/.../lib/clang/<ver>/include"`
+    with `env`, since the name has hyphens.
+  - Git for Windows' MinGW (gcc 12) cannot link the host build scripts. Take it off `PATH` and put
+    a directory with only `dlltool.exe` (from the toolchain's `self-contained`) and `as.exe` with
+    its DLLs on `PATH`.
   - `cargo +stable-x86_64-pc-windows-gnu ndk -t arm64-v8a -P 28 --link-builtins build --release -p phoenix-loader`,
-    and `cargo build --release -p patcher` for the host patcher. The patcher calls `apksigner.bat` on Windows.
-  - The C: drive is nearly full: use `CARGO_TARGET_DIR` on E:.
-- **Site:** `node web/tools/bundle-plugins.mjs` (`ESBUILD=` path to esbuild), then
-  `node web/tools/dev-server.mjs <dir with the splits> [port]`. The deploy workflow runs on pushes to `main`.
+    then `cargo build --release -p patcher`. The patcher calls `apksigner.bat` on Windows.
+- Site. `nu scripts/loader.nu web/plugins`, `node web/tools/bundle-plugins.mjs` (set `ESBUILD`
+  if esbuild is not on `PATH`), then `node web/tools/dev-server.mjs <dir with the splits> [port]`.
+  CI does the same on pushes to `main`.
 
-## Fast Development Workflow
+## Fast loop
 
-Prefer this loop over full release builds and manual APK poking:
+1. Look up Phoenix internals in `docs/phoenix-356207.md` or `.json` first. After a Discord update,
+   regenerate them with `python scripts/extract-schema.py <dir with the splits>`.
+2. `.\scripts\dev.ps1 -Test` runs `cargo test -p phoenix-ui -p phoenix-wire` on the host in
+   under a second.
+3. Turn on the debug shell once on the phone. `dev.ps1` forwards port 4242. Then:
+   - `-HotReload <plugin>` reloads a plugin in about 200 ms without rebuilding the APK.
+   - `-Eval "<js>"` runs a snippet, like `phoenix.ui.root()`.
+   - `phoenix.ui.mount`, `phoenix.bridge.invoke`, `phoenix.discord.onRequest` and `onResponse`
+     let a UI or API patch be prototyped in JS. Move the finished primitive into Rust.
+   - `-Logs`, `-Ops [filter]`, `-Events [filter]` and `-Tree [node]` show the console, decoded
+     UI-op batches, view and host events, and the mirrored view tree. `-Clear` empties the ring
+     buffers before reproducing something.
+4. `.\scripts\dev.ps1` builds with the `dev-fast` profile (about 15 s incremental), patches,
+   installs and launches. `-SkipBuild` only rebundles plugins and repatches. `-Release` makes a
+   release build.
 
-1. **Look up Phoenix internals first** in `docs/phoenix-356207.md` (human-readable) or `docs/phoenix-356207.json` (machine-readable) before disassembling/decompiling. Regenerate after a Discord update with `python scripts/extract-schema.py <dir-with-splits>`.
-2. **Host unit tests (< 0.1s, no NDK/phone):** `.\scripts\dev.ps1 -Test` runs `cargo test -p phoenix-ui -p phoenix-wire` (pure Rust `Mirror` + wire codecs).
-3. **Prototype in JS before writing Rust:**
-   - Enable **Settings → Phoenix Unlocker → Debug → Remote debug shell** once on the phone (listens on `127.0.0.1:4242`, auto-forwarded by `dev.ps1`).
-   - Hot-reload a plugin in ~200ms with zero APK rebuild: `.\scripts\dev.ps1 -HotReload <plugin-name>`.
-   - Run one-off JS snippets: `.\scripts\dev.ps1 -Eval "phoenix.ui.root()"`.
-   - Use `phoenix.ui.mount(...)`, `phoenix.bridge.invoke(...)`, `phoenix.discord.onRequest(...)`, and `phoenix.discord.onResponse(...)` to iterate on UI/API patches live in JS, then promote clean shared primitives to Rust.
-4. **Live UI & event inspection (zero guessing):**
-   - `.\scripts\dev.ps1 -Logs` — runtime console log (`GET /logs`).
-   - `.\scripts\dev.ps1 -Ops [filter]` — recent decoded Phoenix UI-op batches (`GET /ops?match=...`).
-   - `.\scripts\dev.ps1 -Events [filter]` — recent view & host events (`GET /events?match=...`).
-   - `.\scripts\dev.ps1 -Tree [nodeId]` — live mirrored view tree (`GET /tree[/<id>]`).
-   - `.\scripts\dev.ps1 -Clear` — clear `/ops` and `/events` ring buffers before reproducing an action.
-5. **Fast native Rust iteration (~12–15s incremental):**
-   - `.\scripts\dev.ps1` builds with the `dev-fast` Cargo profile (`opt-level = 1`, `lto = "off"`, `codegen-units = 16`), patches using `PHOENIX_LOADER` (leaving `web/plugins/libphoenix-arm64.so` untouched in git), installs over `com.discord`, and launches Discord.
-   - `.\scripts\dev.ps1 -SkipBuild` re-bundles plugins & re-patches without recompiling Rust.
-6. **Final release build:**
-   - Run `.\scripts\dev.ps1 -Release` once verified — this builds `--release`, updates `web/plugins/libphoenix-arm64.so`, patches, installs, and launches. Squash `web/plugins/libphoenix-arm64.so` into the feature commit.
+The debug shell answers anyone on the phone's loopback, and `/eval` runs JS with the Discord
+session. Leave it off outside development.
 
-## Testing
+## Code style
 
-- Phone (arm64): patch with the patcher or `node web/tools/node-build.mjs`, `adb install-multiple -r`
-  (splits) or `adb install -r` (merged), then `adb logcat -s phoenix` (`-s FridaPlugins` for Frida).
-- Open Settings: `adb shell am start -a android.intent.action.VIEW -d discord://app/settings com.discord`.
-  Find rows with `uiautomator dump` by resource-id (= accessibility id, ours are `phoenix-<title>`);
-  the dump shows an accessibility toast over the bottom of the screen for a few seconds.
-- Compare the site against the Rust patcher by unzipping both outputs: every entry but the
-  signature must be identical.
-- Git Bash turns `/word` into a Windows path in adb arguments: set `MSYS_NO_PATHCONV=1`, and pass
-  local paths with `cygpath -w`.
+- Rust is edition 2024, three-space indent, width 100, pinned in `.rustfmt.toml`. Run
+  `rustfmt --edition 2024 <files you touched>`. Never run `cargo fmt`, it reformats the whole tree.
+- Clippy must stay clean on the host and on `aarch64-linux-android`. Never widen the workspace
+  lint list. Scope an `#[expect(lint, reason = "...")]` to the one function that needs it.
+- Errors use `flub` in libraries and `misstep` in binaries. Untrusted input, including anything
+  read from Phoenix, returns an error and never panics. A panic inside Discord's process kills the
+  app.
+- Return named enums over nested `Option`s. Use serde structs over raw `serde_json::Value`.
+- Comments say why, and only when the reason is not in the code: a host quirk, a measured number,
+  a version. No comments that restate the code or narrate history.
+- Commit subjects read `area: lowercase imperative`, like `runtime: add select settings`. Bodies
+  are optional and explain why.
 
-## Facts that cost time to learn
+## Testing on a phone
 
-- **Hooks:** gateway events are hooked by swapping handler pointers in Phoenix's event registry
-  (found from the `MESSAGE_CREATE` name, so it survives updates); the UI bridge swaps two entries
-  of ART's JNI table. ShadowHook and bytehook are linked in but not used yet.
-- **Update risks:** `crates/ui/src/props.in` (UI ops name props by index, so a new prop shifts
-  them), `GuestHost.d(byte[], Function0)` (an obfuscated name), and `templates.json` (captured
-  look). Everything else is found by names, strings and patterns, not addresses.
-- **UI text:** text and inputs take `spans` / `valueSpans`: arrays of `{text, color, weight,
-  italic, bg, …}` pieces that concatenate to the text. Set an input's text with
-  `forceValue {seq, text, start, end}` (applied when `seq` changes), not `value`, which is
-  ignored while the keyboard has edits in flight.
-- **Threads:** UI ops must not be sent from the main thread (Rust may hold the UI lock while it
-  waits on Java); the settings worker sends them.
-- **Stores:** Phoenix keeps its state in `files/store/<account>/cache.sqlite`.
-- **Credentials on the bridge:** HTTP requests travel over `GuestHost.invoke` with the user's
-  `authorization` header. Never capture or log invoke frames wholesale.
-- **Shell (Windows):** long heredocs in Git Bash sometimes fail to parse; write scripts to files.
-  Python prints with cp1254 here: write UTF-8 to files. Bash's `printf` writes `é` as one
-  Latin-1 byte, not UTF-8.
+- Install over the existing `com.discord` with `adb install-multiple -r` so the login survives.
+- Logs: `adb logcat -s phoenix` (`-s FridaPlugins` for Frida). Fail fast. When waiting on a build
+  or a launch, match `error[E`, `error:` and panics as well as the success line, and never block
+  minutes on log lines that need live chat traffic.
+- Open settings with
+  `adb shell am start -a android.intent.action.VIEW -d discord://app/settings com.discord`.
+- Find views with `uiautomator dump` by resource id, which is Phoenix's accessibility id. Ours are
+  `phoenix-<title>`. Tap by the dumped bounds, never by guessed coordinates. A blind tap once
+  opened a reply draft in a real channel.
+- Owners deploy to the same phone while you work. When expected logs vanish, check the pid and the
+  startup log to see whose build runs before debugging. Ask before installing over theirs.
+- Never enter passwords. Remove test plugins and files you add.
+- Compare the site against the Rust patcher by unzipping both outputs. Every entry but the
+  signature must match.
+- Git Bash on Windows turns `/word` into a path in adb arguments. Set `MSYS_NO_PATHCONV=1` and
+  pass local paths through `cygpath -w`.
+
+## Host facts
+
+Read the decompiled host before guessing or bisecting.
+`jadx -q -j 16 --no-res -d out <base apk>` decompiles the Java side. The native host is
+`lib/arm64-v8a/liblibdiscord_wasm_host.so`, 97 MB and stripped, with JNI exports visible to
+`nm -D`.
+
+- Update risks. `crates/ui/src/props.in` (props are named by index, so a new prop shifts them),
+  `GuestHost.d(byte[], Function0)` (an obfuscated name), `templates.json`, and every module,
+  method and field number below. Everything else is found by names, strings and patterns.
+- Threads. Never send UI ops from the main thread, since Rust may hold the UI lock while it waits
+  on Java. The settings worker sends them. Java only honors `WasmRuntime.nativeDispatch` on the
+  `wasm-guest` HandlerThread, and a call from another thread is silently ignored. Queue a frame
+  from any thread with `GuestHost.d([B, Function0)`, which takes the frame without its 4 zero
+  header bytes. Queued frames come back through the dispatch sinks, so mark re-sent frames or they
+  loop.
+- Invoke frames. 16-byte header: kind u8 (1 call, 3 event, 4 batch), a zero byte, module u16,
+  method u16, u16 0, call i32, args length u32. Then a tagged args record and the raw body.
+  Module, method and field numbers index the name table in `hh/jb.java` (strings like
+  `"Networking.request 168"`). Host events return as kind-3 frames inside kind-4 batches through
+  `nativeDispatch`.
+- Networking. Module 43, request 168, cancel 167, upload 169, reply event `@http` 321. Request
+  fields are id 417, method 421, url 422, headers 423 (array of `[name, value]`), responseHeaders
+  424. Reply fields are id 417, status 430, headers 423 (map), error 403. Java's side is a plain
+  OkHttp executor and the guest sets every header, `authorization` included.
+- `READY` never passes through the gateway registry on 356207. Patches that rewrite READY do not
+  apply. `LIBDISCORD_REDUCERS_TABLE` is an exported second registry with 86 more events and no
+  overlap.
+- Motion. The host has 65536 animation slots. Ids at or above that are dropped silently. Phoenix
+  allocates upward from 0, so ours come down from 65535. A reused slot keeps a dead view's spring
+  until something re-springs it. Channel numbers are the cases of `mh/e0.d`. The `animate` prop
+  only applies to images.
+- UI text. Text and inputs take `spans` and `valueSpans`, arrays of `{text, color, weight,
+  italic, bg}` pieces that concatenate to the text. Set an input with
+  `forceValue {seq, text, start, end}`, applied when `seq` changes. `value` is ignored while the
+  keyboard has edits in flight.
+- Message list. It is virtualized. A row event's `index` is absolute, the list's `first` prop is
+  the index of its first mounted child, so the row is `kids[index - first]`.
+- Stores. Phoenix keeps state in `files/store/<account>/cache.sqlite`, tables of `k` and a JSON
+  BLOB `v`. Message keys end in the id zero-padded to 20 digits.
+- Edits. Phoenix fills the edit box from the stored message, so a hook that rewrites your own
+  MESSAGE_CREATE changes what an edit posts. The runtime restores the original text in the
+  composer.
+- QuickJS has no `URLSearchParams`. Check any other web global before a plugin uses it.
+- Discord payload shapes are documented at https://docs.discord.food/.
