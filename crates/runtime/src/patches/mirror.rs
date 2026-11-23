@@ -19,14 +19,18 @@ const FIRST: Prop = Prop::named("first");
 /// accessibility id each node carries.
 #[derive(Default)]
 pub struct Mirror {
-   kids:     HashMap<i32, Vec<i32>>,
-   parent:   HashMap<i32, i32>,
-   ids:      HashMap<i32, String>,
-   sheets:   HashSet<i32>,
+   kids:         HashMap<i32, Vec<i32>>,
+   parent:       HashMap<i32, i32>,
+   ids:          HashMap<i32, String>,
+   sheets:       HashSet<i32>,
+   navigators:   Vec<i32>,
+   stack_header: Option<Props>,
    /// The list index of each virtualized list's first mounted row.
-   firsts:   HashMap<i32, i32>,
+   firsts:       HashMap<i32, i32>,
+   /// Original `on` event list of each virtualized/row-gesture list.
+   list_on:      HashMap<i32, Vec<Value>>,
    /// The message box inputs and their text, newest last.
-   composer: Vec<(i32, String)>,
+   composer:     Vec<(i32, String)>,
 }
 
 /// What one batch created, by node.
@@ -42,8 +46,17 @@ impl Mirror {
          match op {
             Op::Create { id, kind, props } => {
                created.insert(*id, (kind, props));
+               let is_list = prop(props, FIRST).is_some();
                if let Some(Value::I32(first)) = prop(props, FIRST) {
                   self.firsts.insert(*id, *first);
+               }
+               if let Some(Value::Arr(on)) = prop(props, Prop::ON)
+                  && (is_list
+                     || on
+                        .iter()
+                        .any(|value| matches!(value, Value::Str(name) if name == "rowLongPress")))
+               {
+                  self.list_on.insert(*id, on.clone());
                }
                if let Some(Value::Str(aid)) = prop(props, Prop::ACCESSIBILITY_ID) {
                   if aid == "composer" && !self.composer.iter().any(|(input, _)| input == id) {
@@ -53,6 +66,12 @@ impl Mirror {
                }
                if kind.as_str() == "sheet" {
                   self.sheets.insert(*id);
+               }
+               if *kind == ViewKind::Navigator && !self.navigators.contains(id) {
+                  self.navigators.push(*id);
+               }
+               if prop(props, Prop::STACK_HEADER).is_some() {
+                  self.stack_header = Some(props.clone());
                }
             },
             Op::Children { id, ids } => {
@@ -75,19 +94,38 @@ impl Mirror {
                   self.parent.remove(id);
                   self.ids.remove(id);
                   self.sheets.remove(id);
-                  self.firsts.remove(id);
-                  self.composer.retain(|(input, _)| input != id);
-               }
-               deleted.extend_from_slice(ids);
-            },
-            Op::Update { id, props } => {
-               if let Some(Value::I32(first)) = prop(props, FIRST) {
-                  self.firsts.insert(*id, *first);
-               }
-               if let Some(Value::Str(text)) = prop(props, Prop::VALUE) {
-                  self.set_composer_text(*id, text.clone());
-               }
-            },
+                   self.navigators.retain(|nav| nav != id);
+                   self.firsts.remove(id);
+                   self.list_on.remove(id);
+                   self.composer.retain(|(input, _)| input != id);
+                }
+                deleted.extend_from_slice(ids);
+             },
+             Op::Update { id, props } => {
+                if let Some(Value::I32(first)) = prop(props, FIRST) {
+                   self.firsts.insert(*id, *first);
+                }
+                match prop(props, Prop::ACCESSIBILITY_ID) {
+                   Some(Value::Str(aid)) => {
+                      if aid == "composer" && !self.composer.iter().any(|(input, _)| input == id) {
+                         self.composer.push((*id, String::new()));
+                      }
+                      self.ids.insert(*id, aid.clone());
+                   },
+                   Some(Value::Null) => {
+                      self.ids.remove(id);
+                   },
+                   _ => {},
+                }
+                if (self.firsts.contains_key(id) || self.list_on.contains_key(id))
+                   && let Some(Value::Arr(on)) = prop(props, Prop::ON)
+                {
+                   self.list_on.insert(*id, on.clone());
+                }
+                if let Some(Value::Str(text)) = prop(props, Prop::VALUE) {
+                   self.set_composer_text(*id, text.clone());
+                }
+             },
             _ => {},
          }
       }
@@ -98,6 +136,14 @@ impl Mirror {
    pub fn row(&self, id: i32, index: i32) -> Option<i32> {
       let offset = index - self.firsts.get(&id).copied().unwrap_or(0);
       self.kids(id).get(usize::try_from(offset).ok()?).copied()
+   }
+
+   pub fn is_row_list(&self, id: i32) -> bool {
+      self.list_on.contains_key(&id) || self.firsts.contains_key(&id)
+   }
+
+   pub fn list_on(&self, id: i32) -> &[Value] {
+      self.list_on.get(&id).map_or(&[], Vec::as_slice)
    }
 
    pub fn kids(&self, id: i32) -> &[i32] {
@@ -114,6 +160,45 @@ impl Mirror {
 
    pub fn accessibility_id(&self, id: i32) -> Option<&str> {
       self.ids.get(&id).map(String::as_str)
+   }
+
+   /// Every live node whose accessibility id equals `aid`.
+   pub fn nodes_with_id(&self, aid: &str) -> Vec<i32> {
+      self
+         .ids
+         .iter()
+         .filter_map(|(id, existing)| (existing == aid).then_some(*id))
+         .collect()
+   }
+
+   /// Every live node whose accessibility id passes `test`.
+   pub fn nodes_where(&self, test: &impl Fn(&str) -> bool) -> Vec<i32> {
+      self
+         .ids
+         .iter()
+         .filter_map(|(id, existing)| test(existing).then_some(*id))
+         .collect()
+   }
+
+   /// Walks up from `id` to its enclosing virtualized/row-gesture list, if any.
+   pub fn enclosing_list(&self, mut id: i32) -> Option<i32> {
+      for _ in 0..16 {
+         let parent = self.parent(id)?;
+         if self.is_row_list(parent) {
+            return Some(parent);
+         }
+         id = parent;
+      }
+      None
+   }
+
+   /// Whether `id` is currently tracked in the mirror.
+   pub fn exists(&self, id: i32) -> bool {
+      self.parent.contains_key(&id)
+         || self.kids.contains_key(&id)
+         || self.ids.contains_key(&id)
+         || self.sheets.contains(&id)
+         || self.firsts.contains_key(&id)
    }
 
    /// The first node at or under `id`, depth first, whose accessibility id
@@ -134,6 +219,33 @@ impl Mirror {
    /// The sheet created last, which is on top.
    pub fn newest_sheet(&self) -> Option<i32> {
       self.sheets.iter().max().copied()
+   }
+
+   /// The outermost live `Navigator` (not inside a sheet) that currently holds
+   /// pages — Phoenix's root navigator above `main-tabs` and chat.
+   pub fn active_navigator(&self) -> Option<i32> {
+      self
+         .navigators
+         .iter()
+         .copied()
+         .filter(|id| !self.kids(*id).is_empty() && self.sheet_of(*id).is_none())
+         .min_by_key(|id| {
+            let mut depth = 0usize;
+            let mut cur = self.parent(*id);
+            while let Some(parent) = cur {
+               depth += 1;
+               cur = self.parent(parent);
+               if depth > 64 {
+                  break;
+               }
+            }
+            (depth, *id)
+         })
+   }
+
+   /// Header padding/height from Phoenix's own stack header, if seen.
+   pub fn stack_header(&self) -> Option<&Props> {
+      self.stack_header.as_ref()
    }
 
    /// The sheet holding `id`, if any.

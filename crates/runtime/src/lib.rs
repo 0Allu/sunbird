@@ -183,6 +183,19 @@ fn engine() -> Option<std::sync::MutexGuard<'static, js::Engine>> {
    )
 }
 
+/// Runs matching `phoenix.discord.onRequest` hooks on an outgoing Discord API request.
+#[cfg(target_os = "android")]
+pub(crate) fn intercept_request(
+   matched: &[u64],
+   method: &str,
+   path: &str,
+   body: &[u8],
+) -> discord::RequestAction {
+   engine().map_or(discord::RequestAction::Pass, |engine| {
+      engine.intercept_request(matched, method, path, body)
+   })
+}
+
 /// Every plugin found at start, enabled or not.
 #[must_use]
 pub fn plugins() -> Vec<PluginInfo> {
