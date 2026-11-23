@@ -196,6 +196,24 @@ pub(crate) fn intercept_request(
    })
 }
 
+/// Runs matching `phoenix.discord.onResponse` hooks (sync or async) on an incoming
+/// Discord API reply and delivers the final body through `done`.
+#[cfg(target_os = "android")]
+pub(crate) fn intercept_response(
+   matched: Vec<u64>,
+   method: String,
+   path: String,
+   status: i32,
+   body: Vec<u8>,
+   done: std::sync::mpsc::Sender<Vec<u8>>,
+) {
+   if let Some(engine) = engine() {
+      engine.intercept_response(matched, method, path, status, body, done);
+   } else {
+      let _ = done.send(body);
+   }
+}
+
 /// Every plugin found at start, enabled or not.
 #[must_use]
 pub fn plugins() -> Vec<PluginInfo> {

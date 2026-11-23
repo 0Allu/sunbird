@@ -203,7 +203,10 @@ struct Registry<'js> {
    interceptors:  RefCell<Vec<(u64, String, Function<'js>)>>,
    /// `phoenix.discord.onRequest` interceptors, by id.
    #[cfg(target_os = "android")]
-   request_hooks: RefCell<HashMap<u64, (String, Function<'js>)>>,
+   request_hooks:  RefCell<HashMap<u64, (String, Function<'js>)>>,
+   /// `phoenix.discord.onResponse` interceptors, by id.
+   #[cfg(target_os = "android")]
+   response_hooks: RefCell<HashMap<u64, (String, Function<'js>)>>,
    /// `phoenix.messages.onEmojiPick` handlers in registration order, by id.
    #[cfg(target_os = "android")]
    pickers:       RefCell<Vec<(u64, String, Function<'js>)>>,
@@ -875,6 +878,11 @@ impl Engine {
                .borrow_mut()
                .retain(|_, (plugin, _)| plugin != name);
             discord::forget_request_hooks(name);
+            registry
+               .response_hooks
+               .borrow_mut()
+               .retain(|_, (plugin, _)| plugin != name);
+            discord::forget_response_hooks(name);
             let mut pickers = registry.pickers.borrow_mut();
             pickers.retain(|(_, plugin, _)| plugin != name);
             patches::set_emoji_pickers(pickers.len());
@@ -1130,6 +1138,24 @@ impl Engine {
       action
    }
 
+   /// Runs matching `phoenix.discord.onResponse` hooks (sync or async) on an
+   /// incoming Discord API reply, sending the final body through `done`.
+   #[cfg(target_os = "android")]
+   pub fn intercept_response(
+      &self,
+      matched: Vec<u64>,
+      method: String,
+      path: String,
+      status: i32,
+      body: Vec<u8>,
+      done: std::sync::mpsc::Sender<Vec<u8>>,
+   ) {
+      self.context.with(|ctx| {
+         run_response_chain(&ctx, matched, method, path, status, body, done);
+      });
+      drain(&self.runtime);
+   }
+
    /// Runs the `before` hooks for `event`. Each sees the previous hook's
    /// payload.
    pub fn before(&self, event: EventId, name: &str, json: &str) -> Result<Before, Error> {
@@ -1313,6 +1339,8 @@ fn registry<'js>(ctx: &Ctx<'js>, events: &GatewayRegistry) -> rquickjs::Result<R
       interceptors: RefCell::default(),
       #[cfg(target_os = "android")]
       request_hooks: RefCell::default(),
+      #[cfg(target_os = "android")]
+      response_hooks: RefCell::default(),
       #[cfg(target_os = "android")]
       pickers: RefCell::default(),
       #[cfg(target_os = "android")]
@@ -2982,6 +3010,138 @@ fn start_fetch<'js>(
    in_background(ctx, move || Settlement::Fetch(fetch::send(&request)))
 }
 
+/// Extracts a replacement body from `{ body: string | object }` returned by
+/// `onRequest` / `onResponse`.
+#[cfg(target_os = "android")]
+fn extract_hook_body<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> Option<Vec<u8>> {
+   let obj = value.as_object()?;
+   let new_body = obj.get::<_, Value<'js>>("body").ok()?;
+   if new_body.is_undefined() || new_body.is_null() {
+      return None;
+   }
+   if let Some(text) = new_body.as_string() {
+      return text.to_string().ok().map(String::into_bytes);
+   }
+   ctx.json_stringify(new_body)
+      .ok()
+      .flatten()
+      .and_then(|json| json.to_string().ok())
+      .map(String::into_bytes)
+}
+
+/// Chains matching `onResponse` hooks sequentially, supporting both synchronous
+/// and Promise-returning handlers without blocking Phoenix's `wasm-guest` thread.
+#[cfg(target_os = "android")]
+fn run_response_chain<'js>(
+   ctx: &Ctx<'js>,
+   mut remaining: Vec<u64>,
+   method: String,
+   path: String,
+   status: i32,
+   mut body: Vec<u8>,
+   done: std::sync::mpsc::Sender<Vec<u8>>,
+) {
+   while !remaining.is_empty() {
+      let hook_id = remaining.remove(0);
+      let hook = ctx.userdata::<Registry<'js>>().and_then(|registry| {
+         let map = registry.response_hooks.borrow();
+         let (plugin, function) = map.get(&hook_id)?;
+         Some((plugin.clone(), function.clone()))
+      });
+      let Some((plugin, function)) = hook else {
+         continue;
+      };
+      let body_str = String::from_utf8_lossy(&body).into_owned();
+      let Ok(res_obj) = Object::new(ctx.clone()) else {
+         break;
+      };
+      let _ = res_obj.set("method", method.as_str());
+      let _ = res_obj.set("path", path.as_str());
+      let _ = res_obj.set("status", status);
+      let _ = res_obj.set("body", body_str.as_str());
+      if let Ok(json_fn) = json_parser_fn(ctx, body_str) {
+         let _ = res_obj.set("json", json_fn);
+      }
+      let result = match function.call::<_, Value<'js>>((res_obj,)).catch(ctx) {
+         Ok(result) => result,
+         Err(err) => {
+            log::error!("[{plugin}] onResponse: {err}");
+            continue;
+         },
+      };
+      let Some(promise) = result.as_promise() else {
+         if let Some(next_body) = extract_hook_body(ctx, &result) {
+            body = next_body;
+         }
+         continue;
+      };
+      let shared_done = std::sync::Arc::new(std::sync::Mutex::new(Some(done)));
+      let ok_done = std::sync::Arc::clone(&shared_done);
+      let ok_rem = remaining.clone();
+      let ok_method = method.clone();
+      let ok_path = path.clone();
+      let ok_body = body.clone();
+      let ok = Function::new(ctx.clone(), move |value: Value<'_>| {
+         let Some(sender) = ok_done
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+         else {
+            return;
+         };
+         let next_body = extract_hook_body(value.ctx(), &value).unwrap_or_else(|| ok_body.clone());
+         run_response_chain(
+            value.ctx(),
+            ok_rem.clone(),
+            ok_method.clone(),
+            ok_path.clone(),
+            status,
+            next_body,
+            sender,
+         );
+      });
+      let err_done = std::sync::Arc::clone(&shared_done);
+      let err_plugin = plugin.clone();
+      let err_rem = remaining;
+      let err_method = method;
+      let err_path = path;
+      let err_body = body;
+      let err_fn = Function::new(ctx.clone(), move |reason: Value<'_>| {
+         log::error!("[{err_plugin}] onResponse: {reason:?}");
+         let Some(sender) = err_done
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+         else {
+            return;
+         };
+         run_response_chain(
+            reason.ctx(),
+            err_rem.clone(),
+            err_method.clone(),
+            err_path.clone(),
+            status,
+            err_body.clone(),
+            sender,
+         );
+      });
+      let attach = (|| -> rquickjs::Result<()> {
+         let then = promise.then()?;
+         then.call::<_, ()>((rquickjs::function::This(promise.clone()), ok?, err_fn?))
+      })();
+      if let Err(err) = attach.catch(ctx) {
+         log::error!("[{plugin}] onResponse promise: {err}");
+         // Dropping the sender causes `run_response_hooks` to deliver the original frame.
+         let _ = shared_done
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+      }
+      return;
+   }
+   let _ = done.send(body);
+}
+
 /// `phoenix.discord`, Discord's API on the app's own client and session:
 /// `request(path, init)`, `get` and `delete(path, init)`, `post`, `put` and
 /// `patch(path, body, init)`, and `onRequest(filter, handler)`.
@@ -3030,6 +3190,39 @@ fn discord_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<
                      registry.request_hooks.borrow_mut().remove(&id);
                   }
                   discord::remove_request_hook(id);
+               },
+               None,
+            )
+         },
+      )?,
+   )?;
+   let owner_res = plugin.to_owned();
+   object.set(
+      "onResponse",
+      Function::new(
+         ctx.clone(),
+         move |ctx: Ctx<'js>, filter: Object<'js>, handler: Function<'js>| {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let parsed = discord::RequestFilter {
+               method:        filter.get::<_, Option<String>>("method")?,
+               path_prefix:   filter.get::<_, Option<String>>("pathPrefix")?,
+               path_suffix:   filter.get::<_, Option<String>>("pathSuffix")?,
+               path_includes: filter.get::<_, Option<String>>("pathIncludes")?,
+            };
+            ctx.userdata::<Registry<'js>>()
+               .ok_or_else(|| Exception::throw_internal(&ctx, "no registry"))?
+               .response_hooks
+               .borrow_mut()
+               .insert(id, (owner_res.clone(), handler));
+            discord::add_response_hook(id, owner_res.clone(), parsed);
+            remover(
+               &ctx,
+               move |ctx| {
+                  if let Some(registry) = ctx.userdata::<Registry<'js>>() {
+                     registry.response_hooks.borrow_mut().remove(&id);
+                  }
+                  discord::remove_response_hook(id);
                },
                None,
             )

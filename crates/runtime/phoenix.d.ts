@@ -1008,6 +1008,20 @@ declare namespace Phoenix {
 
   type RequestHookResult = false | { body: string | object } | void;
 
+  interface InterceptedResponse {
+    readonly method: string;
+    /// Path relative to the API base (e.g. `"/users/123/profile"`).
+    readonly path: string;
+    /// HTTP status code (e.g. `200`).
+    readonly status: number;
+    /// UTF-8 response body.
+    readonly body: string;
+    /// Parses `body` as JSON, or returns `null` if empty/invalid.
+    json<T = unknown>(): T | null;
+  }
+
+  type ResponseHookResult = { body: string | object } | void;
+
   interface Discord {
     /// Opens Discord's own authorize screen for an OAuth2 application. Once the user taps
     /// Authorize, resolves to the redirect URL (`redirectUri?code=…`) for the plugin to fetch
@@ -1021,6 +1035,13 @@ declare namespace Phoenix {
     onRequest(
       filter: RequestFilter,
       handler: (req: InterceptedRequest) => RequestHookResult
+    ): Remover;
+    /// Intercepts incoming Discord API responses matching `filter` (evaluated in Rust so
+    /// non-matching replies never enter JS). May return `{ body }` synchronously or as a Promise;
+    /// runs off Phoenix's UI thread with a 4s fallback to the original reply.
+    onResponse(
+      filter: RequestFilter,
+      handler: (res: InterceptedResponse) => ResponseHookResult | Promise<ResponseHookResult>
     ): Remover;
     request(path: string, init?: FetchInit): Promise<FetchResponse>;
     get(path: string, init?: FetchInit): Promise<FetchResponse>;

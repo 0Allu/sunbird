@@ -755,6 +755,51 @@ fn restore_originals(ops: &mut [Op]) -> bool {
    restored
 }
 
+/// Unwraps custom badge icon URLs encoded as `/badge-icons/phx_u_<hex>.png`
+/// (from `phoenix.discord.onResponse` plugins injecting entries into profile
+/// `badges[]`) back to their real `https://` image URI.
+fn unwrap_badge_uris(ops: &mut [Op]) -> bool {
+   const MARKER: &str = "/badge-icons/phx_u_";
+   let mut changed = false;
+   for op in ops {
+      let (Op::Create { props, .. } | Op::Update { props, .. }) = op else {
+         continue;
+      };
+      for (key, value) in props {
+         if *key != Prop::URI {
+            continue;
+         }
+         let Value::Str(uri) = value else {
+            continue;
+         };
+         let Some(pos) = uri.find(MARKER) else {
+            continue;
+         };
+         let hex = &uri[pos + MARKER.len()..];
+         let hex = hex.split(['.', '?', '#']).next().unwrap_or(hex);
+         if let Some(decoded) = decode_hex_url(hex) {
+            *uri = decoded;
+            changed = true;
+         }
+      }
+   }
+   changed
+}
+
+fn decode_hex_url(hex: &str) -> Option<String> {
+   if hex.is_empty() || !hex.len().is_multiple_of(2) {
+      return None;
+   }
+   let mut bytes = Vec::with_capacity(hex.len() / 2);
+   for pair in hex.as_bytes().chunks_exact(2) {
+      let hi = (pair[0] as char).to_digit(16)?;
+      let lo = (pair[1] as char).to_digit(16)?;
+      bytes.push(((hi << 4) | lo) as u8);
+   }
+   let url = String::from_utf8(bytes).ok()?;
+   url.starts_with("https://").then_some(url)
+}
+
 fn patches() -> MutexGuard<'static, Patches> {
    PATCHES.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -773,7 +818,8 @@ impl Sink for PatchSink {
    fn ops(&self, batch: &[u8]) -> Action {
       let active = ACTIVE.load(Ordering::Acquire);
       let debug = crate::remote::enabled();
-      if !active && !GUARDING.load(Ordering::Acquire) {
+      let has_badge_uri = memmem::find(batch, b"/badge-icons/phx_u_").is_some();
+      if !active && !GUARDING.load(Ordering::Acquire) && !has_badge_uri {
          let root = ROOT_ID.load(Ordering::Acquire);
          if !debug && root != 0 && memmem::find(batch, &root.to_le_bytes()).is_none() {
             return Action::Pass;
@@ -801,7 +847,7 @@ impl Sink for PatchSink {
       if debug {
          crate::remote::record_ops(&ops);
       }
-      let restored = restore_originals(&mut ops);
+      let restored = restore_originals(&mut ops) | (has_badge_uri && unwrap_badge_uris(&mut ops));
       let rewritten = if active {
          patches().rewrite(ops, restored)
       } else {

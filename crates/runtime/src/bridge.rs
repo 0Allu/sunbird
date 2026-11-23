@@ -108,6 +108,12 @@ static ORIGINAL_DISPATCH: OnceLock<DispatchFn> = OnceLock::new();
 /// `GuestHost.d([B, Function0)`, which queues a view frame for the
 /// `wasm-guest` thread. Rust drops a `nativeDispatch` from any other thread.
 static ENQUEUE_METHOD: AtomicPtr<_jmethodID> = AtomicPtr::new(ptr::null_mut());
+/// Raw `nativeDispatch` frames queued from background threads (e.g. async
+/// `phoenix.discord.onResponse` replies) to be delivered on `wasm-guest`.
+static DEFERRED_DISPATCHES: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+/// Sentinel passed through `GuestHost.d` to wake `wasm-guest` and drain
+/// [`DEFERRED_DISPATCHES`]. Never matches a real view frame (`00 00 00 00 01 01`).
+const WAKE_SENTINEL: &[u8] = b"\0\0\0\0PHXW";
 
 pub fn install(sink: Box<dyn Sink>) {
    SINKS
@@ -237,6 +243,16 @@ pub fn invoke(frame: &[u8]) -> bool {
       }
    }
    true
+}
+
+/// Queues a raw `nativeDispatch` frame (such as a rewritten `@http` reply) to
+/// be delivered to Phoenix on the `wasm-guest` thread.
+pub fn dispatch_deferred(frame: Vec<u8>) {
+   DEFERRED_DISPATCHES
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .push(frame);
+   let _ = inject(WAKE_SENTINEL);
 }
 
 /// Queues view `frame` for Rust as if Java had dispatched it. The frame
@@ -509,10 +525,45 @@ unsafe extern "system" fn native_dispatch(
    // SAFETY: ART calls this with the current thread's env and the arguments of
    // `nativeDispatch(J[B)Z`, forwarded unchanged or with a replacement array.
    unsafe {
-      let payload = read_bytes(env, frame, None);
+      // Deliver any deferred frames (e.g. async HTTP response hooks) on the
+      // `wasm-guest` thread before processing the current frame.
+      let deferred = {
+         let mut queue = DEFERRED_DISPATCHES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+         std::mem::take(&mut *queue)
+      };
+      for pending in deferred {
+         if let Some((array, _)) = new_bytes(env, &pending) {
+            let _ = original(env, class, handle, array);
+            jni!(env, DeleteLocalRef, array);
+         }
+      }
+
+      let mut payload = read_bytes(env, frame, None);
+      let mut stripped_wake = false;
+      if payload == WAKE_SENTINEL {
+         return JNI_TRUE;
+      }
+      if payload.first() == Some(&4)
+         && let Ok(items) = phoenix_wire::decode_dispatch(&payload)
+      {
+         let wakes = items
+            .iter()
+            .filter(|item| &payload[item.offset..item.offset + item.len] == WAKE_SENTINEL)
+            .map(|item| item.offset)
+            .collect::<Vec<_>>();
+         if !wakes.is_empty() {
+            if wakes.len() == items.len() {
+               return JNI_TRUE;
+            }
+            payload = phoenix_wire::without_frames(&payload, &wakes);
+            stripped_wake = true;
+         }
+      }
       let mut replaced = match discord::filter(&payload) {
          Action::Drop => return JNI_TRUE,
-         Action::Pass => None,
+         Action::Pass => stripped_wake.then_some(payload.clone()),
          Action::Replace(rest) => Some(rest),
       };
       if WATCHING.load(Ordering::Acquire) {
