@@ -42,7 +42,7 @@ Read this file before changing code. Every fact here cost someone hours to learn
 | `crates/runtime` | QuickJS plugin runtime and the `phoenix` API. `phoenix.d.ts` is the plugin API reference. |
 | `crates/runtime/src/gateway.rs` | Gateway event hooks by swapping handler pointers in Phoenix's event registry. |
 | `crates/runtime/src/bridge.rs` | JNI table patch on `GuestHost.invoke`/`applyOps` and the `nativeDispatch` rebind. Sinks return `Action::{Pass, Drop, Replace}`. |
-| `crates/runtime/src/settings.rs` | The Phoenix Unlock settings pages, built from UI ops. |
+| `crates/runtime/src/settings/` | The Phoenix Unlock settings pages, built from UI ops. |
 | `crates/runtime/src/patches/` | UI patch targets, slash commands, profile tabs, emoji picker. |
 | `crates/runtime/src/discord.rs` | `phoenix.discord`, Discord's API through Phoenix's own `Networking` module and session. |
 | `crates/runtime/src/picker.rs`, `java/phx/` | File picker, link opening and the APK self-updater (`Updater.java`) through a small in-memory dex. |
