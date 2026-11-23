@@ -1,5 +1,5 @@
 //! Discord's HTTP API through Phoenix's own `Networking` host module, so a
-//! plugin's request leaves on the app's OkHttp client with the app's session
+//! plugin's request leaves on the app's `OkHttp` client with the app's session
 //! headers.
 //!
 //! - Phoenix's Rust side sets every header, `authorization` included, and Java
@@ -20,6 +20,8 @@ use std::{
       PoisonError,
       atomic::{
          AtomicI32,
+         AtomicU64,
+         AtomicUsize,
          Ordering,
       },
       mpsc::{
@@ -47,6 +49,7 @@ use crate::{
       self,
       Action,
    },
+   console::url_encoded,
    fetch::Response,
 };
 
@@ -85,6 +88,7 @@ struct Authorizing {
 }
 
 static AUTHORIZING: Mutex<Option<Authorizing>> = Mutex::new(None);
+static TURN: AtomicU64 = AtomicU64::new(0);
 /// The user whose profile Phoenix fetched last, and when.
 static LAST_PROFILE: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 
@@ -99,10 +103,13 @@ fn profile_of(url: &str) -> Option<String> {
 /// The user whose profile Phoenix fetched in the last few seconds, for a
 /// profile screen that shows no user id of its own.
 pub fn last_profile() -> Option<String> {
-   let last = LAST_PROFILE.lock().unwrap_or_else(PoisonError::into_inner);
-   let (id, at) = last.as_ref()?;
-   (at.elapsed() < Duration::from_secs(5)).then(|| id.clone())
+   let (id, at) = LAST_PROFILE
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .clone()?;
+   (at.elapsed() < Duration::from_secs(5)).then_some(id)
 }
+
 const AUTHORIZE_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Debug, flub::Error)]
@@ -117,12 +124,14 @@ pub enum DiscordError {
    Timeout { path: String },
    #[error("{path}: {message}")]
    Network { path: String, message: String },
-   /// Discord turned down an OAuth2 authorization. The message is Discord's.
-   #[error("authorize: Discord answered {status}: {message}")]
-   Refused { status: i32, message: String },
+   #[error("authorize: could not open Phoenix's authorize screen: {message}")]
+   Open { message: String },
+   #[error("authorize: the user did not authorize in {} minutes", AUTHORIZE_TIMEOUT.as_secs() / 60)]
+   NotAuthorized,
 }
 
 /// What Phoenix's own API requests carry.
+#[derive(Clone)]
 struct Session {
    /// Up to and including the version, like `https://discord.com/api/v9`.
    base:    String,
@@ -140,9 +149,9 @@ static SESSION: Mutex<Option<Session>> = Mutex::new(None);
 static PENDING: LazyLock<Mutex<HashMap<i32, Sender<Reply>>>> = LazyLock::new(Mutex::default);
 static NEXT_ID: AtomicI32 = AtomicI32::new(FIRST_ID);
 static REQUEST_HOOKS: LazyLock<Mutex<Vec<RequestHook>>> = LazyLock::new(Mutex::default);
-static REQUEST_HOOK_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static REQUEST_HOOK_COUNT: AtomicUsize = AtomicUsize::new(0);
 static RESPONSE_HOOKS: LazyLock<Mutex<Vec<RequestHook>>> = LazyLock::new(Mutex::default);
-static RESPONSE_HOOK_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static RESPONSE_HOOK_COUNT: AtomicUsize = AtomicUsize::new(0);
 static IN_FLIGHT: LazyLock<Mutex<HashMap<i32, InFlight>>> = LazyLock::new(Mutex::default);
 
 struct InFlight {
@@ -329,7 +338,7 @@ pub fn intercept_call(frame: &[u8]) -> Action {
       RequestAction::Drop => Action::Drop,
       RequestAction::Replace(body) => {
          call.body = body;
-         // Drop any stale content-length header so OkHttp uses the new body
+         // Drop any stale content-length header so `OkHttp` uses the new body
          // length.
          if let Value::Obj(ref mut fields) = call.args {
             for (key, value) in fields.iter_mut() {
@@ -561,11 +570,15 @@ pub fn send(
          path: path.to_owned(),
       });
    }
-   let (url, mut merged) = {
-      let session = SESSION.lock().unwrap_or_else(PoisonError::into_inner);
-      let session = session.as_ref().ok_or(DiscordError::NoSession)?;
-      (format!("{}{path}", session.base), session.headers.clone())
-   };
+   let Session {
+      base,
+      headers: mut merged,
+   } = SESSION
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .clone()
+      .ok_or(DiscordError::NoSession)?;
+   let url = format!("{base}{path}");
    merged.retain(|(name, _)| {
       !headers
          .iter()
@@ -631,7 +644,7 @@ pub struct Authorization {
    pub response_type: String,
 }
 
-/// Opens Phoenix's own OAuth2 authorize screen for `request` and waits for
+/// Opens Phoenix's own `OAuth2` authorize screen for `request` and waits for
 /// the user to authorize. Phoenix's authorize request is then answered with
 /// Discord's own "authorized" page instead of the redirect, so the code stays
 /// in the app, and the redirect URL with the code comes back here. The URL
@@ -639,12 +652,11 @@ pub struct Authorization {
 pub fn authorize(request: &Authorization) -> Result<String, DiscordError> {
    let link = format!(
       "discord://action/oauth2/authorize?client_id={}&response_type={}&redirect_uri={}&scope={}",
-      encode(&request.client_id),
-      encode(&request.response_type),
-      encode(&request.redirect_uri),
-      encode(&request.scopes.join(" ")),
+      url_encoded(&request.client_id),
+      url_encoded(&request.response_type),
+      url_encoded(&request.redirect_uri),
+      url_encoded(&request.scopes.join(" ")),
    );
-   static TURN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
    let turn = TURN.fetch_add(1, Ordering::Relaxed);
    let (sender, receiver) = mpsc::channel();
    // A newer authorize drops the older one's sender, which rejects it.
@@ -659,7 +671,7 @@ pub fn authorize(request: &Authorization) -> Result<String, DiscordError> {
          .lock()
          .unwrap_or_else(PoisonError::into_inner)
          .take();
-      return Err(DiscordError::Refused { status: 0, message });
+      return Err(DiscordError::Open { message });
    }
    let location = receiver.recv_timeout(AUTHORIZE_TIMEOUT);
    let mut authorizing = AUTHORIZING.lock().unwrap_or_else(PoisonError::into_inner);
@@ -670,12 +682,7 @@ pub fn authorize(request: &Authorization) -> Result<String, DiscordError> {
       authorizing.take();
    }
    drop(authorizing);
-   location.map_err(|_| {
-      DiscordError::Refused {
-         status:  0,
-         message: "not authorized".to_owned(),
-      }
-   })
+   location.map_err(|_| DiscordError::NotAuthorized)
 }
 
 /// Rewrites the reply to Phoenix's own authorize request while a plugin waits
@@ -694,28 +701,4 @@ fn authorized(id: i32, frame: &[u8], body: &[u8]) -> Option<Vec<u8>> {
    let mut out = head.to_vec();
    out.extend_from_slice(br#"{"location":"https://discord.com/oauth2/authorized"}"#);
    Some(out)
-}
-
-/// Percent-encodes `text` for a query value.
-fn encode(text: &str) -> String {
-   let mut out = String::with_capacity(text.len());
-   for byte in text.bytes() {
-      if byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte) {
-         out.push(char::from(byte));
-      } else {
-         out.push_str(&format!("%{byte:02X}"));
-      }
-   }
-   out
-}
-
-#[cfg(test)]
-mod tests {
-   #[test]
-   fn encodes_query_values() {
-      assert_eq!(
-         super::encode("https://a.b/api/auth x"),
-         "https%3A%2F%2Fa.b%2Fapi%2Fauth%20x"
-      );
-   }
 }

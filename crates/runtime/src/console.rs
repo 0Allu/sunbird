@@ -43,7 +43,9 @@ pub fn redact(secrets: impl IntoIterator<Item = String>) {
    *SECRETS.lock().unwrap_or_else(PoisonError::into_inner) = all;
 }
 
-fn url_encoded(text: &str) -> String {
+/// `text` as `encodeURIComponent` writes it.
+#[must_use]
+pub fn url_encoded(text: &str) -> String {
    text
       .bytes()
       .map(|byte| {
