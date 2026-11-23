@@ -388,6 +388,11 @@ impl Image<'_> {
    }
 
    #[must_use]
+   pub fn read_u32(&self, addr: usize) -> Option<u32> {
+      Some(u32::from_le_bytes(self.read(addr, 4)?.try_into().ok()?))
+   }
+
+   #[must_use]
    pub fn is_code(&self, addr: usize) -> bool {
       self
          .segments
