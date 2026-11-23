@@ -75,13 +75,13 @@ const load = async () => {
 load().catch((err) => phoenix.log.warn(`reading the cache: ${err}`));
 
 if (gateway.guildCreate) {
-  phoenix.on(gateway.guildCreate, (guild: any) => {
+  phoenix.on(gateway.guildCreate, (guild) => {
     addEmojis(guild.id, guild.emojis);
     for (const channel of guild.channels ?? []) channelGuild.set(channel.id, guild.id);
   });
 }
 if (gateway.guildEmojisUpdate) {
-  phoenix.on(gateway.guildEmojisUpdate, (update: any) => addEmojis(update.guild_id, update.emojis));
+  phoenix.on(gateway.guildEmojisUpdate, (update) => addEmojis(update.guild_id, update.emojis));
 }
 
 // The real tier. The API rejects until the app made a request of its own, so

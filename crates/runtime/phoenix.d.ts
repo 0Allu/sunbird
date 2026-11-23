@@ -836,6 +836,18 @@ declare namespace Phoenix {
     guild_id?: string;
   }
 
+  /// The parts of a `GUILD_CREATE` guild that plugins read.
+  interface GatewayGuild {
+    id: string;
+    emojis?: Emoji[];
+    channels?: Channel[];
+  }
+
+  interface GuildEmojisUpdate {
+    guild_id: string;
+    emojis: Emoji[];
+  }
+
   interface MessageDeleteBulk {
     ids: string[];
     channel_id: string;
@@ -856,6 +868,8 @@ declare namespace Phoenix {
     messageUpdate: GatewayMessage;
     messageDelete: MessageDelete;
     messageDeleteBulk: MessageDeleteBulk;
+    guildCreate: GatewayGuild;
+    guildEmojisUpdate: GuildEmojisUpdate;
   }
 
   /// One handle per entry in the client's gateway registry, read from the
