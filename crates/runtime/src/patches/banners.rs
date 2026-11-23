@@ -400,11 +400,6 @@ pub fn pressed(id: u32) -> Vec<Op> {
    let (ops, action) = patches().press_banner(id);
    match action {
       BannerAction::None => {},
-      BannerAction::OpenUrl(url) => {
-         if let Err(err) = crate::picker::open(&url) {
-            log::error!("banner open {url}: {err}");
-         }
-      },
       BannerAction::ApplyUpdate => {
          crate::update::apply();
       },

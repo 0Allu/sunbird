@@ -417,8 +417,6 @@ pub struct MountNode {
 /// What happens when the user taps an in-app notification banner.
 pub enum BannerAction {
    None,
-   #[allow(dead_code)]
-   OpenUrl(String),
    ApplyUpdate,
    JsCallback,
 }
