@@ -19,6 +19,7 @@ const FIRST: Prop = Prop::named("first");
 /// accessibility id each node carries.
 #[derive(Default)]
 pub struct Mirror {
+   root:         Option<i32>,
    kids:         HashMap<i32, Vec<i32>>,
    parent:       HashMap<i32, i32>,
    ids:          HashMap<i32, String>,
@@ -90,6 +91,9 @@ impl Mirror {
             },
             Op::Delete { ids } => {
                for id in ids {
+                  if self.root == Some(*id) {
+                     self.root = None;
+                  }
                   self.kids.remove(id);
                   self.parent.remove(id);
                   self.ids.remove(id);
@@ -100,6 +104,9 @@ impl Mirror {
                    self.composer.retain(|(input, _)| input != id);
                 }
                 deleted.extend_from_slice(ids);
+             },
+             Op::Root { id } => {
+                self.root = Some(*id);
              },
              Op::Update { id, props } => {
                 if let Some(Value::I32(first)) = prop(props, FIRST) {
@@ -148,6 +155,23 @@ impl Mirror {
 
    pub fn kids(&self, id: i32) -> &[i32] {
       self.kids.get(&id).map_or(&[], Vec::as_slice)
+   }
+
+   /// The root node set by `Op::Root`, or the top ancestor of a live navigator.
+   pub fn root(&self) -> Option<i32> {
+      if let Some(root) = self.root
+         && self.has_kids(root)
+      {
+         return Some(root);
+      }
+      let mut cur = *self.navigators.first()?;
+      for _ in 0..64 {
+         let Some(parent) = self.parent(cur) else {
+            break;
+         };
+         cur = parent;
+      }
+      self.has_kids(cur).then_some(cur)
    }
 
    pub fn has_kids(&self, id: i32) -> bool {

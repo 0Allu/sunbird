@@ -217,6 +217,9 @@ struct Registry<'js> {
    /// callbacks, by page id.
    #[cfg(target_os = "android")]
    open_pages:    RefCell<HashMap<u32, (String, Vec<Function<'js>>)>>,
+   /// Active in-app notification banner tap callbacks (`phoenix.ui.notify`), by banner id.
+   #[cfg(target_os = "android")]
+   banners:       RefCell<HashMap<u32, (String, Function<'js>)>>,
 }
 
 /// A contribution's plugin callbacks. `evaluate` is `render`, or `visible`
@@ -507,6 +510,33 @@ impl Engine {
       self.context.with(|ctx| {
          if let Some(registry) = ctx.userdata::<Registry<'_>>() {
             registry.open_pages.borrow_mut().remove(&page);
+         }
+      });
+   }
+
+   /// Runs the tap callback for in-app notification banner `id` and cleans it up.
+   #[cfg(target_os = "android")]
+   pub fn banner_press(&self, id: u32) {
+      self.context.with(|ctx| {
+         let Some((plugin, handler)) = ctx
+            .userdata::<Registry<'_>>()
+            .and_then(|registry| registry.banners.borrow_mut().remove(&id))
+         else {
+            return;
+         };
+         if let Err(err) = handler.call::<_, Value<'_>>(()).catch(&ctx) {
+            log::error!("[{plugin}] notify onPress: {err}");
+         }
+      });
+      drain(&self.runtime);
+   }
+
+   /// Drops the tap callback for a dismissed in-app notification banner.
+   #[cfg(target_os = "android")]
+   pub fn banner_closed(&self, id: u32) {
+      self.context.with(|ctx| {
+         if let Some(registry) = ctx.userdata::<Registry<'_>>() {
+            registry.banners.borrow_mut().remove(&id);
          }
       });
    }
@@ -836,6 +866,17 @@ impl Engine {
                patches::close_page(id);
             }
             drop(open_pages);
+            let mut banners = registry.banners.borrow_mut();
+            let dismissed = banners
+               .iter()
+               .filter(|(_, (plugin, _))| plugin == name)
+               .map(|(id, _)| *id)
+               .collect::<Vec<_>>();
+            for id in dismissed {
+               banners.remove(&id);
+               patches::dismiss_banner(id);
+            }
+            drop(banners);
             patches::forget(name);
          }
          let mut hooks = registry.hooks.borrow_mut();
@@ -1237,6 +1278,8 @@ fn registry<'js>(ctx: &Ctx<'js>, events: &GatewayRegistry) -> rquickjs::Result<R
       node_watchers: RefCell::default(),
       #[cfg(target_os = "android")]
       open_pages: RefCell::default(),
+      #[cfg(target_os = "android")]
+      banners: RefCell::default(),
    })
 }
 
@@ -2010,6 +2053,39 @@ fn ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>>
             Some(info) => Ok(node_info_object(&ctx, &info)?.into_value()),
             None => Ok(Value::new_null(ctx)),
          }
+      })?,
+   )?;
+   let owner = plugin.to_owned();
+   ui.set(
+      "notify",
+      Function::new(ctx.clone(), move |ctx: Ctx<'js>, options: Object<'js>| {
+         let title = options
+            .get::<_, Option<String>>("title")?
+            .filter(|text| !text.is_empty())
+            .ok_or_else(|| Exception::throw_type(&ctx, "notify({ title }) requires a title"))?;
+         let body = options.get::<_, Option<String>>("body")?;
+         let icon = options.get::<_, Option<String>>("icon")?;
+         let accent = options
+            .get::<_, Option<f64>>("accent")?
+            .map(|color| color as i64);
+         let duration_ms = options
+            .get::<_, Option<f64>>("durationMs")?
+            .map_or(5000, |ms| if ms <= 0.0 { 0 } else { ms as u64 });
+         let on_press = options.get::<_, Option<Function<'js>>>("onPress")?;
+         let action = if on_press.is_some() {
+            patches::BannerAction::JsCallback
+         } else {
+            patches::BannerAction::None
+         };
+         let id = patches::show_banner(title, body, icon, accent, duration_ms, action);
+         if let Some(callback) = on_press {
+            ctx.userdata::<Registry<'js>>()
+               .ok_or_else(|| Exception::throw_internal(&ctx, "no registry"))?
+               .banners
+               .borrow_mut()
+               .insert(id, (owner.clone(), callback));
+         }
+         remover(&ctx, move |_| patches::dismiss_banner(id), None)
       })?,
    )?;
    ui.set(

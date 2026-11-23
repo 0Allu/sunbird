@@ -1210,6 +1210,19 @@ declare namespace Phoenix {
     close(): void;
   }
 
+  interface NotifyOptions {
+    title: string;
+    body?: string;
+    /// A `res://` drawable URI (defaults to `res://ic_mana_puzzle_piece_plus`).
+    icon?: Icon;
+    /// 32-bit ARGB color for the leading icon badge (defaults to Discord Blurple).
+    accent?: number;
+    /// Auto-dismiss after this many milliseconds (defaults to 5000; pass 0 to stay until dismissed).
+    durationMs?: number;
+    /// Runs when the notification banner is tapped.
+    onPress?(): void;
+  }
+
   /// Plugin UI next to Phoenix's own. Plugin callbacks run off the UI threads, so drawn results
   /// land a moment after the screen they belong to. Everything goes away when the plugin is
   /// turned off.
@@ -1302,6 +1315,9 @@ declare namespace Phoenix {
     findDown(root: number, match: NodeMatch, maxDepth?: number): number | null;
     /// Reads live tree metadata for `id` from Phoenix's mirrored view tree.
     node(id: number): NodeInfo | null;
+    /// Shows a native Discord in-app notification banner at the top of the screen. Returns a
+    /// function that dismisses it early.
+    notify(options: NotifyOptions): () => void;
     /// Copies `text` to the device clipboard.
     copy(text: string): void;
     /// A short message at the bottom of the screen.
