@@ -1005,7 +1005,9 @@ declare namespace Phoenix {
     /// Runs when a custom emoji is pressed in the emoji picker under the message box (not the
     /// reaction picker), with its id. Return text to add to the end of the message box instead of
     /// what Phoenix would do (insert it, or show a Nitro ad for a locked one), or nothing to leave
-    /// the press to Phoenix. While a handler exists, that picker draws no locks on emojis.
+    /// the press to Phoenix. While a handler exists, Phoenix counts emojis that need Nitro as
+    /// usable in the message box, so its picker and autocomplete show them without a lock.
+    /// Reactions and the rest keep the lock, and nothing else about Nitro changes.
     onEmojiPick(handler: (emojiId: string, ctx: UiContext) => string | void): Remover;
   }
 

@@ -846,13 +846,14 @@ pub fn set_interceptors(count: usize) {
    patches().interceptors = count;
 }
 
-/// How many `onEmojiPick` handlers plugins hold, so picker presses are taken
-/// only while one exists.
+/// How many `onEmojiPick` handlers plugins hold, so picker presses are taken,
+/// and Nitro-locked emojis offered, only while one exists.
 pub fn set_emoji_pickers(count: usize) {
    if count > 0 {
       ACTIVE.store(true, Ordering::Release);
    }
    patches().pickers = count;
+   emoji::unlock(count > 0);
 }
 
 /// Drops everything `plugin` added.
@@ -897,12 +898,8 @@ impl Patches {
       let mut mine = Vec::new();
       let mut touched = HashSet::new();
       let mut extra_deletes;
-      let mut unlocks = Vec::new();
       {
          let (created, deleted) = self.mirror.apply(&ops);
-         if self.pickers > 0 {
-            unlocks = self.emoji_locks(&created);
-         }
          extra_deletes = self.drop_deleted(&deleted);
          for id in &deleted {
             self.texts.remove(id);
@@ -981,7 +978,7 @@ impl Patches {
          .mirror
          .composer()
          .is_some_and(|(_, text)| text.starts_with('/'));
-      let mut extra = unlocks;
+      let mut extra = Vec::new();
       if !self.commands.is_empty()
          && self.suggestions.scroll.is_some()
          && (self.has_suggestions() || composer_slash)
