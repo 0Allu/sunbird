@@ -39,6 +39,7 @@ use crate::{
       PAGE,
       Patches,
       ROOT_ID,
+      aids,
       patches,
       profile::profile_user,
       props::apply_prop_patch,
@@ -324,10 +325,10 @@ impl Patches {
             .unwrap_or_default()
             .to_owned();
          self.templates.learn(&self.mirror, *id, &aid, created);
-         if aid == "suggestions" {
+         if aid == aids::SUGGESTIONS {
             self.suggestions.scroll = Some(*id);
          }
-         if aid == "profile-tab-pages" {
+         if aid == aids::PROFILE_TAB_PAGES {
             self.seen.profile_user = profile_user(ops);
          }
       }

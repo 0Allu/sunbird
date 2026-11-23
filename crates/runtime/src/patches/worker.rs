@@ -23,6 +23,7 @@ use crate::{
       Patches,
       Place,
       UiContext,
+      aids::message_id,
       banners,
       banners::BannerSpec,
       commands,
@@ -31,7 +32,6 @@ use crate::{
          MenuItem,
          SheetBody,
       },
-      message_id,
       mount,
       mount::{
          MountBefore,

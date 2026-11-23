@@ -19,6 +19,11 @@ use crate::patches::{
    Outcome,
    Place,
    Rendered,
+   aids::{
+      self,
+      MessagePart,
+      message_part,
+   },
    menu::SheetBody,
    tabs,
 };
@@ -26,14 +31,6 @@ use crate::patches::{
 const DANGER: i64 = 4_294_475_386;
 const MUTED: i64 = 4_288_059_294;
 const DEFAULT_ICON: &str = "res://ic_mana_puzzle_piece_plus";
-const ROW_TEMPLATES: [&str; 6] = [
-   "message.actions.reply",
-   "message.actions.copy_text",
-   "message.actions.copy_id",
-   "message.actions.mark_unread",
-   "message.actions.copy_link",
-   "message.actions.mention",
-];
 
 /// Where a contribution goes, next to one of Phoenix's own nodes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -79,12 +76,12 @@ impl Target {
 
    pub fn matches(self, aid: &str) -> bool {
       match self {
-         Self::Header => aid == "search.entry",
-         Self::Composer => aid == "composer.expressions",
-         Self::Content => aid.starts_with("message.content:"),
-         Self::Timestamp => aid.starts_with("message.timestamp:"),
-         Self::Action => aid == "message.actions.root",
-         Self::Profile | Self::Tab | Self::TabPage => aid == "profile-tab-pages",
+         Self::Header => aid == aids::SEARCH_ENTRY,
+         Self::Composer => aid == aids::COMPOSER_EXPRESSIONS,
+         Self::Content => matches!(message_part(aid), Some((MessagePart::Content, _))),
+         Self::Timestamp => matches!(message_part(aid), Some((MessagePart::Timestamp, _))),
+         Self::Action => aid == aids::MESSAGE_ACTIONS,
+         Self::Profile | Self::Tab | Self::TabPage => aid == aids::PROFILE_TAB_PAGES,
       }
    }
 
@@ -102,21 +99,21 @@ impl Target {
             Some(Placement {
                parent: id,
                before: None,
-               place:  Place::Message(aid.strip_prefix("message.content:")?.to_owned()),
+               place:  Place::Message(message_part(aid)?.1.to_owned()),
             })
          },
          Self::Timestamp => {
             Some(Placement {
                parent: mirror.parent(id)?,
                before: None,
-               place:  Place::Message(aid.strip_prefix("message.timestamp:")?.to_owned()),
+               place:  Place::Message(message_part(aid)?.1.to_owned()),
             })
          },
          Self::Action => {
             let groups = *mirror.kids(id).last()?;
             let delete = mirror.kids(groups).iter().copied().find(|group| {
                mirror
-                  .find_down(*group, &|aid| aid == "message.actions.delete", 2)
+                  .find_down(*group, &|aid| aid == aids::MESSAGE_DELETE, 2)
                   .is_some()
             });
             Some(Placement {
@@ -247,18 +244,20 @@ const BOUND: [&str; 5] = [
 impl Templates {
    pub fn learn(&mut self, mirror: &Mirror, id: i32, aid: &str, created: &Created<'_>) {
       match aid {
-         "search.entry" => self.header = mirror.snapshot(id, created),
-         "composer.expressions" => self.composer = mirror.snapshot(id, created),
-         "profile-tab-pages" => {
+         aids::SEARCH_ENTRY => self.header = mirror.snapshot(id, created),
+         aids::COMPOSER_EXPRESSIONS => self.composer = mirror.snapshot(id, created),
+         aids::PROFILE_TAB_PAGES => {
             self.learn_profile(mirror, id, created);
             self.learn_tabs(mirror, id, created);
          },
-         _ if aid.starts_with("message.timestamp:") && self.timestamp.is_none() => {
+         _ if matches!(message_part(aid), Some((MessagePart::Timestamp, _)))
+            && self.timestamp.is_none() =>
+         {
             self.timestamp = mirror.snapshot(id, created);
          },
-         "message.actions.root" => self.learn_sheet(mirror, id, created),
-         _ if aid.starts_with("message.actions.") => {
-            if ROW_TEMPLATES.contains(&aid) {
+         aids::MESSAGE_ACTIONS => self.learn_sheet(mirror, id, created),
+         _ if aid.starts_with(aids::MESSAGE_ROW_PREFIX) => {
+            if aids::MESSAGE_ROWS.contains(&aid) {
                self.learn_row(mirror, id, created);
             }
             if let Some(icon) = mirror.snapshot(id, created).as_ref().and_then(first_image) {

@@ -30,6 +30,7 @@ use crate::patches::{
    HIDDEN,
    Patches,
    PropPatch,
+   aids,
    nodes::NodeMatch,
    patches,
    worker::{
@@ -140,7 +141,7 @@ impl Patches {
                            entry.0.extend(patch.props.iter().cloned());
                            entry.1.extend(patch.add_on.iter().cloned());
                         }
-                        if aid == "message.actions.root"
+                        if aid == aids::MESSAGE_ACTIONS
                            && patch
                               .props
                               .iter()

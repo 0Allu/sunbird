@@ -8,7 +8,13 @@ use phoenix_ui::{
 };
 use phoenix_wire::Value;
 
-use crate::patches::Patches;
+use crate::patches::{
+   Patches,
+   aids::{
+      MessagePart,
+      message_part,
+   },
+};
 
 impl Patches {
    /// Colors the author and text of `message`, or gives them back Phoenix's
@@ -41,15 +47,22 @@ impl Patches {
 
    /// The message whose author or content text `id` is.
    pub fn text_message(&self, id: i32) -> Option<String> {
-      let own = self
-         .mirror
-         .accessibility_id(id)
-         .and_then(|aid| aid.strip_prefix("message.author:"));
+      let own = self.mirror.accessibility_id(id).and_then(|aid| {
+         match message_part(aid) {
+            Some((MessagePart::Author, message)) => Some(message),
+            _ => None,
+         }
+      });
       let parent = self
          .mirror
          .parent(id)
          .and_then(|parent| self.mirror.accessibility_id(parent))
-         .and_then(|aid| aid.strip_prefix("message.content:"));
+         .and_then(|aid| {
+            match message_part(aid) {
+               Some((MessagePart::Content, message)) => Some(message),
+               _ => None,
+            }
+         });
       own.or(parent).map(str::to_owned)
    }
 

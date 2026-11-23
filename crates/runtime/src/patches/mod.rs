@@ -10,6 +10,7 @@
 //!   main thread can be waited on with the UI lock held. Plugin callbacks run
 //!   on a worker, and their results reach the screen as follow-up batches.
 
+mod aids;
 pub mod banners;
 pub mod commands;
 mod emoji;
@@ -699,13 +700,5 @@ fn number(value: &Value) -> Option<f64> {
       _ => None,
    }
 }
-const BACKGROUND: Prop = Prop::named("background");
 
-/// The message id in `message.{content,avatar,author,timestamp}:<id>`.
-fn message_id(aid: &str) -> Option<&str> {
-   let (kind, id) = aid.strip_prefix("message.")?.split_once(':')?;
-   (matches!(kind, "content" | "avatar" | "author" | "timestamp")
-      && !id.is_empty()
-      && id.bytes().all(|byte| byte.is_ascii_digit()))
-   .then_some(id)
-}
+const BACKGROUND: Prop = Prop::named("background");

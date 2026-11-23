@@ -25,6 +25,7 @@ use crate::patches::{
    Patches,
    Place,
    SlotKind,
+   aids,
    commands,
    number,
    patches,
@@ -285,7 +286,7 @@ pub fn profile_user(ops: &[Op]) -> Option<String> {
    let avatar = ops.iter().find_map(|op| {
       match op {
          Op::Create { id, props, .. }
-            if matches!(get_prop(props, Prop::ACCESSIBILITY_ID), Some(Value::Str(aid)) if aid == "Avatar") =>
+            if matches!(get_prop(props, Prop::ACCESSIBILITY_ID), Some(Value::Str(aid)) if aid == aids::AVATAR) =>
          {
             Some(*id)
          },

@@ -14,6 +14,7 @@ use crate::{
    patches::{
       Patches,
       Place,
+      aids,
       commands,
       patches,
       worker::press_context,
@@ -45,7 +46,7 @@ impl Patches {
    /// not the one for reactions, which opens in a sheet of its own.
    pub(super) fn in_message_picker(&self, mut id: i32) -> bool {
       while let Some(parent) = self.mirror.parent(id) {
-         if self.mirror.accessibility_id(parent) == Some("xp-sheet") {
+         if self.mirror.accessibility_id(parent) == Some(aids::EMOJI_SHEET) {
             return true;
          }
          id = parent;
