@@ -10,6 +10,7 @@ use phoenix_ui::{
    Props,
    ViewKind,
    mirror::Created,
+   prop,
 };
 use phoenix_wire::{
    Key,
@@ -122,7 +123,7 @@ impl Patches {
       };
       let mut row = row;
       row.props
-         .retain(|(key, _)| *key != Prop::named("background") && *key != Prop::ACCESSIBILITY_LABEL);
+         .retain(|(key, _)| *key != prop!("background") && *key != Prop::ACCESSIBILITY_LABEL);
       self.suggestions.row = Some(row);
    }
 
@@ -251,7 +252,7 @@ impl Patches {
       if let [image, middle, right] = row.kids.as_mut_slice() {
          image.set(Prop::URI, Some(Value::Str(icon.to_owned())));
          image.set(Prop::TINT, Some(Value::I64(ICON_TINT)));
-         image.set(Prop::named("pool"), None);
+         image.set(prop!("pool"), None);
          if let [title, subtitle] = middle.kids.as_mut_slice() {
             title.set(Prop::TEXT, Some(Value::Str(format!("/ {name}"))));
             subtitle.set(Prop::TEXT, Some(Value::Str(description.to_owned())));

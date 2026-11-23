@@ -2,6 +2,7 @@
 
 use phoenix_ui::{
    Prop,
+   prop,
    templates,
 };
 use phoenix_wire::Value;
@@ -91,7 +92,7 @@ pub fn log_line(pieces: &[(String, i64)]) -> Tree {
       .collect::<String>();
    node.set(Prop::TEXT, Some(text(&whole)));
    node.set(
-      Prop::named("spans"),
+      prop!("spans"),
       Some(Value::Arr(
          pieces
             .iter()
@@ -102,7 +103,7 @@ pub fn log_line(pieces: &[(String, i64)]) -> Tree {
    node.set(Prop::COLOR, Some(Value::I64(COLOR_TEXT)));
    node.set(Prop::FONT_SIZE, Some(Value::F64(12.0)));
    node.set(Prop::LINE_HEIGHT, Some(Value::F64(16.0)));
-   node.set(Prop::named("fontWeight"), Some(Value::I32(400)));
+   node.set(prop!("fontWeight"), Some(Value::I32(400)));
    node.set(Prop::FONT_FAMILY, Some(text("monospace")));
    node.set(Prop::SELECTABLE, Some(Value::Bool(true)));
    node

@@ -19,10 +19,8 @@ use phoenix_ui::{
    Op,
    Prop,
    Props,
-   mirror::{
-      Created,
-      prop,
-   },
+   get_prop,
+   mirror::Created,
    set_prop,
 };
 use phoenix_wire::Value;
@@ -279,7 +277,7 @@ pub fn apply_prop_patch(
    if !add_on.is_empty() {
       let mut on = base_on.map_or_else(
          || {
-            match prop(props, Prop::ON) {
+            match get_prop(props, Prop::ON) {
                Some(Value::Arr(existing)) => existing.clone(),
                _ => Vec::new(),
             }

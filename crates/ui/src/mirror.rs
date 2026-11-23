@@ -12,6 +12,7 @@ use crate::{
    Prop,
    Props,
    ViewKind,
+   get_prop,
    set_prop,
 };
 
@@ -91,11 +92,11 @@ impl Mirror {
          self.kinds.insert(id, kind.clone());
          self.props.insert(id, props.clone());
       }
-      let is_list = prop(props, FIRST).is_some();
-      if let Some(Value::I32(first)) = prop(props, FIRST) {
+      let is_list = get_prop(props, FIRST).is_some();
+      if let Some(Value::I32(first)) = get_prop(props, FIRST) {
          self.firsts.insert(id, *first);
       }
-      if let Some(Value::Arr(on)) = prop(props, Prop::ON)
+      if let Some(Value::Arr(on)) = get_prop(props, Prop::ON)
          && (is_list
             || on
                .iter()
@@ -103,7 +104,7 @@ impl Mirror {
       {
          self.list_on.insert(id, on.clone());
       }
-      if let Some(Value::Str(aid)) = prop(props, Prop::ACCESSIBILITY_ID) {
+      if let Some(Value::Str(aid)) = get_prop(props, Prop::ACCESSIBILITY_ID) {
          self.name(id, aid);
       }
       if kind.as_str() == "sheet" {
@@ -112,7 +113,7 @@ impl Mirror {
       if *kind == ViewKind::Navigator && !self.navigators.contains(&id) {
          self.navigators.push(id);
       }
-      if prop(props, Prop::STACK_HEADER).is_some() {
+      if get_prop(props, Prop::STACK_HEADER).is_some() {
          self.stack_header = Some(props.clone());
       }
    }
@@ -124,10 +125,10 @@ impl Mirror {
             set_prop(stored, *key, Some(value.clone()));
          }
       }
-      if let Some(Value::I32(first)) = prop(props, FIRST) {
+      if let Some(Value::I32(first)) = get_prop(props, FIRST) {
          self.firsts.insert(id, *first);
       }
-      match prop(props, Prop::ACCESSIBILITY_ID) {
+      match get_prop(props, Prop::ACCESSIBILITY_ID) {
          Some(Value::Str(aid)) => self.name(id, aid),
          Some(Value::Null) => {
             self.ids.remove(&id);
@@ -135,11 +136,11 @@ impl Mirror {
          _ => {},
       }
       if (self.firsts.contains_key(&id) || self.list_on.contains_key(&id))
-         && let Some(Value::Arr(on)) = prop(props, Prop::ON)
+         && let Some(Value::Arr(on)) = get_prop(props, Prop::ON)
       {
          self.list_on.insert(id, on.clone());
       }
-      if let Some(Value::Str(text)) = prop(props, Prop::VALUE) {
+      if let Some(Value::Str(text)) = get_prop(props, Prop::VALUE) {
          self.set_composer_text(id, text.clone());
       }
    }
@@ -377,14 +378,6 @@ impl Mirror {
    }
 }
 
-#[must_use]
-pub fn prop(props: &Props, key: Prop) -> Option<&Value> {
-   props
-      .iter()
-      .find(|(existing, _)| *existing == key)
-      .map(|(_, value)| value)
-}
-
 fn apply_edits(old: &[i32], edits: &[ChildEdit]) -> Vec<i32> {
    let mut out = Vec::with_capacity(old.len());
    let mut at = 0;
@@ -406,6 +399,7 @@ mod tests {
       decode,
       encode,
       inspect::TreeJson,
+      prop,
    };
 
    #[test]
@@ -505,7 +499,7 @@ mod tests {
                id:    30,
                kind:  ViewKind::Other("list".to_owned()),
                props: vec![
-                  (Prop::named("first"), Value::I32(5)),
+                  (prop!("first"), Value::I32(5)),
                   (
                      Prop::ON,
                      Value::Arr(vec![Value::Str("rowLongPress".to_owned())]),

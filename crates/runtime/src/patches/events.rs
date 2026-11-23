@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use phoenix_ui::{
    Prop,
    inspect::WireJson,
+   prop,
 };
 use phoenix_wire::{
    DispatchEvent,
@@ -67,9 +68,9 @@ pub fn dispatch_event(node: i32, event: Key, payload: &Value) -> bool {
 const DISMISS: Key = Prop::named("dismiss").key();
 const ROW_LONG_PRESS: Key = Prop::named("rowLongPress").key();
 const PAGE_EVENTS: [Key; 3] = [
-   Prop::named("pageSelect").key(),
-   Prop::named("pageSettle").key(),
-   Prop::named("pageScroll").key(),
+   prop!("pageSelect").key(),
+   prop!("pageSettle").key(),
+   prop!("pageScroll").key(),
 ];
 const LAYOUT: Key = Prop::named("layout").key();
 const LONG_PRESS: Key = Prop::named("longPress").key();

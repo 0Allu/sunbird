@@ -10,7 +10,8 @@ use phoenix_ui::{
    Op,
    Prop,
    ViewKind,
-   mirror::prop,
+   get_prop,
+   prop,
 };
 use phoenix_wire::Value;
 
@@ -99,7 +100,7 @@ impl Patches {
          .field(PAGE.key())
          .and_then(Value::as_i32)
          .map(f64::from);
-      let offset = payload.field(Prop::named("offset").key()).and_then(number);
+      let offset = payload.field(prop!("offset").key()).and_then(number);
       page.or(offset).is_some_and(|at| at > last + 0.001)
    }
 
@@ -149,9 +150,9 @@ impl Patches {
                      Prop::INDEX.key(),
                      Value::I32(i32::try_from(index).unwrap_or_default()),
                   ),
-                  (Prop::named("align").key(), Value::Str("reveal".to_owned())),
-                  (Prop::named("offset").key(), Value::F64(16.0)),
-                  (Prop::named("animated").key(), Value::Bool(true)),
+                  (prop!("align").key(), Value::Str("reveal".to_owned())),
+                  (prop!("offset").key(), Value::F64(16.0)),
+                  (prop!("animated").key(), Value::Bool(true)),
                ]),
             });
          }
@@ -208,7 +209,7 @@ impl Patches {
             Some(Op::Update {
                id:    text,
                props: vec![
-                  (Prop::named("worklet"), Value::Null),
+                  (prop!("worklet"), Value::Null),
                   (Prop::COLOR, Value::I64(color)),
                ],
             })
@@ -246,7 +247,7 @@ impl Patches {
          });
          out.push(Op::Update {
             id:    root,
-            props: vec![(Prop::named("accessibilitySelected"), Value::Bool(open))],
+            props: vec![(prop!("accessibilitySelected"), Value::Bool(open))],
          });
       }
       out
@@ -263,14 +264,14 @@ fn page_op(pager: i32, page: usize) -> Op {
          PAGE,
          Value::Obj(vec![
             (
-               Prop::named("seq").key(),
+               prop!("seq").key(),
                Value::I32(SEQUENCE.fetch_add(1, Ordering::Relaxed)),
             ),
             (
                Prop::INDEX.key(),
                Value::I32(i32::try_from(page).unwrap_or_default()),
             ),
-            (Prop::named("animated").key(), Value::Bool(true)),
+            (prop!("animated").key(), Value::Bool(true)),
          ]),
       )],
    }
@@ -284,7 +285,7 @@ pub fn profile_user(ops: &[Op]) -> Option<String> {
    let avatar = ops.iter().find_map(|op| {
       match op {
          Op::Create { id, props, .. }
-            if matches!(prop(props, Prop::ACCESSIBILITY_ID), Some(Value::Str(aid)) if aid == "Avatar") =>
+            if matches!(get_prop(props, Prop::ACCESSIBILITY_ID), Some(Value::Str(aid)) if aid == "Avatar") =>
          {
             Some(*id)
          },
@@ -295,7 +296,7 @@ pub fn profile_user(ops: &[Op]) -> Option<String> {
       ops.iter().find_map(|op| {
          match op {
             Op::Create { id, kind, props } if *id > avatar && *kind == ViewKind::Image => {
-               match prop(props, Prop::URI) {
+               match get_prop(props, Prop::URI) {
                   Some(Value::Str(uri)) => Some(uri.clone()),
                   _ => None,
                }

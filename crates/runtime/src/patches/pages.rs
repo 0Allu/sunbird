@@ -6,7 +6,8 @@ use phoenix_ui::{
    Op,
    Prop,
    ViewKind,
-   mirror::prop,
+   get_prop,
+   prop,
 };
 use phoenix_wire::Value;
 
@@ -107,10 +108,10 @@ impl Patches {
       let (header_padding, header_height) = self.mirror.stack_header().map_or(
          (Value::Rect([6.0, 44.0, 6.0, 0.0]), Value::F64(100.0)),
          |header| {
-            let padding = prop(header, Prop::PADDING)
+            let padding = get_prop(header, Prop::PADDING)
                .cloned()
                .unwrap_or(Value::Rect([6.0, 44.0, 6.0, 0.0]));
-            let height = prop(header, Prop::HEIGHT)
+            let height = get_prop(header, Prop::HEIGHT)
                .cloned()
                .unwrap_or(Value::F64(100.0));
             (padding, height)
@@ -286,7 +287,7 @@ fn code(text: &str, monospace: bool, highlight: bool) -> Draft {
          (Prop::COLOR, Value::I64(0xFFF6_F6F7)),
          (Prop::FONT_SIZE, Value::F64(12.0)),
          (Prop::LINE_HEIGHT, Value::F64(17.0)),
-         (Prop::named("fontWeight"), Value::I32(400)),
+         (prop!("fontWeight"), Value::I32(400)),
          (Prop::SELECTABLE, Value::Bool(true)),
       ],
       kids:  Vec::new(),
@@ -313,7 +314,7 @@ fn code(text: &str, monospace: bool, highlight: bool) -> Draft {
             ])
          })
          .collect();
-      content.set(Prop::named("spans"), Some(Value::Arr(spans)));
+      content.set(prop!("spans"), Some(Value::Arr(spans)));
    }
    content
 }
@@ -322,8 +323,8 @@ fn boxed(content: Draft) -> Draft {
    Draft {
       kind:  ViewKind::View,
       props: vec![
-         (Prop::named("width"), Value::Str("fill".to_owned())),
-         (Prop::named("background"), Value::I64(0xFF14_1518)),
+         (prop!("width"), Value::Str("fill".to_owned())),
+         (prop!("background"), Value::I64(0xFF14_1518)),
          (Prop::PADDING, Value::Rect([14.0, 12.0, 14.0, 12.0])),
       ],
       kids:  vec![content],

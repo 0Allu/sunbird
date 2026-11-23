@@ -11,6 +11,7 @@ use phoenix_wire::Value;
 use crate::{
    Prop,
    Props,
+   prop,
 };
 
 const MAGIC: i32 = -1_792_780_819;
@@ -67,19 +68,19 @@ impl TryFrom<i32> for Channel {
 impl Channel {
    /// The value this channel rests at for a view with `props`.
    fn level(self, props: &Props) -> Level {
-      let (name, absent) = match self {
-         Self::TranslateX => ("translateX", 0.0),
-         Self::TranslateY => ("translateY", 0.0),
-         Self::Scale => ("scale", 1.0),
-         Self::Rotation => ("rotation", 0.0),
-         Self::Alpha => ("opacity", 1.0),
-         Self::Background => return Level::Argb(color(props, Prop::named("background"))),
-         Self::BorderColor => return Level::Argb(color(props, Prop::named("borderColor"))),
-         Self::BorderWidth => ("borderWidth", 0.0),
-         Self::Height => ("height", f32::NAN),
-         Self::Width => ("width", f32::NAN),
+      let (key, absent) = match self {
+         Self::TranslateX => (prop!("translateX"), 0.0),
+         Self::TranslateY => (prop!("translateY"), 0.0),
+         Self::Scale => (prop!("scale"), 1.0),
+         Self::Rotation => (prop!("rotation"), 0.0),
+         Self::Alpha => (prop!("opacity"), 1.0),
+         Self::Background => return Level::Argb(color(props, prop!("background"))),
+         Self::BorderColor => return Level::Argb(color(props, prop!("borderColor"))),
+         Self::BorderWidth => (prop!("borderWidth"), 0.0),
+         Self::Height => (prop!("height"), f32::NAN),
+         Self::Width => (prop!("width"), f32::NAN),
       };
-      Level::Scalar(number(props, Prop::named(name)).unwrap_or(absent))
+      Level::Scalar(number(props, key).unwrap_or(absent))
    }
 }
 
@@ -270,7 +271,7 @@ impl Bound {
    /// The `worklet` prop that attaches this program to a view.
    #[must_use]
    pub fn prop(&self) -> (Prop, Value) {
-      (Prop::named("worklet"), Value::Words(self.words.clone()))
+      (prop!("worklet"), Value::Words(self.words.clone()))
    }
 
    /// Places every channel at its value for `props`.

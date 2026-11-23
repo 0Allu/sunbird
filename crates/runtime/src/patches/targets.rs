@@ -3,11 +3,12 @@ use phoenix_ui::{
    Prop,
    Props,
    ViewKind,
+   get_prop,
    mirror::{
-      self,
       Created,
       Mirror,
    },
+   prop,
 };
 use phoenix_wire::Value;
 
@@ -350,7 +351,7 @@ impl Templates {
             tint:  None,
          });
          head.set(Prop::MARGIN, Some(Value::Rect([4.0, 0.0, 4.0, 8.0])));
-         head.set(Prop::named("fontWeight"), Some(Value::I32(700)));
+         head.set(prop!("fontWeight"), Some(Value::I32(700)));
          kids.push(head);
       }
       if let Some(body) = body {
@@ -361,7 +362,7 @@ impl Templates {
                (Prop::COLOR, Value::I64(0xFFF6_F6F7)),
                (Prop::FONT_SIZE, Value::F64(12.0)),
                (Prop::LINE_HEIGHT, Value::F64(16.0)),
-               (Prop::named("fontWeight"), Value::I32(400)),
+               (prop!("fontWeight"), Value::I32(400)),
                (Prop::SELECTABLE, Value::Bool(true)),
             ],
             kids:  Vec::new(),
@@ -388,13 +389,13 @@ impl Templates {
                   ])
                })
                .collect();
-            content.set(Prop::named("spans"), Some(Value::Arr(spans)));
+            content.set(prop!("spans"), Some(Value::Arr(spans)));
          }
          let scroll = Draft {
             kind:  ViewKind::Scroll,
             props: vec![
-               (Prop::named("maxHeight"), Value::F64(420.0)),
-               (Prop::named("panYieldsToScroll"), Value::Bool(true)),
+               (prop!("maxHeight"), Value::F64(420.0)),
+               (prop!("panYieldsToScroll"), Value::Bool(true)),
             ],
             kids:  vec![content],
             press: None,
@@ -403,7 +404,7 @@ impl Templates {
          let box_view = Draft {
             kind:  ViewKind::View,
             props: vec![
-               (Prop::named("background"), Value::I64(0xFF14_1518)),
+               (prop!("background"), Value::I64(0xFF14_1518)),
                (Prop::RADIUS, Value::F64(12.0)),
                (Prop::PADDING, Value::Rect([12.0, 10.0, 12.0, 10.0])),
                (Prop::MARGIN, Value::Rect([0.0, 0.0, 0.0, 12.0])),
@@ -441,7 +442,7 @@ impl Templates {
          .and_then(|row| mirror.kids(*row).first());
       if let Some(width) = page
          .and_then(|page| created.get(page))
-         .and_then(|(_, props)| mirror::prop(props, Prop::named("width")))
+         .and_then(|(_, props)| get_prop(props, prop!("width")))
       {
          self.page_width = Some(width.clone());
       }
@@ -458,7 +459,7 @@ impl Templates {
             .first()?
             .kids
             .first()
-            .and_then(|text| mirror::prop(&text.props, Prop::COLOR))
+            .and_then(|text| get_prop(&text.props, Prop::COLOR))
          {
             Some(Value::I64(color)) => Some(*color),
             Some(Value::I32(color)) => Some(i64::from(*color)),
@@ -469,7 +470,7 @@ impl Templates {
          let Some(node) = mirror.snapshot(*tab, created) else {
             continue;
          };
-         let selected = mirror::prop(&node.props, Prop::named("accessibilitySelected"));
+         let selected = get_prop(&node.props, prop!("accessibilitySelected"));
          if matches!(selected, Some(Value::Bool(true))) {
             self.tab_color = color(&node).or(self.tab_color);
          } else if node
@@ -760,7 +761,7 @@ impl Templates {
          .as_ref()
          .and_then(|tab| tab.kids.first()?.kids.first())
          .and_then(|text| {
-            match mirror::prop(&text.props, Prop::COLOR) {
+            match get_prop(&text.props, Prop::COLOR) {
                Some(Value::I64(color)) => Some(*color),
                Some(Value::I32(color)) => Some(i64::from(*color)),
                _ => None,
@@ -775,10 +776,10 @@ impl Templates {
       const DROPPED: [Prop; 7] = [
          Prop::ACCESSIBILITY_ID,
          Prop::ACCESSIBILITY_LABEL,
-         Prop::named("accessibilityHidden"),
-         Prop::named("maxLines"),
+         prop!("accessibilityHidden"),
+         prop!("maxLines"),
          Prop::MARGIN,
-         Prop::named("gravity"),
+         prop!("gravity"),
          Prop::ON,
       ];
       self.timestamp.as_ref().map_or_else(
@@ -786,7 +787,7 @@ impl Templates {
             vec![
                (Prop::COLOR, Value::I64(MUTED)),
                (Prop::FONT_SIZE, Value::F64(12.0)),
-               (Prop::named("fontWeight"), Value::I32(500)),
+               (prop!("fontWeight"), Value::I32(500)),
             ]
          },
          |timestamp| {
@@ -803,7 +804,7 @@ impl Templates {
 
 fn first_image(node: &Node) -> Option<String> {
    if node.kind == ViewKind::Image
-      && let Some(Value::Str(uri)) = mirror::prop(&node.props, Prop::URI)
+      && let Some(Value::Str(uri)) = get_prop(&node.props, Prop::URI)
    {
       return Some(uri.clone());
    }
@@ -812,7 +813,7 @@ fn first_image(node: &Node) -> Option<String> {
 
 fn first_text_color(node: &Node) -> Option<i64> {
    if node.kind == ViewKind::Text {
-      match mirror::prop(&node.props, Prop::COLOR) {
+      match get_prop(&node.props, Prop::COLOR) {
          Some(Value::I64(color)) => return Some(*color),
          Some(Value::I32(color)) => return Some(i64::from(*color)),
          _ => {},
@@ -829,7 +830,7 @@ pub fn text(props: &Props, rendered: &Rendered) -> Draft {
       press: None,
       src:   None,
    };
-   node.set(Prop::named("spans"), None);
+   node.set(prop!("spans"), None);
    node.set(Prop::TEXT, Some(Value::Str(rendered.text.clone())));
    if let Some(color) = rendered.color {
       node.set(Prop::COLOR, Some(Value::I64(color)));

@@ -37,6 +37,15 @@ pub const PROPS: [&str; 855] = include!("props.in");
 
 const VERSION: u8 = 1;
 
+/// [`Prop::named`] evaluated at compile time, so a name missing from
+/// [`PROPS`] fails the build instead of panicking at runtime.
+#[macro_export]
+macro_rules! prop {
+   ($name:literal) => {
+      const { $crate::Prop::named($name) }
+   };
+}
+
 /// A prop or event key. Keys past [`PROPS`] decode from the wire and have no
 /// name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -416,6 +425,14 @@ pub fn encode(ops: &[Op]) -> Vec<u8> {
       }
    }
    out
+}
+
+#[must_use]
+pub fn get_prop(props: &Props, key: Prop) -> Option<&Value> {
+   props
+      .iter()
+      .find(|(existing, _)| *existing == key)
+      .map(|(_, value)| value)
 }
 
 /// Sets `key` to `value` in `props`, or removes it when `value` is `None`.

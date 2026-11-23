@@ -1,6 +1,9 @@
 //! The code editor page and its syntax colors.
 
-use phoenix_ui::Prop;
+use phoenix_ui::{
+   Prop,
+   prop,
+};
 use phoenix_wire::Value;
 
 use crate::{
@@ -81,13 +84,13 @@ pub fn code_sections(index: usize, name: &str, source: Option<&str>) -> Vec<Tree
       .and_then(|frame| frame.kids.first_mut())
       .and_then(|row| row.kids.first_mut())
    {
-      input.set(Prop::named("multiline"), Some(Value::Bool(true)));
+      input.set(prop!("multiline"), Some(Value::Bool(true)));
       input.set(Prop::FONT_FAMILY, Some(text("monospace")));
       input.set(Prop::FONT_SIZE, Some(Value::F64(12.0)));
-      input.set(Prop::named("minHeight"), Some(Value::F64(320.0)));
+      input.set(prop!("minHeight"), Some(Value::F64(320.0)));
       input.set(Prop::RETURN_KEY, None);
       input.set(Prop::PLACEHOLDER, None);
-      input.set(Prop::named("valueSpans"), Some(code_spans(source)));
+      input.set(prop!("valueSpans"), Some(code_spans(source)));
    }
    vec![
       section(&format!("{name}.js"), vec![editor]),

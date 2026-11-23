@@ -8,6 +8,7 @@ use phoenix_ui::{
       self,
       Spring,
    },
+   prop,
    templates,
 };
 use phoenix_wire::Value;
@@ -192,7 +193,6 @@ impl Settings {
          .filter(|(_, slot)| *slot == Slot::Input(field))
          .map(|(id, _)| id)
          .collect::<Vec<i32>>();
-      let key = |name| Prop::named(name).key();
       inputs
          .into_iter()
          .map(|id| {
@@ -200,12 +200,12 @@ impl Settings {
             Op::Update {
                id,
                props: vec![(
-                  Prop::named("forceValue"),
+                  prop!("forceValue"),
                   Value::Obj(vec![
-                     (key("seq"), Value::I64(self.force_seq)),
-                     (key("text"), text("")),
-                     (key("start"), Value::I32(0)),
-                     (key("end"), Value::I32(0)),
+                     (prop!("seq").key(), Value::I64(self.force_seq)),
+                     (prop!("text").key(), text("")),
+                     (prop!("start").key(), Value::I32(0)),
+                     (prop!("end").key(), Value::I32(0)),
                   ]),
                )],
             }
@@ -224,7 +224,7 @@ impl Settings {
                      .map(|(id, _)| {
                         Op::Update {
                            id,
-                           props: vec![(Prop::named("valueSpans"), code_spans(&draft))],
+                           props: vec![(prop!("valueSpans"), code_spans(&draft))],
                         }
                      })
                      .collect()

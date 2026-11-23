@@ -15,7 +15,9 @@
 use phoenix_ui::{
    Node,
    Prop,
+   Props,
    ViewKind,
+   prop,
    templates,
 };
 use phoenix_wire::Value;
@@ -52,26 +54,27 @@ impl Palette {
 }
 
 /// Props Phoenix animates a tab with, which a plugin tab must not share.
-const ANIMATED: [&str; 3] = ["viewMotion", "worklet", "portalSlot"];
+const ANIMATED: [Prop; 3] = [
+   Prop::named("viewMotion"),
+   Prop::named("worklet"),
+   Prop::named("portalSlot"),
+];
 
 fn str(text: &str) -> Value {
    Value::Str(text.to_owned())
 }
 
-fn node(kind: ViewKind, props: Vec<(&str, Value)>) -> Draft {
+const fn node(kind: ViewKind, props: Props) -> Draft {
    Draft {
       kind,
-      props: props
-         .into_iter()
-         .map(|(key, value)| (Prop::named(key), value))
-         .collect(),
+      props,
       kids: Vec::new(),
       press: None,
       src: None,
    }
 }
 
-fn view(props: Vec<(&str, Value)>, kids: Vec<Draft>) -> Draft {
+fn view(props: Props, kids: Vec<Draft>) -> Draft {
    let mut view = node(ViewKind::View, props);
    view.kids = kids;
    view
@@ -79,12 +82,12 @@ fn view(props: Vec<(&str, Value)>, kids: Vec<Draft>) -> Draft {
 
 fn label(text: &str, size: f64, weight: i32, color: i64) -> Draft {
    node(ViewKind::Text, vec![
-      ("text", str(text)),
-      ("color", Value::I64(color)),
-      ("fontSize", Value::F64(size)),
-      ("fontWeight", Value::I32(weight)),
-      ("lineHeight", Value::F64(size + 4.0)),
-      ("lineHeightExact", Value::Bool(true)),
+      (prop!("text"), str(text)),
+      (prop!("color"), Value::I64(color)),
+      (prop!("fontSize"), Value::F64(size)),
+      (prop!("fontWeight"), Value::I32(weight)),
+      (prop!("lineHeight"), Value::F64(size + 4.0)),
+      (prop!("lineHeightExact"), Value::Bool(true)),
    ])
 }
 
@@ -100,12 +103,9 @@ fn pressable(mut draft: Draft, press: Handler) -> Draft {
 pub fn tab(template: &Node, contribution: &Contribution) -> Draft {
    let mut tab = Draft::from_node(template);
    for key in ANIMATED {
-      tab.set(Prop::named(key), None);
+      tab.set(key, None);
    }
-   tab.set(
-      Prop::named("accessibilitySelected"),
-      Some(Value::Bool(false)),
-   );
+   tab.set(prop!("accessibilitySelected"), Some(Value::Bool(false)));
    tab.set(Prop::ACCESSIBILITY_LABEL, Some(str(&contribution.label)));
    tab.set(
       Prop::ACCESSIBILITY_ID,
@@ -114,8 +114,8 @@ pub fn tab(template: &Node, contribution: &Contribution) -> Draft {
          contribution.plugin, contribution.id
       ))),
    );
-   tab.set(Prop::named("direction"), Some(str("column")));
-   tab.set(Prop::named("align"), Some(str("center")));
+   tab.set(prop!("direction"), Some(str("column")));
+   tab.set(prop!("align"), Some(str("center")));
    tab.set(Prop::PADDING, None);
    let mut tab = pressable(tab, Handler::Tab {
       contribution: contribution.id,
@@ -124,19 +124,19 @@ pub fn tab(template: &Node, contribution: &Contribution) -> Draft {
    inner.kids.truncate(1);
    if let Some(text) = inner.kids.first_mut() {
       for key in ANIMATED {
-         text.set(Prop::named(key), None);
+         text.set(key, None);
       }
-      text.set(Prop::named("spans"), None);
+      text.set(prop!("spans"), None);
       text.set(Prop::TEXT, Some(str(&contribution.label)));
    }
    let bar = view(
       vec![
-         ("width", str("fill")),
-         ("height", Value::F64(2.0)),
-         ("margin", Value::Rect([0.0, 12.0, 0.0, 0.0])),
-         ("radiusTopLeft", Value::F64(4.0)),
-         ("radiusTopRight", Value::F64(4.0)),
-         ("background", Value::I64(0)),
+         (prop!("width"), str("fill")),
+         (prop!("height"), Value::F64(2.0)),
+         (prop!("margin"), Value::Rect([0.0, 12.0, 0.0, 0.0])),
+         (prop!("radiusTopLeft"), Value::F64(4.0)),
+         (prop!("radiusTopRight"), Value::F64(4.0)),
+         (prop!("background"), Value::I64(0)),
       ],
       Vec::new(),
    );
@@ -171,9 +171,9 @@ pub fn page(
       if entry && after_entry {
          kids.push(view(
             vec![
-               ("width", str("fill")),
-               ("height", Value::F64(1.0)),
-               ("background", colors.wash(0x26)),
+               (prop!("width"), str("fill")),
+               (prop!("height"), Value::F64(1.0)),
+               (prop!("background"), colors.wash(0x26)),
             ],
             Vec::new(),
          ));
@@ -183,12 +183,12 @@ pub fn page(
    }
    let mut content = view(
       vec![
-         ("direction", str("column")),
-         ("width", str("fill")),
-         ("padding", Value::Rect([16.0, 16.0, 16.0, 16.0])),
-         ("gap", Value::F64(12.0)),
-         ("align", str("stretch")),
-         ("on", Value::Arr(vec![str("layout")])),
+         (prop!("direction"), str("column")),
+         (prop!("width"), str("fill")),
+         (prop!("padding"), Value::Rect([16.0, 16.0, 16.0, 16.0])),
+         (prop!("gap"), Value::F64(12.0)),
+         (prop!("align"), str("stretch")),
+         (prop!("on"), Value::Arr(vec![str("layout")])),
       ],
       kids,
    );
@@ -196,19 +196,19 @@ pub fn page(
    // Like Phoenix's pages: a locked scroll lets the content take its full
    // height, which it reports, instead of being squeezed to the pager's.
    let mut scroll = node(ViewKind::Scroll, vec![
-      ("maxHeight", str("100%")),
-      ("scrollIndicator", Value::Bool(false)),
-      ("bounces", Value::Bool(false)),
-      ("scrollLocked", Value::Bool(true)),
-      ("keyboardShouldPersistTaps", str("handled")),
+      (prop!("maxHeight"), str("100%")),
+      (prop!("scrollIndicator"), Value::Bool(false)),
+      (prop!("bounces"), Value::Bool(false)),
+      (prop!("scrollLocked"), Value::Bool(true)),
+      (prop!("keyboardShouldPersistTaps"), str("handled")),
    ]);
    scroll.kids = vec![content];
    view(
       vec![
-         ("direction", str("column")),
-         ("width", width.unwrap_or_else(|| str("fill"))),
-         ("height", str("fill")),
-         ("align", str("stretch")),
+         (prop!("direction"), str("column")),
+         (prop!("width"), width.unwrap_or_else(|| str("fill"))),
+         (prop!("height"), str("fill")),
+         (prop!("align"), str("stretch")),
       ],
       vec![scroll],
    )
@@ -232,9 +232,9 @@ fn draw(block: Block, contribution: ContributionId, colors: Palette) -> Draft {
          kids.push(label(&text, 14.0, 400, color.unwrap_or(text_color)));
          view(
             vec![
-               ("direction", str("column")),
-               ("gap", Value::F64(4.0)),
-               ("align", str("stretch")),
+               (prop!("direction"), str("column")),
+               (prop!("gap"), Value::F64(4.0)),
+               (prop!("align"), str("stretch")),
             ],
             kids,
          )
@@ -259,7 +259,7 @@ fn draw(block: Block, contribution: ContributionId, colors: Palette) -> Draft {
             .into_iter()
             .filter_map(|action| {
                let mut button = button(&action.label, action.danger, colors);
-               button.set(Prop::named("flex"), Some(Value::F64(1.0)));
+               button.set(prop!("flex"), Some(Value::F64(1.0)));
                Some(pressable(
                   button,
                   block_handler(contribution, action.handler?),
@@ -267,7 +267,10 @@ fn draw(block: Block, contribution: ContributionId, colors: Palette) -> Draft {
             })
             .collect();
          view(
-            vec![("direction", str("row")), ("gap", Value::F64(8.0))],
+            vec![
+               (prop!("direction"), str("row")),
+               (prop!("gap"), Value::F64(8.0)),
+            ],
             kids,
          )
       },
@@ -298,8 +301,8 @@ fn entry_head(
    // Like Vencord's: avatar, then name, badges and date over the text.
    let mut head = vec![{
       let mut name = label(title, 15.0, 600, colors.text);
-      name.set(Prop::named("maxLines"), Some(Value::I32(1)));
-      name.set(Prop::named("shrink"), Some(Value::Bool(true)));
+      name.set(prop!("maxLines"), Some(Value::I32(1)));
+      name.set(prop!("shrink"), Some(Value::Bool(true)));
       name
    }];
    for badge in badges {
@@ -310,9 +313,9 @@ fn entry_head(
    }
    view(
       vec![
-         ("direction", str("row")),
-         ("gap", Value::F64(6.0)),
-         ("align", str("center")),
+         (prop!("direction"), str("row")),
+         (prop!("gap"), Value::F64(6.0)),
+         (prop!("align"), str("center")),
       ],
       head,
    )
@@ -329,10 +332,10 @@ fn entry_body(
    let mut kids = vec![head, rich(text, colors.text)];
    for uri in images {
       let mut picture = image(&uri, 0.0, 8.0);
-      picture.set(Prop::named("width"), Some(Value::F64(220.0)));
-      picture.set(Prop::named("height"), Some(Value::F64(160.0)));
-      picture.set(Prop::named("scale"), Some(str("fit")));
-      picture.set(Prop::named("align"), Some(str("start")));
+      picture.set(prop!("width"), Some(Value::F64(220.0)));
+      picture.set(prop!("height"), Some(Value::F64(160.0)));
+      picture.set(prop!("scale"), Some(str("fit")));
+      picture.set(prop!("align"), Some(str("start")));
       kids.push(picture);
    }
    if !actions.is_empty() {
@@ -351,19 +354,19 @@ fn entry_body(
          .collect();
       kids.push(view(
          vec![
-            ("direction", str("row")),
-            ("gap", Value::F64(14.0)),
-            ("align", str("center")),
+            (prop!("direction"), str("row")),
+            (prop!("gap"), Value::F64(14.0)),
+            (prop!("align"), str("center")),
          ],
          row,
       ));
    }
    view(
       vec![
-         ("direction", str("column")),
-         ("flex", Value::F64(1.0)),
-         ("gap", Value::F64(4.0)),
-         ("align", str("stretch")),
+         (prop!("direction"), str("column")),
+         (prop!("flex"), Value::F64(1.0)),
+         (prop!("gap"), Value::F64(4.0)),
+         (prop!("align"), str("stretch")),
       ],
       kids,
    )
@@ -389,19 +392,19 @@ fn entry_card(
          .collect();
       row.push(view(
          vec![
-            ("direction", str("column")),
-            ("align", str("center")),
-            ("gap", Value::F64(2.0)),
+            (prop!("direction"), str("column")),
+            (prop!("align"), str("center")),
+            (prop!("gap"), Value::F64(2.0)),
          ],
          column,
       ));
    }
    let mut card = view(
       vec![
-         ("direction", str("row")),
-         ("padding", Value::Rect([0.0, 4.0, 0.0, 4.0])),
-         ("gap", Value::F64(12.0)),
-         ("align", str("start")),
+         (prop!("direction"), str("row")),
+         (prop!("padding"), Value::Rect([0.0, 4.0, 0.0, 4.0])),
+         (prop!("gap"), Value::F64(12.0)),
+         (prop!("align"), str("start")),
       ],
       row,
    );
@@ -435,13 +438,13 @@ fn action_label(
 }
 
 fn image(uri: &str, size: f64, radius: f64) -> Draft {
-   let mut props = vec![("uri", str(uri))];
+   let mut props = vec![(prop!("uri"), str(uri))];
    if size > 0.0 {
-      props.push(("width", Value::F64(size)));
-      props.push(("height", Value::F64(size)));
+      props.push((prop!("width"), Value::F64(size)));
+      props.push((prop!("height"), Value::F64(size)));
    }
    if radius > 0.0 {
-      props.push(("radius", Value::F64(radius)));
+      props.push((prop!("radius"), Value::F64(radius)));
    }
    node(ViewKind::Image, props)
 }
@@ -465,7 +468,10 @@ fn rich(text: &str, color: i64) -> Draft {
       }
    }
    let mut flow = view(
-      vec![("direction", str("row")), ("align", str("center"))],
+      vec![
+         (prop!("direction"), str("row")),
+         (prop!("align"), str("center")),
+      ],
       kids,
    );
    flow.kind = ViewKind::Other("flow".to_owned());
@@ -539,17 +545,17 @@ mod tests {
 fn button(text: &str, danger: bool, colors: Palette) -> Draft {
    view(
       vec![
-         ("direction", str("row")),
-         ("padding", Value::Rect([16.0, 10.0, 16.0, 10.0])),
-         ("minHeight", Value::F64(40.0)),
-         ("align", str("center")),
-         ("justify", str("center")),
-         ("background", colors.wash(0x1F)),
-         ("activeBackground", colors.wash(0x33)),
-         ("radius", Value::F64(8.0)),
-         ("borderColor", colors.wash(0x26)),
-         ("borderWidth", Value::F64(1.0)),
-         ("accessibilityLabel", str(text)),
+         (prop!("direction"), str("row")),
+         (prop!("padding"), Value::Rect([16.0, 10.0, 16.0, 10.0])),
+         (prop!("minHeight"), Value::F64(40.0)),
+         (prop!("align"), str("center")),
+         (prop!("justify"), str("center")),
+         (prop!("background"), colors.wash(0x1F)),
+         (prop!("activeBackground"), colors.wash(0x33)),
+         (prop!("radius"), Value::F64(8.0)),
+         (prop!("borderColor"), colors.wash(0x26)),
+         (prop!("borderWidth"), Value::F64(1.0)),
+         (prop!("accessibilityLabel"), str(text)),
       ],
       vec![label(
          text,
@@ -585,14 +591,11 @@ fn input(
       input.set(Prop::VALUE, Some(str("")));
       input.set(Prop::RETURN_KEY, Some(str("send")));
       input.set(Prop::COLOR, Some(Value::I64(colors.text)));
-      input.set(
-         Prop::named("placeholderColor"),
-         Some(Value::I64(colors.muted)),
-      );
+      input.set(prop!("placeholderColor"), Some(Value::I64(colors.muted)));
       input.set(Prop::ROLE, None);
       input.set(Prop::ACCESSIBILITY_ID, None);
-      input.set(Prop::named("autoCapitalize"), Some(str("sentences")));
-      input.set(Prop::named("autoCorrect"), Some(Value::Bool(true)));
+      input.set(prop!("autoCapitalize"), Some(str("sentences")));
+      input.set(prop!("autoCorrect"), Some(Value::Bool(true)));
       input.set(
          Prop::ON,
          Some(Value::Arr(vec![str("changeText"), str("submit")])),
@@ -607,12 +610,12 @@ fn input(
       icon.set(Prop::TINT, Some(Value::I64(colors.text)));
       let wrap = view(
          vec![
-            ("padding", Value::Rect([8.0, 8.0, 10.0, 8.0])),
-            ("align", str("center")),
-            ("justify", str("center")),
-            ("radius", Value::F64(16.0)),
-            ("activeBackground", colors.wash(0x33)),
-            ("accessibilityLabel", str("Send")),
+            (prop!("padding"), Value::Rect([8.0, 8.0, 10.0, 8.0])),
+            (prop!("align"), str("center")),
+            (prop!("justify"), str("center")),
+            (prop!("radius"), Value::F64(16.0)),
+            (prop!("activeBackground"), colors.wash(0x33)),
+            (prop!("accessibilityLabel"), str("Send")),
          ],
          vec![icon],
       );

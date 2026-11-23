@@ -19,10 +19,8 @@ use phoenix_ui::{
    ViewKind,
    decode,
    encode,
-   mirror::{
-      Created,
-      prop,
-   },
+   get_prop,
+   mirror::Created,
    set_prop,
 };
 use phoenix_wire::Value;
@@ -300,7 +298,7 @@ impl Patches {
       }
       for op in ops {
          if let Op::Update { id, props } = op
-            && let Some(height) = prop(props, Prop::HEIGHT)
+            && let Some(height) = get_prop(props, Prop::HEIGHT)
             && self
                .anchors
                .get(&Target::Tab)
@@ -370,7 +368,7 @@ impl Patches {
             self.anchors.entry(target).or_default().insert(id);
             if target == Target::Tab
                && let Some((_, props)) = created.get(&id)
-               && let Some(height) = prop(props, Prop::HEIGHT)
+               && let Some(height) = get_prop(props, Prop::HEIGHT)
             {
                self.rust_heights.insert(id, height.clone());
             }
@@ -389,7 +387,7 @@ impl Patches {
       let unhides_hidden = !self.hidden_nodes.is_empty()
          && ops.iter().any(|op| {
             matches!(op, Op::Update { id, props }
-               if self.hidden_nodes.contains(id) && prop(props, HIDDEN).is_some())
+               if self.hidden_nodes.contains(id) && get_prop(props, HIDDEN).is_some())
          });
       let tabbed = ops.iter().any(|op| {
          matches!(op, Op::Update { id, .. }
@@ -402,7 +400,7 @@ impl Patches {
       let updates_list_on = !self.patched_lists.is_empty()
          && ops.iter().any(|op| {
             matches!(op, Op::Create { id, props, .. } | Op::Update { id, props }
-               if self.patched_lists.contains_key(id) && prop(props, Prop::ON).is_some())
+               if self.patched_lists.contains_key(id) && get_prop(props, Prop::ON).is_some())
          });
       unhides_hidden || updates_list_on || rewrites_children || recolors || tabbed
    }
@@ -423,7 +421,7 @@ impl Patches {
             id,
             kind,
             mut props,
-         } if self.patched_lists.contains_key(&id) && prop(&props, Prop::ON).is_some() => {
+         } if self.patched_lists.contains_key(&id) && get_prop(&props, Prop::ON).is_some() => {
             let (extra_props, add_on) = self.list_patch_for(id);
             apply_prop_patch(
                &mut props,
@@ -435,7 +433,7 @@ impl Patches {
             out.push(Op::Create { id, kind, props });
          },
          Op::Update { id, mut props }
-            if self.patched_lists.contains_key(&id) && prop(&props, Prop::ON).is_some() =>
+            if self.patched_lists.contains_key(&id) && get_prop(&props, Prop::ON).is_some() =>
          {
             let (extra_props, add_on) = self.list_patch_for(id);
             apply_prop_patch(
@@ -450,7 +448,7 @@ impl Patches {
          Op::Update { id, mut props }
             if self.shown.contains_key(&id) || self.static_tabs.contains(&id) =>
          {
-            if let Some(page) = prop(&props, PAGE) {
+            if let Some(page) = get_prop(&props, PAGE) {
                // Rust opened one of its tabs.
                if self.shown.contains_key(&id) {
                   splice.left.push(id);
@@ -461,7 +459,7 @@ impl Patches {
                   .and_then(|index| usize::try_from(index).ok());
                splice.recolor.push((id, index));
             } else if self.shown.contains_key(&id)
-               && prop(&props, Prop::HEIGHT).is_some()
+               && get_prop(&props, Prop::HEIGHT).is_some()
                && let Some(height) = self
                   .shown
                   .get(&id)
@@ -473,7 +471,7 @@ impl Patches {
             out.push(Op::Update { id, props });
          },
          Op::Update { id, mut props }
-            if self.hidden_nodes.contains(&id) && prop(&props, HIDDEN).is_some() =>
+            if self.hidden_nodes.contains(&id) && get_prop(&props, HIDDEN).is_some() =>
          {
             set_prop(&mut props, HIDDEN, Some(Value::Bool(true)));
             out.push(Op::Update { id, props });
