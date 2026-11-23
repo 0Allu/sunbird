@@ -1,6 +1,13 @@
 //! `phoenix.discord.onRequest` and `onResponse`, hooks on Phoenix's own API
 //! traffic.
 
+use std::sync::{
+   Arc,
+   Mutex,
+   PoisonError,
+   mpsc::Sender,
+};
+
 use rquickjs::{
    CatchResultExt,
    Ctx,
@@ -106,11 +113,17 @@ impl Engine {
       path: String,
       status: i32,
       body: Vec<u8>,
-      done: std::sync::mpsc::Sender<Vec<u8>>,
+      done: Sender<Vec<u8>>,
    ) {
-      self.context.with(|ctx| {
-         run_response_chain(&ctx, matched, method, path, status, body, done);
-      });
+      let pending = Pending {
+         remaining: matched,
+         method,
+         path,
+         status,
+         body,
+         done,
+      };
+      self.context.with(|ctx| run_response_chain(&ctx, pending));
       drain(&self.runtime);
    }
 }
@@ -140,20 +153,27 @@ fn extract_hook_body<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> Option<Vec<u8>>
       .map(String::into_bytes)
 }
 
+/// What the rest of a response chain needs. A promise's fulfil and reject
+/// handlers share one, and whichever runs first takes it.
+struct Pending {
+   remaining: Vec<u64>,
+   method:    String,
+   path:      String,
+   status:    i32,
+   body:      Vec<u8>,
+   done:      Sender<Vec<u8>>,
+}
+
+fn take_pending(shared: &Mutex<Option<Pending>>) -> Option<Pending> {
+   shared.lock().unwrap_or_else(PoisonError::into_inner).take()
+}
+
 /// Chains matching `onResponse` hooks sequentially, supporting both synchronous
 /// and Promise-returning handlers without blocking Phoenix's `wasm-guest`
 /// thread.
-fn run_response_chain<'js>(
-   ctx: &Ctx<'js>,
-   mut remaining: Vec<u64>,
-   method: String,
-   path: String,
-   status: i32,
-   mut body: Vec<u8>,
-   done: std::sync::mpsc::Sender<Vec<u8>>,
-) {
-   while !remaining.is_empty() {
-      let hook_id = remaining.remove(0);
+fn run_response_chain<'js>(ctx: &Ctx<'js>, mut pending: Pending) {
+   while !pending.remaining.is_empty() {
+      let hook_id = pending.remaining.remove(0);
       let hook = ctx.userdata::<Registry<'js>>().and_then(|registry| {
          let map = registry.response_hooks.borrow();
          let (plugin, function) = map.get(&hook_id)?;
@@ -162,13 +182,13 @@ fn run_response_chain<'js>(
       let Some((plugin, function)) = hook else {
          continue;
       };
-      let body_str = String::from_utf8_lossy(&body).into_owned();
+      let body_str = String::from_utf8_lossy(&pending.body).into_owned();
       let Ok(res_obj) = Object::new(ctx.clone()) else {
          break;
       };
-      let _ = res_obj.set("method", method.as_str());
-      let _ = res_obj.set("path", path.as_str());
-      let _ = res_obj.set("status", status);
+      let _ = res_obj.set("method", pending.method.as_str());
+      let _ = res_obj.set("path", pending.path.as_str());
+      let _ = res_obj.set("status", pending.status);
       let _ = res_obj.set("body", body_str.as_str());
       if let Ok(json_fn) = json_parser_fn(ctx, body_str) {
          let _ = res_obj.set("json", json_fn);
@@ -182,59 +202,29 @@ fn run_response_chain<'js>(
       };
       let Some(promise) = result.as_promise() else {
          if let Some(next_body) = extract_hook_body(ctx, &result) {
-            body = next_body;
+            pending.body = next_body;
          }
          continue;
       };
-      let shared_done = std::sync::Arc::new(std::sync::Mutex::new(Some(done)));
-      let ok_done = std::sync::Arc::clone(&shared_done);
-      let ok_rem = remaining.clone();
-      let ok_method = method.clone();
-      let ok_path = path.clone();
-      let ok_body = body.clone();
+
+      let shared = Arc::new(Mutex::new(Some(pending)));
+      let ok_shared = Arc::clone(&shared);
       let ok = Function::new(ctx.clone(), move |value: Value<'_>| {
-         let Some(sender) = ok_done
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-         else {
+         let Some(mut rest) = take_pending(&ok_shared) else {
             return;
          };
-         let next_body = extract_hook_body(value.ctx(), &value).unwrap_or_else(|| ok_body.clone());
-         run_response_chain(
-            value.ctx(),
-            ok_rem.clone(),
-            ok_method.clone(),
-            ok_path.clone(),
-            status,
-            next_body,
-            sender,
-         );
+         if let Some(next_body) = extract_hook_body(value.ctx(), &value) {
+            rest.body = next_body;
+         }
+         run_response_chain(value.ctx(), rest);
       });
-      let err_done = std::sync::Arc::clone(&shared_done);
+      let err_shared = Arc::clone(&shared);
       let err_plugin = plugin.clone();
-      let err_rem = remaining;
-      let err_method = method;
-      let err_path = path;
-      let err_body = body;
       let err_fn = Function::new(ctx.clone(), move |reason: Value<'_>| {
          log::error!("[{err_plugin}] onResponse: {reason:?}");
-         let Some(sender) = err_done
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-         else {
-            return;
-         };
-         run_response_chain(
-            reason.ctx(),
-            err_rem.clone(),
-            err_method.clone(),
-            err_path.clone(),
-            status,
-            err_body.clone(),
-            sender,
-         );
+         if let Some(rest) = take_pending(&err_shared) {
+            run_response_chain(reason.ctx(), rest);
+         }
       });
       let attach = (|| -> rquickjs::Result<()> {
          let then = promise.then()?;
@@ -244,14 +234,11 @@ fn run_response_chain<'js>(
          log::error!("[{plugin}] onResponse promise: {err}");
          // Dropping the sender causes `run_response_hooks` to deliver the
          // original frame.
-         let _ = shared_done
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
+         drop(take_pending(&shared));
       }
       return;
    }
-   let _ = done.send(body);
+   let _ = pending.done.send(pending.body);
 }
 
 pub fn add_discord_hooks<'js>(
