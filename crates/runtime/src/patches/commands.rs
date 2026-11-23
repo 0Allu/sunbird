@@ -30,7 +30,7 @@ use crate::{
       SlotKind,
       mirror::Created,
       patches,
-      press_context,
+      worker::press_context,
    },
 };
 
@@ -106,6 +106,19 @@ impl Patches {
          ids.extend(slot.all);
       }
       ids
+   }
+
+   pub fn suggested(&mut self) -> Vec<Op> {
+      let mut out = Vec::new();
+      self.suggest(&mut out);
+      out
+   }
+
+   pub fn pick(&mut self, input: i32, name: &str) -> Vec<Op> {
+      let mut out = vec![force_text(input, &format!("/{name} "))];
+      self.mirror.set_composer_text(input, format!("/{name} "));
+      self.suggest(&mut out);
+      out
    }
 
    /// Brings the plugin rows in line with the message box. Appends ops to

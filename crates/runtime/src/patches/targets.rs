@@ -13,6 +13,7 @@ use crate::patches::{
    Outcome,
    Place,
    Rendered,
+   SheetBody,
    mirror::{
       self,
       Created,
@@ -333,9 +334,9 @@ impl Templates {
    pub(super) fn menu(
       &self,
       title: Option<&str>,
-      body: Option<&super::SheetBody>,
+      body: Option<&SheetBody>,
       rows: Vec<MenuRow>,
-      dismiss: Handler,
+      dismiss: &Handler,
    ) -> Option<Draft> {
       let chain = self.sheet.as_ref()?;
       let mut kids = Vec::new();

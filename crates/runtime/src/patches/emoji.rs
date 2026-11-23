@@ -4,22 +4,24 @@
 
 use phoenix_ui::Op;
 
-use super::{
-   Patches,
-   Place,
+use crate::{
    bridge,
-   commands,
-   patches,
-   press_context,
+   patches::{
+      Patches,
+      Place,
+      commands,
+      patches,
+      worker::press_context,
+   },
 };
 
 /// Puts what an `onEmojiPick` handler returned at the end of the message box,
 /// or gives Phoenix the press back when none returned anything.
-pub(super) fn pick(input: i32, id: &str, text: String, frame: Vec<u8>) -> Vec<Op> {
+pub(super) fn pick(input: i32, id: &str, text: String, frame: &[u8]) -> Vec<Op> {
    let context = press_context(&Place::Screen);
    let Some(insert) = crate::engine().and_then(|engine| engine.pick_emoji(id, &context)) else {
-      patches().resent.push(frame.clone());
-      if !bridge::inject(&frame) {
+      patches().resent.push(frame.to_owned());
+      if !bridge::inject(frame) {
          patches().resent.retain(|sent| *sent != frame);
          log::warn!("patches: the emoji picker did not take the press back");
       }

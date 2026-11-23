@@ -22,7 +22,9 @@ use phoenix_wire::Value;
 
 use crate::patches::{
    Block,
+   BlockAction,
    Contribution,
+   ContributionId,
    Draft,
    Handler,
    Outcome,
@@ -44,7 +46,7 @@ pub struct Palette {
 
 impl Palette {
    /// `muted` at `alpha`, for fills that work on light and dark themes.
-   fn wash(self, alpha: i64) -> Value {
+   const fn wash(self, alpha: i64) -> Value {
       Value::I64((self.muted & 0x00FF_FFFF) | (alpha << 24))
    }
 }
@@ -212,14 +214,14 @@ pub fn page(
    )
 }
 
-fn block_handler(contribution: crate::patches::ContributionId, index: u32) -> Handler {
+const fn block_handler(contribution: ContributionId, index: u32) -> Handler {
    Handler::Block {
       contribution,
       index,
    }
 }
 
-fn draw(block: Block, contribution: crate::patches::ContributionId, colors: Palette) -> Draft {
+fn draw(block: Block, contribution: ContributionId, colors: Palette) -> Draft {
    let (text_color, muted) = (colors.text, colors.muted);
    match block {
       Block::Text { title, text, color } => {
@@ -248,117 +250,9 @@ fn draw(block: Block, contribution: crate::patches::ContributionId, colors: Pale
          side,
          hold,
       } => {
-         // Like Vencord's: avatar, then name, badges and date over the text.
-         let mut head = vec![{
-            let mut name = label(&title, 15.0, 600, text_color);
-            name.set(Prop::named("maxLines"), Some(Value::I32(1)));
-            name.set(Prop::named("shrink"), Some(Value::Bool(true)));
-            name
-         }];
-         for badge in badges {
-            head.push(image(&badge, 16.0, 0.0));
-         }
-         if let Some(subtitle) = subtitle {
-            head.push(label(&subtitle, 12.0, 500, muted));
-         }
-         let mut kids = vec![
-            view(
-               vec![
-                  ("direction", str("row")),
-                  ("gap", Value::F64(6.0)),
-                  ("align", str("center")),
-               ],
-               head,
-            ),
-            rich(&text, text_color),
-         ];
-         for uri in images {
-            let mut picture = image(&uri, 0.0, 8.0);
-            picture.set(Prop::named("width"), Some(Value::F64(220.0)));
-            picture.set(Prop::named("height"), Some(Value::F64(160.0)));
-            picture.set(Prop::named("scale"), Some(str("fit")));
-            picture.set(Prop::named("align"), Some(str("start")));
-            kids.push(picture);
-         }
-         if !actions.is_empty() {
-            let row = actions
-               .into_iter()
-               .map(|action| {
-                  let color = action
-                     .color
-                     .unwrap_or(if action.danger { DANGER } else { muted });
-                  let mut piece = label(&action.label, 13.0, 600, color);
-                  piece.set(Prop::PADDING, Some(Value::Rect([2.0, 4.0, 2.0, 4.0])));
-                  match action.handler {
-                     Some(handler) => pressable(piece, block_handler(contribution, handler)),
-                     None => piece,
-                  }
-               })
-               .collect();
-            kids.push(view(
-               vec![
-                  ("direction", str("row")),
-                  ("gap", Value::F64(14.0)),
-                  ("align", str("center")),
-               ],
-               row,
-            ));
-         }
-         let body = view(
-            vec![
-               ("direction", str("column")),
-               ("flex", Value::F64(1.0)),
-               ("gap", Value::F64(4.0)),
-               ("align", str("stretch")),
-            ],
-            kids,
-         );
-         let mut row = Vec::new();
-         if let Some(avatar) = avatar {
-            row.push(image(&avatar, 40.0, 20.0));
-         }
-         row.push(body);
-         if !side.is_empty() {
-            let column = side
-               .into_iter()
-               .map(|action| {
-                  let color = action
-                     .color
-                     .unwrap_or(if action.danger { DANGER } else { muted });
-                  let mut piece = label(&action.label, 14.0, 700, color);
-                  piece.set(Prop::PADDING, Some(Value::Rect([8.0, 2.0, 8.0, 2.0])));
-                  match action.handler {
-                     Some(handler) => pressable(piece, block_handler(contribution, handler)),
-                     None => piece,
-                  }
-               })
-               .collect();
-            row.push(view(
-               vec![
-                  ("direction", str("column")),
-                  ("align", str("center")),
-                  ("gap", Value::F64(2.0)),
-               ],
-               column,
-            ));
-         }
-         let mut card = view(
-            vec![
-               ("direction", str("row")),
-               ("padding", Value::Rect([0.0, 4.0, 0.0, 4.0])),
-               ("gap", Value::F64(12.0)),
-               ("align", str("start")),
-            ],
-            row,
-         );
-         if let Some(index) = hold {
-            card.set(Prop::ON, Some(Value::Arr(vec![str("longPress")])));
-            card.press = Some(Handler::Hold {
-               contribution,
-               index,
-            });
-         }
-         card
+         let head = entry_head(&title, badges, subtitle, colors);
+         let body = entry_body(head, &text, images, &actions, contribution, colors);
+         entry_card(avatar, body, &side, hold, contribution, muted)
       },
       Block::Buttons(buttons) => {
          let kids = buttons
@@ -392,6 +286,151 @@ fn draw(block: Block, contribution: crate::patches::ContributionId, colors: Pale
          handler,
          send,
       } => input(&placeholder, contribution, handler, send, colors),
+   }
+}
+
+fn entry_head(
+   title: &str,
+   badges: Vec<String>,
+   subtitle: Option<String>,
+   colors: Palette,
+) -> Draft {
+   // Like Vencord's: avatar, then name, badges and date over the text.
+   let mut head = vec![{
+      let mut name = label(title, 15.0, 600, colors.text);
+      name.set(Prop::named("maxLines"), Some(Value::I32(1)));
+      name.set(Prop::named("shrink"), Some(Value::Bool(true)));
+      name
+   }];
+   for badge in badges {
+      head.push(image(&badge, 16.0, 0.0));
+   }
+   if let Some(subtitle) = subtitle {
+      head.push(label(&subtitle, 12.0, 500, colors.muted));
+   }
+   view(
+      vec![
+         ("direction", str("row")),
+         ("gap", Value::F64(6.0)),
+         ("align", str("center")),
+      ],
+      head,
+   )
+}
+
+fn entry_body(
+   head: Draft,
+   text: &str,
+   images: Vec<String>,
+   actions: &[BlockAction],
+   contribution: ContributionId,
+   colors: Palette,
+) -> Draft {
+   let mut kids = vec![head, rich(text, colors.text)];
+   for uri in images {
+      let mut picture = image(&uri, 0.0, 8.0);
+      picture.set(Prop::named("width"), Some(Value::F64(220.0)));
+      picture.set(Prop::named("height"), Some(Value::F64(160.0)));
+      picture.set(Prop::named("scale"), Some(str("fit")));
+      picture.set(Prop::named("align"), Some(str("start")));
+      kids.push(picture);
+   }
+   if !actions.is_empty() {
+      let row = actions
+         .iter()
+         .map(|action| {
+            action_label(
+               action,
+               13.0,
+               600,
+               [2.0, 4.0, 2.0, 4.0],
+               contribution,
+               colors.muted,
+            )
+         })
+         .collect();
+      kids.push(view(
+         vec![
+            ("direction", str("row")),
+            ("gap", Value::F64(14.0)),
+            ("align", str("center")),
+         ],
+         row,
+      ));
+   }
+   view(
+      vec![
+         ("direction", str("column")),
+         ("flex", Value::F64(1.0)),
+         ("gap", Value::F64(4.0)),
+         ("align", str("stretch")),
+      ],
+      kids,
+   )
+}
+
+fn entry_card(
+   avatar: Option<String>,
+   body: Draft,
+   side: &[BlockAction],
+   hold: Option<u32>,
+   contribution: ContributionId,
+   muted: i64,
+) -> Draft {
+   let mut row = Vec::new();
+   if let Some(avatar) = avatar {
+      row.push(image(&avatar, 40.0, 20.0));
+   }
+   row.push(body);
+   if !side.is_empty() {
+      let column = side
+         .iter()
+         .map(|action| action_label(action, 14.0, 700, [8.0, 2.0, 8.0, 2.0], contribution, muted))
+         .collect();
+      row.push(view(
+         vec![
+            ("direction", str("column")),
+            ("align", str("center")),
+            ("gap", Value::F64(2.0)),
+         ],
+         column,
+      ));
+   }
+   let mut card = view(
+      vec![
+         ("direction", str("row")),
+         ("padding", Value::Rect([0.0, 4.0, 0.0, 4.0])),
+         ("gap", Value::F64(12.0)),
+         ("align", str("start")),
+      ],
+      row,
+   );
+   if let Some(index) = hold {
+      card.set(Prop::ON, Some(Value::Arr(vec![str("longPress")])));
+      card.press = Some(Handler::Hold {
+         contribution,
+         index,
+      });
+   }
+   card
+}
+
+fn action_label(
+   action: &BlockAction,
+   size: f64,
+   weight: i32,
+   padding: [f32; 4],
+   contribution: ContributionId,
+   muted: i64,
+) -> Draft {
+   let color = action
+      .color
+      .unwrap_or(if action.danger { DANGER } else { muted });
+   let mut piece = label(&action.label, size, weight, color);
+   piece.set(Prop::PADDING, Some(Value::Rect(padding)));
+   match action.handler {
+      Some(handler) => pressable(piece, block_handler(contribution, handler)),
+      None => piece,
    }
 }
 
@@ -461,18 +500,15 @@ fn emoji_pieces(text: &str) -> Vec<Piece> {
             )
          })
       });
-      match parsed {
-         Some((uri, after)) => {
-            if start > 0 {
-               pieces.push(Piece::Text(rest[..start].to_owned()));
-            }
-            pieces.push(Piece::Emoji(uri));
-            rest = after;
-         },
-         None => {
-            pieces.push(Piece::Text(rest[..=start].to_owned()));
-            rest = tail;
-         },
+      if let Some((uri, after)) = parsed {
+         if start > 0 {
+            pieces.push(Piece::Text(rest[..start].to_owned()));
+         }
+         pieces.push(Piece::Emoji(uri));
+         rest = after;
+      } else {
+         pieces.push(Piece::Text(rest[..=start].to_owned()));
+         rest = tail;
       }
    }
    if !rest.is_empty() {
@@ -483,7 +519,7 @@ fn emoji_pieces(text: &str) -> Vec<Piece> {
 
 #[cfg(test)]
 mod tests {
-   use super::{
+   use crate::patches::tabs::{
       Piece,
       emoji_pieces,
    };
@@ -527,7 +563,7 @@ fn button(text: &str, danger: bool, colors: Palette) -> Draft {
 /// Phoenix's search box without its icon, `root > frame > row > input`.
 fn input(
    placeholder: &str,
-   contribution: crate::patches::ContributionId,
+   contribution: ContributionId,
    index: u32,
    send: bool,
    colors: Palette,
