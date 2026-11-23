@@ -34,6 +34,7 @@ mod js;
 mod local;
 #[cfg(target_os = "android")] mod patches;
 #[cfg(target_os = "android")] mod picker;
+#[cfg(target_os = "android")] mod remote;
 #[cfg(target_os = "android")] mod settings;
 #[cfg(target_os = "android")] mod store;
 #[cfg(target_os = "android")] mod update;
@@ -186,6 +187,64 @@ fn engine() -> Option<std::sync::MutexGuard<'static, js::Engine>> {
 #[must_use]
 pub fn plugins() -> Vec<PluginInfo> {
    engine().map_or_default(|engine| engine.plugins())
+}
+
+/// Whether READY and USER_UPDATE carry the staff flag.
+#[must_use]
+pub fn staff_enabled() -> bool {
+   gateway::staff_enabled()
+}
+
+/// Turns staff unlock on or off and remembers the choice across restarts.
+pub fn set_staff_enabled(enabled: bool) {
+   gateway::set_staff_enabled(enabled);
+   if let Some(engine) = engine() {
+      engine.save_choices();
+   }
+}
+
+/// Whether the localhost debug shell (`127.0.0.1:4242`) is enabled.
+#[cfg(target_os = "android")]
+#[must_use]
+pub fn remote_shell_enabled() -> bool {
+   remote::enabled()
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn set_remote_shell_flag(enabled: bool) {
+   remote::set_flag(enabled);
+}
+
+/// Turns the localhost debug shell on or off and remembers the choice.
+#[cfg(target_os = "android")]
+pub fn set_remote_shell_enabled(enabled: bool) {
+   remote::set_enabled(enabled);
+   if let Some(engine) = engine() {
+      engine.save_choices();
+   }
+}
+
+/// Runs `code` in the plugin runtime's global scope, logs it, and returns its
+/// formatted result or error.
+pub fn evaluate_capture(code: &str) -> Result<String, String> {
+   log::info!("> {code}");
+   let result = engine().map(|engine| engine.evaluate(code));
+   match result {
+      Some(Ok(result)) => {
+         log::info!("{result}");
+         Ok(result)
+      },
+      Some(Err(err)) => {
+         let message = err.to_string();
+         log::error!("{message}");
+         Err(message)
+      },
+      None => {
+         let message = "the runtime is not running".to_owned();
+         log::error!("{message}");
+         Err(message)
+      },
+   }
 }
 
 /// Turns a plugin on or off and remembers the choice across restarts.
@@ -364,6 +423,9 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    let plugins = js::load_plugins(state, bundled)?;
    #[cfg(target_os = "android")]
    {
+      if remote_shell_enabled() {
+         remote::ensure_started();
+      }
       settings::start();
       patches::start();
    }

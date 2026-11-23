@@ -84,14 +84,33 @@ struct Loaded {
 
 type ChosenMap = BTreeMap<String, BTreeMap<String, Chosen>>;
 
+const fn default_true() -> bool {
+   true
+}
+
 /// Which plugins the user turned off and how they set each plugin's
 /// settings, kept in `home/plugins.json`.
-#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Choices<'a> {
    #[serde(default)]
-   disabled: BTreeSet<String>,
+   disabled:     BTreeSet<String>,
    #[serde(default)]
-   settings: Cow<'a, ChosenMap>,
+   settings:     Cow<'a, ChosenMap>,
+   #[serde(default = "default_true")]
+   staff:        bool,
+   #[serde(default)]
+   remote_shell: bool,
+}
+
+impl Default for Choices<'_> {
+   fn default() -> Self {
+      Self {
+         disabled:     BTreeSet::new(),
+         settings:     Cow::Owned(BTreeMap::new()),
+         staff:        true,
+         remote_shell: false,
+      }
+   }
 }
 
 /// One setting a plugin defined with `phoenix.settings.define`.
@@ -694,13 +713,17 @@ impl Engine {
       }
    }
 
-   fn save_choices(&self) {
+   pub fn save_choices(&self) {
       let disabled = self
          .plugins
          .iter()
          .filter(|(_, loaded)| !loaded.enabled)
          .map(|(name, _)| name.clone())
          .collect();
+      #[cfg(target_os = "android")]
+      let remote_shell = crate::remote_shell_enabled();
+      #[cfg(not(target_os = "android"))]
+      let remote_shell = false;
       let json = self.context.with(|ctx| {
          let registry = ctx.userdata::<Registry<'_>>();
          let chosen = registry.as_ref().map(|registry| registry.chosen.borrow());
@@ -708,6 +731,8 @@ impl Engine {
          serde_json::to_vec(&Choices {
             disabled,
             settings: Cow::Borrowed(chosen.as_deref().unwrap_or(&empty)),
+            staff: crate::staff_enabled(),
+            remote_shell,
          })
       });
       let path = state().choices_path();
@@ -2201,6 +2226,9 @@ pub fn load_plugins(state: &State, bundled: Vec<Plugin>) -> Result<Vec<String>, 
       Err(err) if err.kind() == ErrorKind::NotFound => Choices::default(),
       Err(err) => return Err(io_error(&choices_path)(err)),
    };
+   gateway::set_staff_enabled(choices.staff);
+   #[cfg(target_os = "android")]
+   crate::set_remote_shell_flag(choices.remote_shell);
 
    let mut engine = state
       .js
