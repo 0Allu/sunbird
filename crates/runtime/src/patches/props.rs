@@ -12,6 +12,10 @@ use phoenix_ui::{
    Op,
    Prop,
    Props,
+   mirror::{
+      Created,
+      prop,
+   },
    set_prop,
 };
 use phoenix_wire::Value;
@@ -20,10 +24,6 @@ use crate::patches::{
    HIDDEN,
    PatchTarget,
    Patches,
-   mirror::{
-      Created,
-      prop,
-   },
 };
 
 impl Patches {

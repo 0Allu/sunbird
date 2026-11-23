@@ -1,6 +1,11 @@
 //! Java-to-Rust view events: presses on plugin nodes, page events and sends.
 
-use phoenix_ui::Prop;
+use phoenix_ui::{
+   Prop,
+   mirror::{
+      self,
+   },
+};
 use phoenix_wire::{
    DispatchEvent,
    Key,
@@ -19,7 +24,6 @@ use crate::{
       RESULTS_CAP,
       commands,
       message_id,
-      mirror,
       number,
       worker::{
          Job,

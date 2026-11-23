@@ -10,6 +10,7 @@ use phoenix_ui::{
    Op,
    Prop,
    ViewKind,
+   mirror::prop,
 };
 use phoenix_wire::Value;
 
@@ -24,7 +25,6 @@ use crate::patches::{
    Place,
    SlotKind,
    commands,
-   mirror::prop,
    number,
    patches,
    targets::{

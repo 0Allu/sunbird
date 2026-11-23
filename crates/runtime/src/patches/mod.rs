@@ -16,7 +16,6 @@ mod emoji;
 mod events;
 mod hidden;
 mod menu;
-pub mod mirror;
 mod mount;
 mod nodes;
 mod pages;
@@ -66,6 +65,7 @@ use phoenix_ui::{
    Props,
    ViewKind,
    encode,
+   mirror::Mirror,
    set_prop,
 };
 use phoenix_wire::{
@@ -77,7 +77,6 @@ use phoenix_wire::{
 use crate::{
    bridge,
    patches::{
-      mirror::Mirror,
       sink::PatchSink,
       targets::{
          Seen,
@@ -672,16 +671,20 @@ pub fn update(id: ContributionId, place: Option<Place>) {
    queue(Job::Refresh(target));
 }
 
+/// What [`update_button`] does to a button's tint.
+#[derive(Clone, Copy)]
+pub enum TintChange {
+   Keep,
+   Clear,
+   Set(i64),
+}
+
 /// Updates a button contribution's icon, label, or tint and redraws its target.
-#[expect(
-   clippy::option_option,
-   reason = "js.rs passes an absent, null or set tint, and that call site is outside this module"
-)]
 pub fn update_button(
    id: ContributionId,
    icon: Option<String>,
    label: Option<String>,
-   tint: Option<Option<i64>>,
+   tint: TintChange,
 ) {
    let mut state = patches();
    let Some(contribution) = state.contributions.iter_mut().find(|known| known.id == id) else {
@@ -693,8 +696,10 @@ pub fn update_button(
    if let Some(label) = label {
       contribution.label = label;
    }
-   if let Some(tint) = tint {
-      contribution.tint = tint;
+   match tint {
+      TintChange::Keep => {},
+      TintChange::Clear => contribution.tint = None,
+      TintChange::Set(color) => contribution.tint = Some(color),
    }
    let target = contribution.target;
    drop(state);

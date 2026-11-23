@@ -9,6 +9,7 @@ use phoenix_ui::{
    Prop,
    Props,
    ViewKind,
+   mirror::Created,
 };
 use phoenix_wire::{
    Key,
@@ -28,7 +29,6 @@ use crate::{
       Sent,
       Slot,
       SlotKind,
-      mirror::Created,
       patches,
       worker::press_context,
    },

@@ -27,9 +27,10 @@ use std::{
    time::Duration,
 };
 
-use phoenix_ui::Op;
-
-use crate::patches::mirror::wire_to_json;
+use phoenix_ui::{
+   Op,
+   mirror::wire_to_json,
+};
 
 pub const ADDR: &str = "127.0.0.1:4242";
 const MAX_BODY: usize = 4 << 20;
@@ -409,16 +410,16 @@ fn plugin_route(method: &str, rest: &str, body: &[u8]) -> (&'static str, &'stati
    }
    match (method, action) {
       ("GET", None) => {
-         match crate::source(name) {
-            Some(source) => {
+         crate::source(name).map_or_else(
+            || err("404 Not Found", "plugin not found"),
+            |source| {
                (
                   "200 OK",
                   "text/javascript; charset=utf-8",
                   source.into_bytes(),
                )
             },
-            None => err("404 Not Found", "plugin not found"),
-         }
+         )
       },
       ("PUT" | "POST", None) => {
          let Ok(source) = String::from_utf8(body.to_vec()) else {

@@ -19,6 +19,10 @@ use phoenix_ui::{
    ViewKind,
    decode,
    encode,
+   mirror::{
+      Created,
+      prop,
+   },
    set_prop,
 };
 use phoenix_wire::Value;
@@ -37,10 +41,6 @@ use crate::{
       PAGE,
       Patches,
       ROOT_ID,
-      mirror::{
-         Created,
-         prop,
-      },
       patches,
       profile::profile_user,
       props::apply_prop_patch,

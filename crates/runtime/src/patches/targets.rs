@@ -3,6 +3,11 @@ use phoenix_ui::{
    Prop,
    Props,
    ViewKind,
+   mirror::{
+      self,
+      Created,
+      Mirror,
+   },
 };
 use phoenix_wire::Value;
 
@@ -14,11 +19,6 @@ use crate::patches::{
    Place,
    Rendered,
    SheetBody,
-   mirror::{
-      self,
-      Created,
-      Mirror,
-   },
    tabs,
 };
 

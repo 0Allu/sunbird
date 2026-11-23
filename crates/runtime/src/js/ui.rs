@@ -40,6 +40,7 @@ use crate::{
       Outcome,
       Place,
       Rendered,
+      TintChange,
       UiContext,
       targets::Target,
    },
@@ -288,10 +289,13 @@ pub fn remover<'js>(
                   let icon = object.get::<_, Option<String>>("icon").ok().flatten();
                   let label = object.get::<_, Option<String>>("label").ok().flatten();
                   let tint = match object.get::<_, Value<'_>>("tint") {
-                     Ok(value) if value.is_null() => Some(None),
-                     Ok(value) if value.is_undefined() => None,
-                     Ok(value) => value.as_number().map(|color| Some(to_argb(color))),
-                     Err(_) => None,
+                     Ok(value) if value.is_null() => TintChange::Clear,
+                     Ok(value) => {
+                        value
+                           .as_number()
+                           .map_or(TintChange::Keep, |color| TintChange::Set(to_argb(color)))
+                     },
+                     Err(_) => TintChange::Keep,
                   };
                   patches::update_button(id, icon, label, tint);
                   return;
