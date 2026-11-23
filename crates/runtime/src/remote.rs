@@ -29,8 +29,13 @@ use std::{
 
 use phoenix_ui::{
    Op,
-   mirror::wire_to_json,
+   Prop,
+   inspect::WireJson,
 };
+use serde::Serialize;
+use serde_json::value::RawValue;
+
+use crate::PluginInfo;
 
 pub const ADDR: &str = "127.0.0.1:4242";
 const MAX_BODY: usize = 4 << 20;
@@ -39,90 +44,71 @@ const MAX_EVENTS_LOG: usize = 128;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static RUNNING: AtomicBool = AtomicBool::new(false);
-static OPS_LOG: LazyLock<Mutex<VecDeque<serde_json::Value>>> =
+static OPS_LOG: LazyLock<Mutex<VecDeque<Box<RawValue>>>> =
    LazyLock::new(|| Mutex::new(VecDeque::with_capacity(MAX_OPS_LOG)));
-static EVENTS_LOG: LazyLock<Mutex<VecDeque<serde_json::Value>>> =
+static EVENTS_LOG: LazyLock<Mutex<VecDeque<Box<RawValue>>>> =
    LazyLock::new(|| Mutex::new(VecDeque::with_capacity(MAX_EVENTS_LOG)));
+
+/// A view or host event for the debug ring buffer. Never put HTTP headers or
+/// credentials in one.
+#[derive(Serialize)]
+#[serde(tag = "source", rename_all = "camelCase")]
+pub enum Trace<'a> {
+   HostCall {
+      module: u16,
+      method: u16,
+   },
+   HostEvent {
+      event: u16,
+   },
+   View {
+      node:    i32,
+      event:   Prop,
+      aid:     Option<&'a str>,
+      payload: WireJson<'a>,
+   },
+}
 
 /// Records a decoded Phoenix UI-op batch into the debug ring buffer when the
 /// remote debug shell is enabled. Zero-cost atomic check when disabled.
 pub fn record_ops(ops: &[Op]) {
+   #[derive(Serialize)]
+   struct Batch<'a> {
+      count: usize,
+      ops:   &'a [Op],
+   }
+
    if !enabled() || ops.is_empty() {
       return;
    }
-   let items = ops.iter().map(op_to_json).collect::<Vec<_>>();
-   let entry = serde_json::json!({
-      "count": items.len(),
-      "ops": items,
-   });
-   let mut log = OPS_LOG.lock().unwrap_or_else(PoisonError::into_inner);
-   if log.len() == MAX_OPS_LOG {
+   let batch = Batch {
+      count: ops.len(),
+      ops,
+   };
+   push(&OPS_LOG, MAX_OPS_LOG, &batch);
+}
+
+/// Records `trace` into the debug ring buffer when the remote debug shell is
+/// enabled.
+pub fn record(trace: &Trace<'_>) {
+   if enabled() {
+      push(&EVENTS_LOG, MAX_EVENTS_LOG, trace);
+   }
+}
+
+fn push(log: &Mutex<VecDeque<Box<RawValue>>>, max: usize, entry: &impl Serialize) {
+   let entry = match serde_json::value::to_raw_value(entry) {
+      Ok(entry) => entry,
+      Err(err) => {
+         log::warn!("remote: a debug entry did not serialize: {err}");
+         return;
+      },
+   };
+   let mut log = log.lock().unwrap_or_else(PoisonError::into_inner);
+   if log.len() == max {
       log.pop_front();
    }
    log.push_back(entry);
-}
-
-/// Records a view or host event into the debug ring buffer when the remote
-/// debug shell is enabled. Never pass HTTP headers or credentials here.
-pub fn record_event(source: &str, mut detail: serde_json::Value) {
-   if !enabled() {
-      return;
-   }
-   if let Some(map) = detail.as_object_mut() {
-      map.insert("source".to_owned(), serde_json::json!(source));
-   }
-   let mut log = EVENTS_LOG.lock().unwrap_or_else(PoisonError::into_inner);
-   if log.len() == MAX_EVENTS_LOG {
-      log.pop_front();
-   }
-   log.push_back(detail);
-}
-
-fn props_to_json(props: &phoenix_ui::Props) -> serde_json::Value {
-   let mut map = serde_json::Map::new();
-   for (key, value) in props {
-      let name = key
-         .name()
-         .map_or_else(|| format!("#{}", key.key().get()), str::to_owned);
-      map.insert(name, wire_to_json(value));
-   }
-   serde_json::Value::Object(map)
-}
-
-fn op_to_json(op: &Op) -> serde_json::Value {
-   match op {
-      Op::Create { id, kind, props } => {
-         serde_json::json!({
-            "op": "create",
-            "id": id,
-            "kind": kind.as_str(),
-            "props": props_to_json(props),
-         })
-      },
-      Op::Update { id, props } => {
-         serde_json::json!({
-            "op": "update",
-            "id": id,
-            "props": props_to_json(props),
-         })
-      },
-      Op::Children { id, ids } => serde_json::json!({ "op": "children", "id": id, "ids": ids }),
-      Op::ChildEdits { id, edits } => {
-         let edits = edits
-            .iter()
-            .map(|edit| serde_json::json!({ "keep": edit.keep, "del": edit.del, "ins": edit.ins }))
-            .collect::<Vec<_>>();
-         serde_json::json!({ "op": "childEdits", "id": id, "edits": edits })
-      },
-      Op::Delete { ids } => serde_json::json!({ "op": "delete", "ids": ids }),
-      Op::Root { id } => serde_json::json!({ "op": "root", "id": id }),
-      Op::Focus { id } => serde_json::json!({ "op": "focus", "id": id }),
-      Op::ScrollTo { id, value } => {
-         serde_json::json!({ "op": "scrollTo", "id": id, "value": wire_to_json(value) })
-      },
-      Op::RequestFrame => serde_json::json!({ "op": "requestFrame" }),
-      Op::Motion { words } => serde_json::json!({ "op": "motion", "words": words.len() }),
-   }
 }
 
 #[must_use]
@@ -252,14 +238,18 @@ fn dispatch(
 ) -> (&'static str, &'static str, Vec<u8>) {
    match (method, path) {
       ("GET", "/" | "/status") => {
-         ok_json(&serde_json::json!({
-            "version": crate::update::VERSION,
-            "staff": crate::staff_enabled(),
-            "remote_shell": enabled(),
-            "plugins": plugin_list(),
-         }))
+         let plugins = crate::plugins();
+         ok_json(&Status {
+            version:      crate::update::VERSION,
+            staff:        crate::staff_enabled(),
+            remote_shell: enabled(),
+            plugins:      plugins.iter().map(PluginJson::from).collect(),
+         })
       },
-      ("GET", "/plugins") => ok_json(&plugin_list()),
+      ("GET", "/plugins") => {
+         let plugins = crate::plugins();
+         ok_json(&plugins.iter().map(PluginJson::from).collect::<Vec<_>>())
+      },
       ("GET", "/logs") => {
          let mut lines = crate::console::lines();
          lines.reverse();
@@ -279,8 +269,8 @@ fn dispatch(
             Err(message) => err("500 Internal Server Error", &message),
          }
       },
-      ("GET", "/ops") => ok_json(&recent(&OPS_LOG, query, 20)),
-      ("GET", "/events") => ok_json(&recent(&EVENTS_LOG, query, 50)),
+      ("GET", "/ops") => recent(&OPS_LOG, query, 20),
+      ("GET", "/events") => recent(&EVENTS_LOG, query, 50),
       ("POST", "/clear") => {
          OPS_LOG
             .lock()
@@ -290,13 +280,13 @@ fn dispatch(
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
-         ok_json(&serde_json::json!({ "cleared": true }))
+         ok_json(&Done::Cleared)
       },
       ("GET", "/tree") => {
          let depth = query_param(query, "depth")
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(6);
-         ok_json(&crate::patches::dump_tree(None, depth))
+         tree(None, depth)
       },
       ("GET", _) if path.starts_with("/tree/") => {
          let Ok(id) = path["/tree/".len()..].parse::<i32>() else {
@@ -305,27 +295,27 @@ fn dispatch(
          let depth = query_param(query, "depth")
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(6);
-         ok_json(&crate::patches::dump_tree(Some(id), depth))
+         tree(Some(id), depth)
       },
-      ("GET", "/update") => ok_json(&update_state()),
+      ("GET", "/update") => update_state(),
       ("POST", "/update/check") => {
          crate::update::check();
-         ok_json(&serde_json::json!({ "started": true }))
+         ok_json(&Done::Started)
       },
       ("POST", "/update/apply") => {
          crate::update::apply();
-         ok_json(&serde_json::json!({ "started": true }))
+         ok_json(&Done::Started)
       },
       ("POST", "/update/self") => {
          crate::update::self_update_from_site();
-         ok_json(&serde_json::json!({ "started": true }))
+         ok_json(&Done::Started)
       },
       ("POST", "/debug/staff") => {
          let text = String::from_utf8_lossy(body);
          let on = matches!(text.trim(), "1" | "true" | "on");
          crate::set_staff_enabled(on);
          crate::settings::refresh();
-         ok_json(&serde_json::json!({ "staff": crate::staff_enabled() }))
+         ok_json(&Done::Staff(crate::staff_enabled()))
       },
       _ if path.starts_with("/plugins/") => plugin_route(method, &path["/plugins/".len()..], body),
       _ => {
@@ -340,60 +330,111 @@ fn dispatch(
    }
 }
 
-/// Every plugin and its state, for `/status` and `/plugins`.
-fn plugin_list() -> serde_json::Value {
-   crate::plugins()
-      .into_iter()
-      .map(|plugin| {
-         serde_json::json!({
-            "name": plugin.name,
-            "enabled": plugin.enabled,
-            "installed": plugin.installed,
-            "error": plugin.error,
-            "version": plugin.header.version,
-            "author": plugin.header.author,
-            "description": plugin.header.description,
-         })
-      })
-      .collect()
+#[derive(Serialize)]
+struct Status<'a> {
+   version:      &'static str,
+   staff:        bool,
+   remote_shell: bool,
+   plugins:      Vec<PluginJson<'a>>,
+}
+
+/// A plugin and its state, for `/status` and `/plugins`.
+#[derive(Serialize)]
+struct PluginJson<'a> {
+   name:        &'a str,
+   enabled:     bool,
+   installed:   bool,
+   error:       Option<&'a str>,
+   version:     Option<&'a str>,
+   author:      Option<&'a str>,
+   description: Option<&'a str>,
+}
+
+impl<'a> From<&'a PluginInfo> for PluginJson<'a> {
+   fn from(plugin: &'a PluginInfo) -> Self {
+      Self {
+         name:        &plugin.name,
+         enabled:     plugin.enabled,
+         installed:   plugin.installed,
+         error:       plugin.error.as_deref(),
+         version:     plugin.header.version.as_deref(),
+         author:      plugin.header.author.as_deref(),
+         description: plugin.header.description.as_deref(),
+      }
+   }
+}
+
+/// What a mutating endpoint did.
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Done<'a> {
+   Cleared,
+   Started,
+   Staff(bool),
+   Installed(&'a str),
+   Uninstalled(&'a str),
+   Reloaded(&'a str),
+   Enabled(&'a str),
+   Disabled(&'a str),
 }
 
 /// The newest entries of `log`, filtered by the `match` and `limit` query
 /// parameters.
 fn recent(
-   log: &Mutex<VecDeque<serde_json::Value>>,
+   log: &Mutex<VecDeque<Box<RawValue>>>,
    query: &str,
    default_limit: usize,
-) -> serde_json::Value {
+) -> (&'static str, &'static str, Vec<u8>) {
    let filter = query_param(query, "match");
    let limit = query_param(query, "limit")
       .and_then(|limit| limit.parse::<usize>().ok())
       .unwrap_or(default_limit);
-   let entries = log.lock().unwrap_or_else(PoisonError::into_inner).clone();
-   entries
-      .into_iter()
-      .rev()
-      .filter(|entry| {
-         filter.is_none_or(|needle| {
-            serde_json::to_string(entry).is_ok_and(|text| text.contains(needle))
-         })
-      })
-      .take(limit)
-      .collect()
+   ok_json(
+      &log
+         .lock()
+         .unwrap_or_else(PoisonError::into_inner)
+         .iter()
+         .rev()
+         .filter(|entry| filter.is_none_or(|needle| entry.get().contains(needle)))
+         .take(limit)
+         .collect::<Vec<_>>(),
+   )
 }
 
-fn update_state() -> serde_json::Value {
-   let found = crate::update::found().map(|found| {
-      serde_json::json!({
-         "loader": found.loader,
-         "plugins": found.plugins,
-      })
-   });
-   serde_json::json!({
-      "version": crate::update::VERSION,
-      "busy": crate::update::busy(),
-      "status": crate::update::status(),
-      "found": found,
+fn tree(root: Option<i32>, depth: usize) -> (&'static str, &'static str, Vec<u8>) {
+   crate::patches::with_tree(root, depth, |tree| {
+      tree.map_or_else(
+         || err("404 Not Found", "root node not seen yet"),
+         |tree| ok_json(&tree),
+      )
+   })
+}
+
+fn update_state() -> (&'static str, &'static str, Vec<u8>) {
+   #[derive(Serialize)]
+   struct Found {
+      loader:  Option<String>,
+      plugins: Vec<String>,
+   }
+
+   #[derive(Serialize)]
+   struct State {
+      version: &'static str,
+      busy:    bool,
+      status:  Option<String>,
+      found:   Option<Found>,
+   }
+
+   ok_json(&State {
+      version: crate::update::VERSION,
+      busy:    crate::update::busy(),
+      status:  crate::update::status(),
+      found:   crate::update::found().map(|found| {
+         Found {
+            loader:  found.loader,
+            plugins: found.plugins,
+         }
+      }),
    })
 }
 
@@ -428,7 +469,7 @@ fn plugin_route(method: &str, rest: &str, body: &[u8]) -> (&'static str, &'stati
          match crate::save_source(name, source) {
             Ok(()) => {
                crate::settings::refresh();
-               ok_json(&serde_json::json!({ "installed": name }))
+               ok_json(&Done::Installed(name))
             },
             Err(message) => err("500 Internal Server Error", &message.to_string()),
          }
@@ -437,7 +478,7 @@ fn plugin_route(method: &str, rest: &str, body: &[u8]) -> (&'static str, &'stati
          match crate::uninstall(name) {
             Ok(()) => {
                crate::settings::refresh();
-               ok_json(&serde_json::json!({ "uninstalled": name }))
+               ok_json(&Done::Uninstalled(name))
             },
             Err(message) => err("500 Internal Server Error", &message.to_string()),
          }
@@ -445,28 +486,27 @@ fn plugin_route(method: &str, rest: &str, body: &[u8]) -> (&'static str, &'stati
       ("POST", Some("reload")) => {
          crate::reload(name);
          crate::settings::refresh();
-         ok_json(&serde_json::json!({ "reloaded": name }))
+         ok_json(&Done::Reloaded(name))
       },
       ("POST", Some("enable")) => {
          crate::set_enabled(name, true);
          crate::settings::refresh();
-         ok_json(&serde_json::json!({ "name": name, "enabled": true }))
+         ok_json(&Done::Enabled(name))
       },
       ("POST", Some("disable")) => {
          crate::set_enabled(name, false);
          crate::settings::refresh();
-         ok_json(&serde_json::json!({ "name": name, "enabled": false }))
+         ok_json(&Done::Disabled(name))
       },
       _ => err("404 Not Found", "unknown plugin route"),
    }
 }
 
-fn ok_json(value: &serde_json::Value) -> (&'static str, &'static str, Vec<u8>) {
-   (
-      "200 OK",
-      "application/json; charset=utf-8",
-      serde_json::to_vec_pretty(value).unwrap_or_default(),
-   )
+fn ok_json(value: &impl Serialize) -> (&'static str, &'static str, Vec<u8>) {
+   match serde_json::to_vec_pretty(value) {
+      Ok(body) => ("200 OK", "application/json; charset=utf-8", body),
+      Err(error) => err("500 Internal Server Error", &error.to_string()),
+   }
 }
 
 fn err(status: &'static str, message: &str) -> (&'static str, &'static str, Vec<u8>) {

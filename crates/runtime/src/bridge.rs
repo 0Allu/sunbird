@@ -69,6 +69,7 @@ use crate::{
       table,
       vm,
    },
+   remote::Trace,
 };
 
 /// What to do with an observed frame.
@@ -451,10 +452,10 @@ unsafe extern "system" fn call_object_method_a(
          if crate::remote::enabled()
             && let Some((module_id, method_id)) = phoenix_wire::HostCall::target(&head)
          {
-            crate::remote::record_event(
-               "hostCall",
-               serde_json::json!({ "module": module_id, "method": method_id }),
-            );
+            crate::remote::record(&Trace::HostCall {
+               module: module_id,
+               method: method_id,
+            });
          }
          if discord::wants(&head) {
             let frame = read_bytes(env, request, None);

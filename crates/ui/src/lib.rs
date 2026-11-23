@@ -20,10 +20,14 @@ use phoenix_wire::{
    put_u16_len,
    put_value,
 };
-use serde::Deserialize;
+use serde::{
+   Deserialize,
+   Serialize,
+};
 
 use crate::motion::Worklet;
 
+pub mod inspect;
 pub mod mirror;
 pub mod motion;
 
@@ -133,6 +137,12 @@ impl FromStr for Prop {
    }
 }
 
+impl From<Key> for Prop {
+   fn from(key: Key) -> Self {
+      Self(key.get())
+   }
+}
+
 impl fmt::Display for Prop {
    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
       match self.name() {
@@ -190,15 +200,19 @@ impl From<String> for ViewKind {
    }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// Serializes for the debug shell, with motion words as their count.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "op", rename_all = "camelCase")]
 pub enum Op {
    Create {
       id:    i32,
       kind:  ViewKind,
+      #[serde(serialize_with = "inspect::props")]
       props: Props,
    },
    Update {
       id:    i32,
+      #[serde(serialize_with = "inspect::props")]
       props: Props,
    },
    Children {
@@ -216,10 +230,12 @@ pub enum Op {
    },
    ScrollTo {
       id:    i32,
+      #[serde(serialize_with = "inspect::value")]
       value: Value,
    },
    RequestFrame,
    Motion {
+      #[serde(serialize_with = "inspect::count")]
       words: Vec<i32>,
    },
    ChildEdits {
@@ -230,7 +246,7 @@ pub enum Op {
 
 /// One cursor step over the parent's cached child list: copy `keep`, skip
 /// `del`, append `ins`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ChildEdit {
    pub keep: i32,
    pub del:  i32,

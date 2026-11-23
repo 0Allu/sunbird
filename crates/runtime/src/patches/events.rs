@@ -2,9 +2,7 @@
 
 use phoenix_ui::{
    Prop,
-   mirror::{
-      self,
-   },
+   inspect::WireJson,
 };
 use phoenix_wire::{
    DispatchEvent,
@@ -30,6 +28,7 @@ use crate::{
          queue,
       },
    },
+   remote::Trace,
 };
 
 const DISMISS: Key = Prop::named("dismiss").key();
@@ -67,7 +66,7 @@ impl Patches {
             if crate::remote::enabled()
                && let DispatchEvent::Host { event, .. } = &item.event
             {
-               crate::remote::record_event("hostEvent", serde_json::json!({ "event": event }));
+               crate::remote::record(&Trace::HostEvent { event: *event });
             }
             frames.push(raw);
             continue;
@@ -175,19 +174,12 @@ impl Patches {
    }
 
    fn record_view(&self, node: i32, event: Key, payload: &Value) {
-      let name = phoenix_ui::PROPS
-         .get(usize::from(event.get()))
-         .copied()
-         .map_or_else(|| format!("#{}", event.get()), str::to_owned);
-      crate::remote::record_event(
-         "view",
-         serde_json::json!({
-            "node": node,
-            "event": name,
-            "aid": self.mirror.accessibility_id(node),
-            "payload": mirror::wire_to_json(payload),
-         }),
-      );
+      crate::remote::record(&Trace::View {
+         node,
+         event: Prop::from(event),
+         aid: self.mirror.accessibility_id(node),
+         payload: WireJson(payload),
+      });
    }
 
    fn hook_view(&self, node: i32, event: Key, payload: &Value, raw: &[u8]) -> bool {

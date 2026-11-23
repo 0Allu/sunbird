@@ -9,7 +9,6 @@ use crate::{
    ChildEdit,
    Node,
    Op,
-   PROPS,
    Prop,
    Props,
    ViewKind,
@@ -234,49 +233,6 @@ impl Mirror {
       self.props.get(&id)
    }
 
-   /// Serializes the live subtree rooted at `id` up to `max_depth` for the
-   /// debug inspector (`GET /tree`).
-   #[must_use]
-   pub fn dump_tree(&self, id: i32, max_depth: usize) -> serde_json::Value {
-      let mut obj = serde_json::Map::new();
-      obj.insert("id".to_owned(), serde_json::json!(id));
-      if let Some(kind) = self.kinds.get(&id) {
-         obj.insert("kind".to_owned(), serde_json::json!(kind.as_str()));
-      }
-      if let Some(aid) = self.ids.get(&id) {
-         obj.insert("aid".to_owned(), serde_json::json!(aid));
-      }
-      if let Some(props) = self.props.get(&id)
-         && !props.is_empty()
-      {
-         let mut map = serde_json::Map::new();
-         for (key, val) in props {
-            let name = key
-               .name()
-               .map_or_else(|| format!("#{}", key.key().get()), str::to_owned);
-            map.insert(name, wire_to_json(val));
-         }
-         obj.insert("props".to_owned(), serde_json::Value::Object(map));
-      }
-      let kids = self.kids(id);
-      if !kids.is_empty() {
-         if max_depth == 0 {
-            obj.insert("childCount".to_owned(), serde_json::json!(kids.len()));
-         } else {
-            obj.insert(
-               "children".to_owned(),
-               serde_json::Value::Array(
-                  kids
-                     .iter()
-                     .map(|kid| self.dump_tree(*kid, max_depth - 1))
-                     .collect(),
-               ),
-            );
-         }
-      }
-      serde_json::Value::Object(obj)
-   }
-
    /// Every live node whose accessibility id equals `aid`.
    #[must_use]
    pub fn nodes_with_id(&self, aid: &str) -> Vec<i32> {
@@ -443,48 +399,13 @@ fn apply_edits(old: &[i32], edits: &[ChildEdit]) -> Vec<i32> {
    out
 }
 
-#[must_use]
-pub fn wire_to_json(value: &Value) -> serde_json::Value {
-   match value {
-      Value::Null => serde_json::Value::Null,
-      Value::Bool(flag) => serde_json::Value::Bool(*flag),
-      Value::I32(int) => serde_json::json!(int),
-      Value::I64(int) => serde_json::json!(int),
-      Value::F64(num) => serde_json::json!(num),
-      Value::Str(text) => serde_json::Value::String(text.clone()),
-      Value::Arr(items) => serde_json::Value::Array(items.iter().map(wire_to_json).collect()),
-      Value::Obj(fields) => {
-         let mut map = serde_json::Map::new();
-         for (key, val) in fields {
-            let name = PROPS
-               .get(usize::from(key.get()))
-               .copied()
-               .map_or_else(|| format!("#{}", key.get()), str::to_owned);
-            map.insert(name, wire_to_json(val));
-         }
-         serde_json::Value::Object(map)
-      },
-      Value::Map(entries) => {
-         let mut map = serde_json::Map::new();
-         for (key, val) in entries {
-            map.insert(key.clone(), wire_to_json(val));
-         }
-         serde_json::Value::Object(map)
-      },
-      Value::Rect(rect) => serde_json::json!(rect),
-      Value::Words(words) => serde_json::json!({ "$words": words.len() }),
-      Value::WPatch { list, set } => {
-         serde_json::json!({ "$wpatch": { "list": list, "len": set.len() } })
-      },
-   }
-}
-
 #[cfg(test)]
 mod tests {
    use super::*;
    use crate::{
       decode,
       encode,
+      inspect::TreeJson,
    };
 
    #[test]
@@ -541,7 +462,7 @@ mod tests {
       assert_eq!(mirror.kids(1), &[2, 4]);
       assert_eq!(mirror.composer(), Some((2, "draft")));
 
-      let dump = mirror.dump_tree(1, 3);
+      let dump = serde_json::to_value(TreeJson::new(&mirror, 1, 3)).expect("tree serializes");
       assert_eq!(dump["id"], 1);
       assert_eq!(dump["kind"], "view");
       assert_eq!(dump["children"][0]["aid"], "composer");

@@ -65,6 +65,7 @@ use phoenix_ui::{
    Props,
    ViewKind,
    encode,
+   inspect::TreeJson,
    mirror::Mirror,
    set_prop,
 };
@@ -803,14 +804,16 @@ pub fn root_id() -> Option<i32> {
    patches().mirror.root()
 }
 
-/// Serializes the live mirrored view tree for the debug inspector (`GET
-/// /tree`).
-pub fn dump_tree(root: Option<i32>, max_depth: usize) -> serde_json::Value {
+/// Runs `with` on the mirrored view tree under `root`, or under the root node
+/// when `root` is `None`, for the debug inspector (`GET /tree`).
+pub fn with_tree<R>(
+   root: Option<i32>,
+   depth: usize,
+   with: impl FnOnce(Option<TreeJson<'_>>) -> R,
+) -> R {
    let state = patches();
-   let Some(id) = root.or_else(|| state.mirror.root()) else {
-      return serde_json::json!({ "error": "root node not seen yet" });
-   };
-   state.mirror.dump_tree(id, max_depth)
+   let id = root.or_else(|| state.mirror.root());
+   with(id.map(|id| TreeJson::new(&state.mirror, id, depth)))
 }
 
 /// Hides every Phoenix node with accessibility id `aid` by setting
