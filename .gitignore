@@ -2,6 +2,7 @@
 
 !.cade
 !.editorconfig
+!.gitattributes
 !.gitignore
 !.rustfmt.toml
 !.tombi.toml
