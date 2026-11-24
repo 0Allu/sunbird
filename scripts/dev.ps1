@@ -149,13 +149,14 @@ if ($Desktop) {
       $profileName = if ($Release) { "release" } else { "dev-fast" }
       if (-not $SkipBuild) {
          # Git's MinGW dlltool writes raw-dylib import libraries its ld cannot
-         # link, so take only dlltool from the toolchain and keep Git's gcc for
-         # QuickJS and SQLite.
+         # link, so take dlltool from the toolchain, with the `as` it runs from
+         # its own directory, and keep Git's gcc for QuickJS and SQLite.
          $tools = Join-Path (Split-Path $TargetDir -Parent) "wintools"
-         if (-not (Test-Path (Join-Path $tools "dlltool.exe"))) {
+         if (-not (Test-Path (Join-Path $tools "as.exe"))) {
             New-Item -ItemType Directory -Force $tools | Out-Null
             $sysroot = rustup run stable-x86_64-pc-windows-gnu rustc --print sysroot
-            Copy-Item (Join-Path $sysroot "lib\rustlib\x86_64-pc-windows-gnu\bin\self-contained\dlltool.exe") $tools
+            Copy-Item (Join-Path $sysroot "lib\rustlib\x86_64-pc-windows-gnu\bin\self-contained\dlltool.exe") $tools -Force
+            Copy-Item (Get-Command as.exe).Source $tools -Force
          }
          $env:PATH = "$tools;$env:PATH"
          $env:CARGO_TARGET_DIR = $TargetDir

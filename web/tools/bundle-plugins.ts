@@ -41,7 +41,13 @@ for (const name of readdirSync(`${root}plugins`).sort()) {
 writeFileSync(`${out}index.json`, JSON.stringify(index, null, 2) + '\n');
 // crates/runtime/src/update.rs marks the version as `phoenix-version:<version>;`. An older loader has none: `0`
 // is older than every build, so nobody is told to update to it.
-const loader = readFileSync(`${out}libphoenix-arm64.so`, 'latin1').match(/phoenix-version:([\w.-]+);/)?.[1] ?? '0';
-const plugins = Object.fromEntries(index.map(({ name }) => [name, crc32(readFileSync(`${out}${name}.js`))]));
-writeFileSync(fileURLToPath(new URL('../version.json', import.meta.url)), JSON.stringify({ loader, plugins }, null, 2) + '\n');
+// Without the Android loader (a desktop-only build, `scripts/dev.ps1 -Desktop`) there is no version to ship.
+const so = `${out}libphoenix-arm64.so`;
+if (existsSync(so)) {
+  const loader = readFileSync(so, 'latin1').match(/phoenix-version:([\w.-]+);/)?.[1] ?? '0';
+  const plugins = Object.fromEntries(index.map(({ name }) => [name, crc32(readFileSync(`${out}${name}.js`))]));
+  writeFileSync(fileURLToPath(new URL('../version.json', import.meta.url)), JSON.stringify({ loader, plugins }, null, 2) + '\n');
+} else {
+  console.log('no libphoenix-arm64.so, leaving web/version.json as it is');
+}
 console.log(`bundled ${index.map((p) => p.name).join(', ')}`);
