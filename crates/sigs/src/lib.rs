@@ -7,9 +7,30 @@
 
 use std::ffi::c_void;
 
+pub mod desktop;
 #[cfg(feature = "file")] pub mod file;
 pub mod http;
+pub mod mobile;
 pub mod registry;
+
+/// What a locator found, or why this build does not match it.
+pub type Found<T> = Result<T, String>;
+
+/// The only match, or how many there were.
+fn one<T: Copy>(what: &str, found: &[T]) -> Found<T> {
+   match found {
+      [only] => Ok(*only),
+      _ => Err(format!("{what} matched {} times", found.len())),
+   }
+}
+
+/// `flag_override: Option<_>` in the store state, as the byte offsets of its
+/// tag and value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct StaffField {
+   pub tag:   usize,
+   pub value: usize,
+}
 
 /// Libraries that carry the gateway registry, Phoenix's and the stand-in's.
 #[cfg(not(target_os = "windows"))]
