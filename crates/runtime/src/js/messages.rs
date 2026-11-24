@@ -1,8 +1,8 @@
 //! `phoenix.messages`, `phoenix.commands`, send interceptors and emoji
 //! picks.
 
-#[cfg(target_os = "android")] use rquickjs::CatchResultExt;
 use rquickjs::{
+   CatchResultExt,
    Ctx,
    Exception,
    Function,
@@ -11,18 +11,20 @@ use rquickjs::{
 };
 use serde_json::value::RawValue;
 
-use crate::local;
-#[cfg(target_os = "android")]
 use crate::{
    js::{
       Engine,
       Registry,
       drain,
-      ui::{
-         context_object,
-         remover,
-         ui_object,
-      },
+   },
+   local,
+};
+#[cfg(target_os = "android")]
+use crate::{
+   js::ui::{
+      context_object,
+      remover,
+      ui_object,
    },
    patches::{
       self,
@@ -149,6 +151,100 @@ impl Engine {
       drain(&self.runtime);
       picked
    }
+}
+
+#[cfg(not(target_os = "android"))]
+impl Engine {
+   /// Runs registered `phoenix.messages.onSend` hooks against the JSON payload
+   /// of an outgoing `POST /channels/<channel_id>/messages` request on desktop.
+   pub fn intercept_send_body(&self, channel_id: &str, body: &[u8]) -> crate::discord::RequestAction {
+      let action = self.context.with(|ctx| {
+         let Some(registry) = ctx.userdata::<Registry<'_>>() else {
+            return crate::discord::RequestAction::Pass;
+         };
+         let interceptors = registry
+            .interceptors
+            .borrow()
+            .iter()
+            .map(|(_, plugin, function)| (plugin.clone(), function.clone()))
+            .collect::<Vec<_>>();
+         drop(registry);
+         if interceptors.is_empty() {
+            return crate::discord::RequestAction::Pass;
+         }
+         let Ok(mut payload) = serde_json::from_slice::<serde_json::Value>(body) else {
+            return crate::discord::RequestAction::Pass;
+         };
+         let Some(original) = payload
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+         else {
+            return crate::discord::RequestAction::Pass;
+         };
+         let Ok(argument) = Object::new(ctx.clone()) else {
+            return crate::discord::RequestAction::Pass;
+         };
+         let _ = argument.set("channelId", channel_id);
+
+         let mut value = original.clone();
+         for (plugin, function) in interceptors {
+            match function
+               .call::<_, Value<'_>>((value.clone(), argument.clone()))
+               .catch(&ctx)
+            {
+               Ok(result) if result.as_bool() == Some(false) => {
+                  return crate::discord::RequestAction::Drop;
+               },
+               Ok(result) => {
+                  if let Some(text) = result.as_string().and_then(|text| text.to_string().ok()) {
+                     value = text;
+                  }
+               },
+               Err(err) => log::error!("[{plugin}] onSend: {err}"),
+            }
+         }
+         if value == original {
+            return crate::discord::RequestAction::Pass;
+         }
+         if let Some(obj) = payload.as_object_mut() {
+            obj.insert("content".to_owned(), serde_json::Value::String(value));
+         }
+         serde_json::to_vec(&payload).map_or(
+            crate::discord::RequestAction::Pass,
+            crate::discord::RequestAction::Replace,
+         )
+      });
+      drain(&self.runtime);
+      action
+   }
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn on_send_desktop<'js>(
+   ctx: &Ctx<'js>,
+   plugin: &str,
+   function: Function<'js>,
+) -> rquickjs::Result<Function<'js>> {
+   static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+   let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+   let registry = ctx
+      .userdata::<Registry<'js>>()
+      .ok_or_else(|| Exception::throw_internal(ctx, "no registry"))?;
+   registry
+      .interceptors
+      .borrow_mut()
+      .push((id, plugin.to_owned(), function));
+   drop(registry);
+   Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
+      if let Some(registry) = ctx.userdata::<Registry<'js>>() {
+         registry
+            .interceptors
+            .borrow_mut()
+            .retain(|(existing, ..)| *existing != id);
+      }
+   })
 }
 
 /// `phoenix.messages`, local-only messages.

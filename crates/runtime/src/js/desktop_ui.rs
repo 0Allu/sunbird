@@ -20,6 +20,47 @@ fn noop_handle<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> {
    Ok(remove)
 }
 
+/// Wires desktop `phoenix.ui`, `phoenix.messages.onSend` / `onEmojiPick`, and
+/// `phoenix.commands` onto the plugin's API objects.
+pub fn desktop_patch_api<'js>(
+   ctx: &Ctx<'js>,
+   plugin: &str,
+   api: &Object<'js>,
+   messages: &Object<'js>,
+) -> rquickjs::Result<()> {
+   let name = plugin.to_owned();
+   messages.set(
+      "onSend",
+      Function::new(
+         ctx.clone(),
+         move |ctx: Ctx<'js>, function: Function<'js>| {
+            crate::js::messages::on_send_desktop(&ctx, &name, function)
+         },
+      )?,
+   )?;
+   messages.set(
+      "onEmojiPick",
+      Function::new(
+         ctx.clone(),
+         |ctx: Ctx<'js>, _function: Opt<Value<'js>>| noop_handle(&ctx),
+      )?,
+   )?;
+   let commands = Object::new(ctx.clone())?;
+   commands.set(
+      "register",
+      Function::new(
+         ctx.clone(),
+         |ctx: Ctx<'js>, _options: Opt<Value<'js>>| noop_handle(&ctx),
+      )?,
+   )?;
+   commands.set(
+      "list",
+      Function::new(ctx.clone(), |ctx: Ctx<'js>| rquickjs::Array::new(ctx))?,
+   )?;
+   api.set("commands", commands)?;
+   api.set("ui", desktop_ui_object(ctx)?)
+}
+
 pub fn desktop_ui_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
    let ui = Object::new(ctx.clone())?;
    ui.set(

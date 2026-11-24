@@ -216,6 +216,16 @@ pub(crate) fn intercept_request(
    })
 }
 
+/// Runs `phoenix.messages.onSend` hooks against a desktop `POST
+/// /channels/<channel_id>/messages` body.
+#[cfg(not(target_os = "android"))]
+#[allow(dead_code)]
+pub(crate) fn intercept_send_body(channel_id: &str, body: &[u8]) -> discord::RequestAction {
+   engine().map_or(discord::RequestAction::Pass, |engine| {
+      engine.intercept_send_body(channel_id, body)
+   })
+}
+
 /// Runs matching `phoenix.discord.onResponse` hooks (sync or async) on an
 /// incoming Discord API reply and delivers the final body through `done`.
 #[allow(dead_code)]
@@ -484,7 +494,12 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
       bridge::install(Box::new(socket::Socket));
    }
    #[cfg(not(target_os = "android"))]
-   update::check();
+   {
+      if remote_shell_enabled() {
+         phoenix_ui_desktop::start_tray(&format!("http://{}/ui", remote::ADDR));
+      }
+      update::check();
+   }
    Ok(Started {
       target: state.image.path.clone(),
       build: state.image.build_id,

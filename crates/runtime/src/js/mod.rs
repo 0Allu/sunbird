@@ -113,6 +113,10 @@ const fn default_true() -> bool {
    true
 }
 
+const fn default_remote_shell() -> bool {
+   cfg!(not(target_os = "android"))
+}
+
 /// Which plugins the user turned off or on against their default and how
 /// they set each plugin's settings, kept in `home/plugins.json`.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -125,7 +129,7 @@ struct Choices<'a> {
    settings:     Cow<'a, ChosenMap>,
    #[serde(default = "default_true")]
    staff:        bool,
-   #[serde(default)]
+   #[serde(default = "default_remote_shell")]
    remote_shell: bool,
 }
 
@@ -136,7 +140,7 @@ impl Default for Choices<'_> {
          enabled:      BTreeSet::new(),
          settings:     Cow::Owned(BTreeMap::new()),
          staff:        true,
-         remote_shell: false,
+         remote_shell: default_remote_shell(),
       }
    }
 }
@@ -167,14 +171,13 @@ struct Registry<'js> {
    request_hooks:  RefCell<HashMap<u64, (String, Function<'js>)>>,
    /// `phoenix.discord.onResponse` interceptors, by id.
    response_hooks: RefCell<HashMap<u64, (String, Function<'js>)>>,
+   /// `phoenix.messages.onSend` interceptors in registration order, by id.
+   interceptors:   RefCell<Vec<(u64, String, Function<'js>)>>,
    #[cfg(target_os = "android")]
    ui:             RefCell<HashMap<ContributionId, Callbacks<'js>>>,
    /// Slash commands by lowercase name, with the plugin that registered each.
    #[cfg(target_os = "android")]
    commands:       RefCell<HashMap<String, (String, Function<'js>)>>,
-   /// `phoenix.messages.onSend` interceptors in registration order, by id.
-   #[cfg(target_os = "android")]
-   interceptors:   RefCell<Vec<(u64, String, Function<'js>)>>,
    /// `phoenix.messages.onEmojiPick` handlers in registration order, by id.
    #[cfg(target_os = "android")]
    pickers:        RefCell<Vec<(u64, String, Function<'js>)>>,
@@ -333,6 +336,12 @@ impl Engine {
             .borrow_mut()
             .retain(|_, (plugin, _)| plugin != name);
          discord::forget_response_hooks(name);
+         {
+            let mut interceptors = registry.interceptors.borrow_mut();
+            interceptors.retain(|(_, plugin, _)| plugin != name);
+            #[cfg(target_os = "android")]
+            patches::set_interceptors(interceptors.len());
+         }
          #[cfg(target_os = "android")]
          {
             registry
@@ -343,10 +352,6 @@ impl Engine {
                .commands
                .borrow_mut()
                .retain(|_, (plugin, _)| plugin != name);
-            let mut interceptors = registry.interceptors.borrow_mut();
-            interceptors.retain(|(_, plugin, _)| plugin != name);
-            patches::set_interceptors(interceptors.len());
-            drop(interceptors);
             let mut pickers = registry.pickers.borrow_mut();
             pickers.retain(|(_, plugin, _)| plugin != name);
             patches::set_emoji_pickers(pickers.len());
@@ -571,12 +576,11 @@ fn registry<'js>(ctx: &Ctx<'js>, events: &GatewayRegistry) -> rquickjs::Result<R
       pending: RefCell::default(),
       request_hooks: RefCell::default(),
       response_hooks: RefCell::default(),
+      interceptors: RefCell::default(),
       #[cfg(target_os = "android")]
       ui: RefCell::default(),
       #[cfg(target_os = "android")]
       commands: RefCell::default(),
-      #[cfg(target_os = "android")]
-      interceptors: RefCell::default(),
       #[cfg(target_os = "android")]
       pickers: RefCell::default(),
       #[cfg(target_os = "android")]
@@ -623,7 +627,7 @@ fn api<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
    #[cfg(target_os = "android")]
    patch_api(ctx, plugin, &api, &messages)?;
    #[cfg(not(target_os = "android"))]
-   api.set("ui", desktop_ui::desktop_ui_object(ctx)?)?;
+   desktop_ui::desktop_patch_api(ctx, plugin, &api, &messages)?;
    api.set("messages", messages)?;
    api.set("log", log_object(ctx, plugin)?)?;
    api.set("storage", storage(ctx, plugin)?)?;
