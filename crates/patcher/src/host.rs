@@ -5,16 +5,9 @@ use std::ops::Range;
 
 use memchr::memmem;
 use object::{
-   Endianness,
-   elf::{
-      self,
-      FileHeader32,
-      FileHeader64,
-   },
-   read::elf::{
-      FileHeader,
-      SectionHeader,
-   },
+   Object,
+   ObjectSection,
+   elf,
 };
 use phoenix_sigs::file::{
    ElfFile,
@@ -103,40 +96,21 @@ pub fn rename_needed(path: &str, data: &mut [u8], needed: &str) -> Result<(), Er
 
 /// File offset of the `liblog.so` string a `DT_NEEDED` entry names.
 fn needed_name(path: &str, data: &[u8]) -> Result<usize, Error> {
-   match data.get(4) {
-      Some(2) => needed_name_with::<FileHeader64<Endianness>>(path, data),
-      Some(1) => needed_name_with::<FileHeader32<Endianness>>(path, data),
-      _ => Err(Error::Host(format!("{path}: not an ELF file"))),
-   }
-}
-
-fn needed_name_with<Elf>(path: &str, data: &[u8]) -> Result<usize, Error>
-where
-   Elf: FileHeader<Endian = Endianness>,
-   Elf::Word: Into<u64>,
-{
    const DT_NEEDED: u64 = 1;
 
-   let parse = |source: object::Error| Error::Host(format!("{path}: {source}"));
-   let header = Elf::parse(data).map_err(parse)?;
-   let endian = header.endian().map_err(parse)?;
-   let sections = header.sections(endian, data).map_err(parse)?;
-   let range = |name: &[u8]| -> Result<Range<usize>, Error> {
-      let (_, section) = sections.section_by_name(endian, name).ok_or_else(|| {
-         Error::Host(format!(
-            "{path}: no {} section",
-            String::from_utf8_lossy(name)
-         ))
-      })?;
-      let start = usize::try_from(section.sh_offset(endian).into()).map_err(|_| Error::Truncated)?;
-      let size = usize::try_from(section.sh_size(endian).into()).map_err(|_| Error::Truncated)?;
-      Ok(start..start + size)
+   let file = parse(path, data)?;
+   let range = |name: &str| -> Result<Range<usize>, Error> {
+      let (start, size) = section(path, &file, name)?
+         .file_range()
+         .ok_or(Error::Truncated)?;
+      let start = usize::try_from(start).map_err(|_| Error::Truncated)?;
+      Ok(start..start + usize::try_from(size).map_err(|_| Error::Truncated)?)
    };
-   let dynamic = Bytes(data).slice(range(b".dynamic")?)?;
-   let strings = range(b".dynstr")?;
+   let dynamic = Bytes(data).slice(range(".dynamic")?)?;
+   let strings = range(".dynstr")?;
 
-   // ELF64 `Dyn` is two 8-byte words, ELF32 two 4-byte words.
-   let word = usize::from(header.is_type_64()) * 4 + 4;
+   // `Dyn` is two words, 8 bytes each in ELF64 and 4 in ELF32.
+   let word = if file.is_64() { 8 } else { 4 };
    let read = |bytes: &[u8]| -> u64 {
       let mut buf = [0u8; 8];
       buf[..bytes.len()].copy_from_slice(bytes);
@@ -208,34 +182,30 @@ fn access_evaluator(path: &str, data: &[u8], file: &ElfFile<'_>) -> Result<usize
 }
 
 fn text_range(path: &str, data: &[u8]) -> Result<Range<usize>, Error> {
-   match data.get(4) {
-      Some(2) => text_range_with::<FileHeader64<Endianness>>(path, data),
-      Some(1) => text_range_with::<FileHeader32<Endianness>>(path, data),
-      _ => Err(Error::Host(format!("{path}: not an ELF file"))),
-   }
+   let file = parse(path, data)?;
+   let text = section(path, &file, ".text")?;
+   let start = usize::try_from(text.address()).map_err(|_| Error::Truncated)?;
+   Ok(start..start + usize::try_from(text.size()).map_err(|_| Error::Truncated)?)
 }
 
-fn text_range_with<Elf>(path: &str, data: &[u8]) -> Result<Range<usize>, Error>
-where
-   Elf: FileHeader<Endian = Endianness>,
-   Elf::Word: Into<u64>,
-{
-   let parse = |source: object::Error| Error::Host(format!("{path}: {source}"));
-   let header = Elf::parse(data).map_err(parse)?;
-   let endian = header.endian().map_err(parse)?;
-   let (_, text) = header
-      .sections(endian, data)
-      .map_err(parse)?
-      .section_by_name(endian, b".text")
-      .ok_or_else(|| Error::Host(format!("{path}: no .text section")))?;
-   let start = usize::try_from(text.sh_addr(endian).into()).map_err(|_| Error::Truncated)?;
-   Ok(start..start + usize::try_from(text.sh_size(endian).into()).map_err(|_| Error::Truncated)?)
+fn parse<'data>(path: &str, data: &'data [u8]) -> Result<object::File<'data>, Error> {
+   object::File::parse(data).map_err(|source| Error::Host(format!("{path}: {source}")))
+}
+
+fn section<'data, 'file>(
+   path: &str,
+   file: &'file object::File<'data>,
+   name: &str,
+) -> Result<object::Section<'data, 'file>, Error> {
+   file
+      .section_by_name(name)
+      .ok_or_else(|| Error::Host(format!("{path}: no {name} section")))
 }
 
 /// `(instruction, target)` for every PC-relative address the code forms. On
 /// arm64 that is `adrp` followed within four instructions by an `add` or 64-bit
 /// `ldr` on the same register. On x86_64 it is a REX.W `lea` or `mov` from
-/// `[rip + disp32]`.
+/// `[rip + disp32]`. ARM is [`thumb_references`].
 fn references(
    machine: Machine,
    base: usize,
@@ -305,51 +275,46 @@ fn references(
          }))
       },
 
-      // Thumb-2 forms a `.data.rel.ro` address as `ldr Rn, [pc, #x]` loading
-      // `target - (add_pc + 4)`, then `add Rn, pc`. The literal pool word holds
-      // the offset, the target itself never appears.
-      Machine::Arm => {
-         let word = |at: usize| -> Option<i32> {
-            let off = at.checked_sub(base)?;
-            Some(i32::from_le_bytes(code.get(off..off + 4)?.try_into().ok()?))
-         };
-         let half = |at: usize| -> Option<u16> {
-            let off = at.checked_sub(base)?;
-            Some(u16::from_le_bytes(code.get(off..off + 2)?.try_into().ok()?))
-         };
-         let mut out = Vec::new();
-         let mut literal = [None; 16];
-         let (mut at, end) = (base, base + code.len());
-         while let Some(h1) = half(at) {
-            if matches!(h1 >> 11, 0b11101 | 0b11110 | 0b11111) {
-               if (h1 & 0xFF7F) == 0xF85F
-                  && let Some(h2) = half(at + 2)
-               {
-                  let up = (h1 >> 7) & 1 == 1;
-                  let (rt, imm) = ((h2 >> 12) & 0xF, usize::from(h2 & 0xFFF));
-                  let page = (at + 4) & !3;
-                  let la = if up { page + imm } else { page.wrapping_sub(imm) };
-                  literal[rt as usize] = word(la);
-               }
-               at += 4;
-               continue;
-            }
-            if (h1 & 0xF800) == 0x4800 {
-               let rt = (h1 >> 8) & 7;
-               let la = ((at + 4) & !3) + usize::from(h1 & 0xFF) * 4;
-               literal[rt as usize] = word(la);
-            } else if (h1 & 0xFF78) == 0x4478 {
-               let rn = (((h1 >> 7) & 1) << 3) | (h1 & 7);
-               if let Some(offset) = literal[rn as usize] {
-                  out.push((at, (at + 4).wrapping_add_signed(offset as isize)));
-               }
-            }
-            at += 2;
-            if at >= end {
-               break;
-            }
-         }
-         Box::new(out.into_iter())
-      },
+      Machine::Arm => Box::new(thumb_references(base, code).into_iter()),
    }
+}
+
+/// Thumb-2 forms a `.data.rel.ro` address as `ldr Rn, [pc, #x]` or its `ldr.w`
+/// form, loading `target - (pc + 4)` from the literal pool, then `add Rn, pc`.
+/// The target itself never appears in the file.
+fn thumb_references(base: usize, code: &[u8]) -> Vec<(usize, usize)> {
+   let half = |at: usize| Some(u16::from_le_bytes(code.get(at..at + 2)?.try_into().ok()?));
+   let word = |at: usize| Some(i32::from_le_bytes(code.get(at..at + 4)?.try_into().ok()?));
+   let mut loaded = [None; 16];
+   let mut found = Vec::new();
+   let mut at = 0;
+   while let Some(first) = half(at) {
+      let pool = (at + 4) & !3;
+      if matches!(first >> 11, 0b11101..=0b11111) {
+         if first & 0xFF7F == 0xF85F
+            && let Some(second) = half(at + 2)
+         {
+            let imm = usize::from(second & 0xFFF);
+            let literal = if first & 0x80 == 0 {
+               pool.checked_sub(imm)
+            } else {
+               pool.checked_add(imm)
+            };
+            loaded[usize::from(second >> 12)] = literal.and_then(word);
+         }
+         at += 4;
+         continue;
+      }
+      if first & 0xF800 == 0x4800 {
+         loaded[usize::from((first >> 8) & 7)] = word(pool + usize::from(first & 0xFF) * 4);
+      } else if first & 0xFF78 == 0x4478 {
+         let rn = usize::from((((first >> 7) & 1) << 3) | (first & 7));
+         if let Some(offset) = loaded[rn] {
+            let pc = base + at + 4;
+            found.push((base + at, pc.wrapping_add_signed(offset as isize)));
+         }
+      }
+      at += 2;
+   }
+   found
 }

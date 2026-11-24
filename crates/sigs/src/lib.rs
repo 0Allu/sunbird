@@ -28,17 +28,16 @@ pub struct RawStr {
    pub len: usize,
 }
 
-/// Phoenix's gateway event, `name` and `data` are borrowed UTF-8 with `data`
-/// holding the raw dispatch JSON. `rest` is opaque and copied through
-/// unchanged.
 /// Host fields after `name` and `data` that a handler reads and a synthetic
-/// event must carry. The arm32 handler reads only `name` and `data`, so there
-/// are none there.
+/// event must carry. The arm32 handler reads only `name` and `data`.
 #[cfg(not(target_arch = "arm"))]
 pub const REST_WORDS: usize = 4;
 #[cfg(target_arch = "arm")]
 pub const REST_WORDS: usize = 0;
 
+/// Phoenix's gateway event, `name` and `data` are borrowed UTF-8 with `data`
+/// holding the raw dispatch JSON. `rest` is opaque and copied through
+/// unchanged.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct GatewayEvent {
@@ -47,14 +46,15 @@ pub struct GatewayEvent {
    pub rest: [u64; REST_WORDS],
 }
 
-/// The Rust `Result` a handler returns through a hidden pointer, 32 bytes on
-/// the 64-bit targets and 16 on armeabi-v7a, where the error half is pointer
-/// sized. The `Ok` niche is `u64::MAX` in the first word on every target.
+/// Size of [`HandlerResult`] in words. The error half is pointer sized, so it
+/// is half as long on armeabi-v7a.
 #[cfg(not(target_arch = "arm"))]
 pub const RESULT_WORDS: usize = 4;
 #[cfg(target_arch = "arm")]
 pub const RESULT_WORDS: usize = 2;
 
+/// The Rust `Result` a handler returns through a hidden pointer. The `Ok`
+/// niche is `u64::MAX` in the first word on every target.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct HandlerResult(pub [u64; RESULT_WORDS]);

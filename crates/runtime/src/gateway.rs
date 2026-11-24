@@ -71,9 +71,9 @@ thread_local! {
 /// hook can feed Phoenix another event on the same store thread.
 #[derive(Clone, Copy)]
 struct Handling {
+   rest:  [u64; REST_WORDS],
    store: *mut c_void,
    ctx:   *mut c_void,
-   rest:  [u64; REST_WORDS],
 }
 
 /// Points every registry entry at [`detour`]. Phoenix looks handlers up in the

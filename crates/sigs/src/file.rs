@@ -16,6 +16,7 @@ use object::{
       FileHeader,
       ProgramHeader,
       SectionHeader,
+      SectionTable,
    },
 };
 use phoenix_hook::image::{
@@ -174,37 +175,8 @@ impl<'a> ElfFile<'a> {
       }
 
       if let Some(relative) = relative {
-         for section in header.sections(endian, data).map_err(parse)?.iter() {
-            let contents = || section.data(endian, data).map_err(parse);
-
-            let relocs = match section.sh_type(endian) {
-               elf::SHT_RELA => plain_rela(contents()?, relative),
-               elf::SHT_ANDROID_RELA => {
-                  aps2(contents()?, relative).map_err(|message| {
-                     FileError::Packed {
-                        path: path.to_owned(),
-                        message,
-                     }
-                  })?
-               },
-               _ => continue,
-            };
-
-            for (offset, addend) in relocs {
-               let segment = image
-                  .segments
-                  .iter_mut()
-                  .find(|segment| segment.contains(offset))
-                  .ok_or_else(|| {
-                     FileError::Relocation {
-                        path: path.to_owned(),
-                        offset,
-                     }
-                  })?;
-               let at = offset - segment.addr;
-               segment.bytes.to_mut()[at..at + 8].copy_from_slice(&addend.to_le_bytes());
-            }
-         }
+         let sections = header.sections(endian, data).map_err(parse)?;
+         apply_relocations(path, endian, data, &sections, relative, &mut image.segments)?;
       }
 
       Ok(Self {
@@ -322,4 +294,57 @@ fn aps2(bytes: &[u8], relative: u32) -> Result<Vec<(usize, u64)>, &'static str> 
       }
    }
    Ok(out)
+}
+
+/// Writes the addends of `relative` relocations into the segments, as the
+/// linker would at load.
+fn apply_relocations<Elf>(
+   path: &str,
+   endian: Endianness,
+   data: &[u8],
+   sections: &SectionTable<'_, Elf>,
+   relative: u32,
+   segments: &mut [Segment<'_>],
+) -> Result<(), FileError>
+where
+   Elf: FileHeader<Endian = Endianness>,
+{
+   for section in sections.iter() {
+      let contents = || {
+         section.data(endian, data).map_err(|source| {
+            FileError::Parse {
+               path: path.to_owned(),
+               source,
+            }
+         })
+      };
+
+      let relocs = match section.sh_type(endian) {
+         elf::SHT_RELA => plain_rela(contents()?, relative),
+         elf::SHT_ANDROID_RELA => {
+            aps2(contents()?, relative).map_err(|message| {
+               FileError::Packed {
+                  path: path.to_owned(),
+                  message,
+               }
+            })?
+         },
+         _ => continue,
+      };
+
+      for (offset, addend) in relocs {
+         let segment = segments
+            .iter_mut()
+            .find(|segment| segment.contains(offset))
+            .ok_or_else(|| {
+               FileError::Relocation {
+                  path: path.to_owned(),
+                  offset,
+               }
+            })?;
+         let at = offset - segment.addr;
+         segment.bytes.to_mut()[at..at + 8].copy_from_slice(&addend.to_le_bytes());
+      }
+   }
+   Ok(())
 }

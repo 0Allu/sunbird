@@ -105,15 +105,15 @@ impl Segment<'_> {
 /// relative relocations applied, so pointer slots hold the addresses code would
 /// see.
 pub struct Image<'a> {
-   pub path:         String,
-   pub build_id:     Option<BuildId>,
-   pub segments:     Vec<Segment<'a>>,
+   pub path:          String,
+   pub build_id:      Option<BuildId>,
+   pub segments:      Vec<Segment<'a>>,
    /// Address of `.eh_frame_hdr`, from `PT_GNU_EH_FRAME`.
-   pub eh_frame_hdr: Option<usize>,
+   pub eh_frame_hdr:  Option<usize>,
    /// `.ARM.exidx` address and byte length, from `PT_ARM_EXIDX`. ARM32 unwinds
    /// through this table, so it carries the function starts `.eh_frame_hdr`
    /// holds on other targets.
-   pub arm_exidx:    Option<(usize, usize)>,
+   pub arm_exidx:     Option<(usize, usize)>,
    /// Width of a pointer in this image, 4 for ELF32 and 8 for ELF64. A file
    /// parsed offline keeps the target's width, not the host's.
    pub pointer_width: usize,
@@ -370,10 +370,10 @@ impl Image<'_> {
 
    #[must_use]
    pub fn read_usize(&self, addr: usize) -> Option<usize> {
-      let mut word = [0u8; 8];
       let bytes = self.read(addr, self.pointer_width)?;
-      word[..self.pointer_width].copy_from_slice(bytes);
-      Some(usize::try_from(u64::from_le_bytes(word)).unwrap_or(usize::MAX))
+      let mut word = [0u8; 8];
+      word[..bytes.len()].copy_from_slice(bytes);
+      usize::try_from(u64::from_le_bytes(word)).ok()
    }
 
    #[must_use]
@@ -394,16 +394,16 @@ impl Image<'_> {
    /// pointers to strings. Images without a search table fall back to it.
    #[must_use]
    pub fn is_function(&self, addr: usize) -> bool {
-      if let Some((base, len)) = self.arm_exidx {
-         // Thumb code pointers carry bit 0, the exidx table holds the even
-         // function address.
-         let target = addr & !1;
-         return self.exidx_containing(base, len / 8, target) == Some(target);
-      }
-      if self.eh_frame_hdr.is_none() {
+      if self.arm_exidx.is_none() && self.eh_frame_hdr.is_none() {
          return self.is_code(addr);
       }
-      self.function_containing(addr) == Some(addr)
+      // Thumb code pointers carry bit 0, and `.ARM.exidx` holds the even start.
+      let start = if self.arm_exidx.is_some() {
+         addr & !1
+      } else {
+         addr
+      };
+      self.function_containing(start) == Some(start)
    }
 
    /// Start of the last function at or below `addr` in the unwind table. The
@@ -411,13 +411,20 @@ impl Image<'_> {
    /// to it. ARM32 reads `.ARM.exidx`, every other target `.eh_frame_hdr`.
    #[must_use]
    pub fn function_containing(&self, addr: usize) -> Option<usize> {
-      if let Some((base, len)) = self.arm_exidx {
-         return self.exidx_containing(base, len / 8, addr);
-      }
-
       const UDATA4: u8 = 0x03;
       const SDATA4: u8 = 0x0B;
       const DATAREL_SDATA4: u8 = 0x3B;
+
+      if let Some((base, len)) = self.arm_exidx {
+         // Each 8-byte entry opens with a prel31 offset from it to its
+         // function.
+         let start = |index: usize| {
+            let at = base + index * 8;
+            let prel31 = (self.read_u32(at)? << 1).cast_signed() >> 1;
+            at.checked_add_signed(prel31 as isize)
+         };
+         return last_at_or_below(len / 8, start, addr);
+      }
 
       let hdr = self.eh_frame_hdr?;
       let &[1, frame_encoding, UDATA4, DATAREL_SDATA4] = self.read(hdr, 4)? else {
@@ -431,44 +438,24 @@ impl Image<'_> {
       let start = |index: usize| {
          word(hdr + 12 + index * 8).and_then(|rel| hdr.checked_add_signed(rel as isize))
       };
-
-      let count = usize::try_from(word(hdr + 8)?).ok()?;
-      let (mut low, mut high) = (0, count);
-      while low < high {
-         let mid = low + (high - low) / 2;
-         if start(mid)? <= addr {
-            low = mid + 1;
-         } else {
-            high = mid;
-         }
-      }
-      start(low.checked_sub(1)?)
+      last_at_or_below(usize::try_from(word(hdr + 8)?).ok()?, start, addr)
    }
+}
 
-   /// Binary search over `.ARM.exidx`, whose `count` entries are 8 bytes each
-   /// and sorted by function address. The first word is a prel31 offset from the
-   /// entry to the function it unwinds.
-   fn exidx_containing(&self, base: usize, count: usize, addr: usize) -> Option<usize> {
-      let start = |index: usize| {
-         let at = base + index * 8;
-         let word = self.read_u32(at)?;
-         let offset = word & 0x7FFF_FFFF;
-         let offset = if offset & 0x4000_0000 != 0 {
-            (offset | 0x8000_0000) as i32
-         } else {
-            offset as i32
-         };
-         at.checked_add_signed(offset as isize)
-      };
-      let (mut low, mut high) = (0, count);
-      while low < high {
-         let mid = low + (high - low) / 2;
-         if start(mid)? <= addr {
-            low = mid + 1;
-         } else {
-            high = mid;
-         }
+/// The last of `count` ascending function starts at or below `addr`.
+fn last_at_or_below(
+   count: usize,
+   start: impl Fn(usize) -> Option<usize>,
+   addr: usize,
+) -> Option<usize> {
+   let (mut low, mut high) = (0, count);
+   while low < high {
+      let mid = low + (high - low) / 2;
+      if start(mid)? <= addr {
+         low = mid + 1;
+      } else {
+         high = mid;
       }
-      start(low.checked_sub(1)?)
    }
+   start(low.checked_sub(1)?)
 }
