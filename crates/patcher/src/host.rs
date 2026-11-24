@@ -8,6 +8,7 @@ use object::{
    Endianness,
    elf::{
       self,
+      FileHeader32,
       FileHeader64,
    },
    read::elf::{
@@ -42,16 +43,18 @@ pub struct Patched {
    pub access:  usize,
 }
 
-/// `e_machine` of an ELF64 file, without mapping it.
+/// `e_machine` of an ELF file, without mapping it.
 pub fn machine(path: &str, data: &[u8]) -> Result<Machine, Error> {
    let bytes = Bytes(data);
-   if bytes.array::<5>(0).ok() != Some(*b"\x7fELF\x02") {
-      return Err(Error::Host(format!("{path}: not an ELF64 file")));
+   if bytes.array::<4>(0).ok() != Some(*b"\x7fELF") {
+      return Err(Error::Host(format!("{path}: not an ELF file")));
    }
-   match bytes.u16(18)? {
-      machine if machine == elf::EM_AARCH64.0 => Ok(Machine::Aarch64),
-      machine if machine == elf::EM_X86_64.0 => Ok(Machine::X86_64),
-      other => {
+   let class = data.get(4).copied();
+   match (class, bytes.u16(18)?) {
+      (Some(2), machine) if machine == elf::EM_AARCH64.0 => Ok(Machine::Aarch64),
+      (Some(2), machine) if machine == elf::EM_X86_64.0 => Ok(Machine::X86_64),
+      (Some(1), machine) if machine == elf::EM_ARM.0 => Ok(Machine::Arm),
+      (_, other) => {
          Err(Error::Host(format!(
             "{path}: unsupported e_machine {other}"
          )))
@@ -76,10 +79,11 @@ pub fn patch(path: &str, data: &mut [u8], needed: Option<&str>) -> Result<Patche
       data[at..at + needed.len()].copy_from_slice(needed.as_bytes());
    }
    // Returns Some(true), an Option<bool> in the low byte of the return
-   // register.
+   // register. ARM is Thumb-2, the evaluator is a Thumb function.
    let return_true: &[u8] = match machine {
       Machine::Aarch64 => &[0x20, 0x00, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6],
       Machine::X86_64 => &[0xB0, 0x01, 0xC3],
+      Machine::Arm => &[0x01, 0x20, 0x70, 0x47],
    };
    data[access_at..access_at + return_true.len()].copy_from_slice(return_true);
    Ok(Patched { machine, access })
@@ -99,10 +103,22 @@ pub fn rename_needed(path: &str, data: &mut [u8], needed: &str) -> Result<(), Er
 
 /// File offset of the `liblog.so` string a `DT_NEEDED` entry names.
 fn needed_name(path: &str, data: &[u8]) -> Result<usize, Error> {
+   match data.get(4) {
+      Some(2) => needed_name_with::<FileHeader64<Endianness>>(path, data),
+      Some(1) => needed_name_with::<FileHeader32<Endianness>>(path, data),
+      _ => Err(Error::Host(format!("{path}: not an ELF file"))),
+   }
+}
+
+fn needed_name_with<Elf>(path: &str, data: &[u8]) -> Result<usize, Error>
+where
+   Elf: FileHeader<Endian = Endianness>,
+   Elf::Word: Into<u64>,
+{
    const DT_NEEDED: u64 = 1;
 
    let parse = |source: object::Error| Error::Host(format!("{path}: {source}"));
-   let header = FileHeader64::<Endianness>::parse(data).map_err(parse)?;
+   let header = Elf::parse(data).map_err(parse)?;
    let endian = header.endian().map_err(parse)?;
    let sections = header.sections(endian, data).map_err(parse)?;
    let range = |name: &[u8]| -> Result<Range<usize>, Error> {
@@ -112,23 +128,23 @@ fn needed_name(path: &str, data: &[u8]) -> Result<usize, Error> {
             String::from_utf8_lossy(name)
          ))
       })?;
-      let start = usize::try_from(section.sh_offset(endian)).map_err(|_| Error::Truncated)?;
-      Ok(start..start + usize::try_from(section.sh_size(endian)).map_err(|_| Error::Truncated)?)
+      let start = usize::try_from(section.sh_offset(endian).into()).map_err(|_| Error::Truncated)?;
+      let size = usize::try_from(section.sh_size(endian).into()).map_err(|_| Error::Truncated)?;
+      Ok(start..start + size)
    };
    let dynamic = Bytes(data).slice(range(b".dynamic")?)?;
    let strings = range(b".dynstr")?;
 
+   // ELF64 `Dyn` is two 8-byte words, ELF32 two 4-byte words.
+   let word = usize::from(header.is_type_64()) * 4 + 4;
+   let read = |bytes: &[u8]| -> u64 {
+      let mut buf = [0u8; 8];
+      buf[..bytes.len()].copy_from_slice(bytes);
+      u64::from_le_bytes(buf)
+   };
    let hits = dynamic
-      .as_chunks::<16>()
-      .0
-      .iter()
-      .map(|entry| {
-         let (tag, value) = entry.split_at(8);
-         (
-            u64::from_le_bytes(tag.try_into().unwrap()),
-            u64::from_le_bytes(value.try_into().unwrap()),
-         )
-      })
+      .chunks_exact(2 * word)
+      .map(|entry| (read(&entry[..word]), read(&entry[word..])))
       .filter(|&(tag, _)| tag == DT_NEEDED)
       .filter_map(|(_, value)| strings.start.checked_add(usize::try_from(value).ok()?))
       .filter(|&at| {
@@ -150,9 +166,7 @@ fn needed_name(path: &str, data: &[u8]) -> Result<usize, Error> {
 fn access_evaluator(path: &str, data: &[u8], file: &ElfFile<'_>) -> Result<usize, Error> {
    let image = &file.image;
    let text = text_range(path, data)?;
-   // The host's pointers are 8 bytes whatever this build's usize is, since the
-   // site runs this as wasm32.
-   let read_u64 = |at: usize| Some(u64::from_le_bytes(image.read(at, 8)?.try_into().ok()?));
+   let width = image.pointer_width;
    let slots = image
       .find_bytes(EXPERIMENT.as_bytes())
       .into_iter()
@@ -163,13 +177,13 @@ fn access_evaluator(path: &str, data: &[u8], file: &ElfFile<'_>) -> Result<usize
             .iter()
             .filter(|segment| !segment.executable)
             .flat_map(|segment| {
-               memmem::find_iter(&segment.bytes, &target)
+               memmem::find_iter(&segment.bytes[..], &target[..width])
                   .map(|at| segment.addr + at)
                   .collect::<Vec<usize>>()
             })
             .collect::<Vec<usize>>()
       })
-      .filter(|slot| slot % 8 == 0 && read_u64(slot + 8) == Some(EXPERIMENT.len() as u64))
+      .filter(|slot| slot % width == 0 && image.read_usize(slot + width) == Some(EXPERIMENT.len()))
       .collect::<Vec<usize>>();
 
    let code = image
@@ -194,16 +208,28 @@ fn access_evaluator(path: &str, data: &[u8], file: &ElfFile<'_>) -> Result<usize
 }
 
 fn text_range(path: &str, data: &[u8]) -> Result<Range<usize>, Error> {
+   match data.get(4) {
+      Some(2) => text_range_with::<FileHeader64<Endianness>>(path, data),
+      Some(1) => text_range_with::<FileHeader32<Endianness>>(path, data),
+      _ => Err(Error::Host(format!("{path}: not an ELF file"))),
+   }
+}
+
+fn text_range_with<Elf>(path: &str, data: &[u8]) -> Result<Range<usize>, Error>
+where
+   Elf: FileHeader<Endian = Endianness>,
+   Elf::Word: Into<u64>,
+{
    let parse = |source: object::Error| Error::Host(format!("{path}: {source}"));
-   let header = FileHeader64::<Endianness>::parse(data).map_err(parse)?;
+   let header = Elf::parse(data).map_err(parse)?;
    let endian = header.endian().map_err(parse)?;
    let (_, text) = header
       .sections(endian, data)
       .map_err(parse)?
       .section_by_name(endian, b".text")
       .ok_or_else(|| Error::Host(format!("{path}: no .text section")))?;
-   let start = usize::try_from(text.sh_addr(endian)).map_err(|_| Error::Truncated)?;
-   Ok(start..start + usize::try_from(text.sh_size(endian)).map_err(|_| Error::Truncated)?)
+   let start = usize::try_from(text.sh_addr(endian).into()).map_err(|_| Error::Truncated)?;
+   Ok(start..start + usize::try_from(text.sh_size(endian).into()).map_err(|_| Error::Truncated)?)
 }
 
 /// `(instruction, target)` for every PC-relative address the code forms. On
@@ -277,6 +303,53 @@ fn references(
                (base + at + 7).wrapping_add_signed(disp as isize),
             ))
          }))
+      },
+
+      // Thumb-2 forms a `.data.rel.ro` address as `ldr Rn, [pc, #x]` loading
+      // `target - (add_pc + 4)`, then `add Rn, pc`. The literal pool word holds
+      // the offset, the target itself never appears.
+      Machine::Arm => {
+         let word = |at: usize| -> Option<i32> {
+            let off = at.checked_sub(base)?;
+            Some(i32::from_le_bytes(code.get(off..off + 4)?.try_into().ok()?))
+         };
+         let half = |at: usize| -> Option<u16> {
+            let off = at.checked_sub(base)?;
+            Some(u16::from_le_bytes(code.get(off..off + 2)?.try_into().ok()?))
+         };
+         let mut out = Vec::new();
+         let mut literal = [None; 16];
+         let (mut at, end) = (base, base + code.len());
+         while let Some(h1) = half(at) {
+            if matches!(h1 >> 11, 0b11101 | 0b11110 | 0b11111) {
+               if (h1 & 0xFF7F) == 0xF85F
+                  && let Some(h2) = half(at + 2)
+               {
+                  let up = (h1 >> 7) & 1 == 1;
+                  let (rt, imm) = ((h2 >> 12) & 0xF, usize::from(h2 & 0xFFF));
+                  let page = (at + 4) & !3;
+                  let la = if up { page + imm } else { page.wrapping_sub(imm) };
+                  literal[rt as usize] = word(la);
+               }
+               at += 4;
+               continue;
+            }
+            if (h1 & 0xF800) == 0x4800 {
+               let rt = (h1 >> 8) & 7;
+               let la = ((at + 4) & !3) + usize::from(h1 & 0xFF) * 4;
+               literal[rt as usize] = word(la);
+            } else if (h1 & 0xFF78) == 0x4478 {
+               let rn = (((h1 >> 7) & 1) << 3) | (h1 & 7);
+               if let Some(offset) = literal[rn as usize] {
+                  out.push((at, (at + 4).wrapping_add_signed(offset as isize)));
+               }
+            }
+            at += 2;
+            if at >= end {
+               break;
+            }
+         }
+         Box::new(out.into_iter())
       },
    }
 }

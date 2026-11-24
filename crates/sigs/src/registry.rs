@@ -2,14 +2,11 @@ use std::collections::HashMap;
 
 use phoenix_hook::image::Image;
 
-use crate::GATEWAY_HANDLER_FIELD;
-
 /// Every Phoenix build has this event, so its entry seeds the walk.
 const SEED: &str = "MESSAGE_CREATE";
 /// Seeds the walk over the reducers behind the exported
 /// `LIBDISCORD_REDUCERS_TABLE`, whose per-domain slices sit back to back.
 const DOMAIN_SEED: &str = "READY_SUPPLEMENTAL";
-const STRIDE: usize = 3 * size_of::<usize>();
 const MAX_NAME: usize = 64;
 
 #[derive(Debug, flub::Error)]
@@ -102,9 +99,10 @@ impl GatewayRegistry {
 }
 
 fn entry(image: &Image<'_>, slot: usize) -> Option<GatewayEntry> {
+   let width = image.pointer_width;
    let name = image.read_usize(slot)?;
-   let len = image.read_usize(slot + size_of::<usize>())?;
-   let handler = image.read_usize(slot + GATEWAY_HANDLER_FIELD)?;
+   let len = image.read_usize(slot + width)?;
+   let handler = image.read_usize(slot + 2 * width)?;
    if !(1..=MAX_NAME).contains(&len) || !image.is_function(handler) {
       return None;
    }
@@ -123,9 +121,11 @@ fn entry(image: &Image<'_>, slot: usize) -> Option<GatewayEntry> {
 }
 
 fn walk(image: &Image<'_>, seed: &'static str) -> Result<Vec<GatewayEntry>, Error> {
-   let mut seeds = table_entries(image, seed, GATEWAY_HANDLER_FIELD);
+   let stride = 3 * image.pointer_width;
+   let mut seeds = table_entries(image, seed, 2 * image.pointer_width);
    seeds.sort_unstable();
    seeds.dedup();
+
    let start = match seeds[..] {
       [(slot, _)] => slot,
       [] => return Err(Error::NotFound { seed }),
@@ -138,14 +138,14 @@ fn walk(image: &Image<'_>, seed: &'static str) -> Result<Vec<GatewayEntry>, Erro
    };
 
    let mut first = start;
-   while let Some(previous) = first.checked_sub(STRIDE)
+   while let Some(previous) = first.checked_sub(stride)
       && entry(image, previous).is_some()
    {
       first = previous;
    }
 
    Ok((0..)
-      .map(|index| first + index * STRIDE)
+      .map(|index| first + index * stride)
       .map_while(|slot| entry(image, slot))
       .collect())
 }
@@ -163,7 +163,7 @@ fn table_entries(image: &Image<'_>, key: &str, field: usize) -> Vec<(usize, usiz
          image
             .pointers_to(string)
             .into_iter()
-            .filter(|slot| image.read_usize(slot + size_of::<usize>()) == Some(key.len()))
+            .filter(|slot| image.read_usize(slot + image.pointer_width) == Some(key.len()))
             .filter_map(|slot| Some((slot, image.read_usize(slot + field)?)))
             .filter(|(_, code)| image.is_function(*code))
             .collect::<Vec<_>>()

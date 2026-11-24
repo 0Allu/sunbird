@@ -53,6 +53,7 @@
               latest.rustc
               latest.rustfmt
               targets.aarch64-linux-android.latest.rust-std
+              targets.armv7-linux-androideabi.latest.rust-std
               targets.x86_64-linux-android.latest.rust-std
               targets.wasm32-unknown-unknown.latest.rust-std
             ];

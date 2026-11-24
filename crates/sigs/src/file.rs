@@ -9,6 +9,7 @@ use object::{
    Endianness,
    elf::{
       self,
+      FileHeader32,
       FileHeader64,
    },
    read::elf::{
@@ -23,8 +24,14 @@ use phoenix_hook::image::{
    Segment,
 };
 
+/// `PT_ARM_EXIDX`, the ARM unwind table segment. The `object` crate exposes no
+/// constant for it.
+const PT_ARM_EXIDX: object::elf::ProgramType = object::elf::ProgramType(0x7000_0001);
+
 #[derive(Debug, flub::Error)]
 pub enum FileError {
+   #[error("{path}: not an ELF file")]
+   NotElf { path: String },
    #[error("{path}: {source}")]
    Parse {
       path:   String,
@@ -54,6 +61,7 @@ pub enum FileError {
 pub enum Machine {
    Aarch64,
    X86_64,
+   Arm,
 }
 
 /// A `PT_LOAD` segment's place in the file.
@@ -75,6 +83,22 @@ pub struct ElfFile<'a> {
 
 impl<'a> ElfFile<'a> {
    pub fn parse(path: &str, data: &'a [u8]) -> Result<Self, FileError> {
+      match data.get(4) {
+         Some(2) => Self::build::<FileHeader64<Endianness>>(path, data),
+         Some(1) => Self::build::<FileHeader32<Endianness>>(path, data),
+         _ => {
+            Err(FileError::NotElf {
+               path: path.to_owned(),
+            })
+         },
+      }
+   }
+
+   fn build<Elf>(path: &str, data: &'a [u8]) -> Result<Self, FileError>
+   where
+      Elf: FileHeader<Endian = Endianness>,
+      Elf::Word: Into<u64>,
+   {
       let parse = |source| {
          FileError::Parse {
             path: path.to_owned(),
@@ -93,11 +117,14 @@ impl<'a> ElfFile<'a> {
          }
       };
 
-      let header = FileHeader64::<Endianness>::parse(data).map_err(parse)?;
+      let header = Elf::parse(data).map_err(parse)?;
       let endian = header.endian().map_err(parse)?;
-      let (machine, relative) = match header.e_machine(endian) {
-         elf::EM_X86_64 => (Machine::X86_64, elf::R_X86_64_RELATIVE.0),
-         elf::EM_AARCH64 => (Machine::Aarch64, elf::R_AARCH64_RELATIVE.0),
+      // ARM32 keeps its `R_ARM_RELATIVE` addends in place, so only the RELA
+      // targets need writing back. `relative` is the matching reloc type.
+      let (machine, pointer_width, relative) = match header.e_machine(endian) {
+         elf::EM_X86_64 => (Machine::X86_64, 8, Some(elf::R_X86_64_RELATIVE.0)),
+         elf::EM_AARCH64 => (Machine::Aarch64, 8, Some(elf::R_AARCH64_RELATIVE.0)),
+         elf::EM_ARM => (Machine::Arm, 4, None),
          other => {
             return Err(FileError::Machine {
                path:    path.to_owned(),
@@ -107,66 +134,76 @@ impl<'a> ElfFile<'a> {
       };
 
       let mut image = Image {
-         path:         path.to_owned(),
-         build_id:     None,
-         segments:     Vec::new(),
+         path: path.to_owned(),
+         build_id: None,
+         segments: Vec::new(),
          eh_frame_hdr: None,
+         arm_exidx: None,
+         pointer_width,
       };
       let mut loads = Vec::new();
       for segment in header.program_headers(endian, data).map_err(parse)? {
          let bytes = segment.data(endian, data).map_err(|()| truncated())?;
-         let vaddr = usize::try_from(segment.p_vaddr(endian)).map_err(address)?;
+         let vaddr = usize::try_from(segment.p_vaddr(endian).into()).map_err(address)?;
          let flags = segment.p_flags(endian);
 
          match segment.p_type(endian) {
             elf::PT_LOAD => {
                image.segments.push(Segment {
                   addr:       vaddr,
-                  bytes:      mapped(bytes, segment.p_memsz(endian)).map_err(address)?,
+                  bytes:      mapped(bytes, segment.p_memsz(endian).into()).map_err(address)?,
                   executable: flags.0 & elf::PF_X.0 != 0,
                   writable:   flags.0 & elf::PF_W.0 != 0,
                });
                loads.push(FileLoad {
                   vaddr,
-                  offset: usize::try_from(segment.p_offset(endian)).map_err(address)?,
+                  offset: usize::try_from(segment.p_offset(endian).into()).map_err(address)?,
                   size: bytes.len(),
                });
             },
             elf::PT_NOTE if image.build_id.is_none() => image.build_id = BuildId::from_notes(bytes),
             elf::PT_GNU_EH_FRAME => image.eh_frame_hdr = Some(vaddr),
+            PT_ARM_EXIDX => {
+               image.arm_exidx = Some((
+                  vaddr,
+                  usize::try_from(segment.p_memsz(endian).into()).map_err(address)?,
+               ));
+            },
             _ => {},
          }
       }
 
-      for section in header.sections(endian, data).map_err(parse)?.iter() {
-         let contents = || section.data(endian, data).map_err(parse);
+      if let Some(relative) = relative {
+         for section in header.sections(endian, data).map_err(parse)?.iter() {
+            let contents = || section.data(endian, data).map_err(parse);
 
-         let relocs = match section.sh_type(endian) {
-            elf::SHT_RELA => plain_rela(contents()?, relative),
-            elf::SHT_ANDROID_RELA => {
-               aps2(contents()?, relative).map_err(|message| {
-                  FileError::Packed {
-                     path: path.to_owned(),
-                     message,
-                  }
-               })?
-            },
-            _ => continue,
-         };
+            let relocs = match section.sh_type(endian) {
+               elf::SHT_RELA => plain_rela(contents()?, relative),
+               elf::SHT_ANDROID_RELA => {
+                  aps2(contents()?, relative).map_err(|message| {
+                     FileError::Packed {
+                        path: path.to_owned(),
+                        message,
+                     }
+                  })?
+               },
+               _ => continue,
+            };
 
-         for (offset, addend) in relocs {
-            let segment = image
-               .segments
-               .iter_mut()
-               .find(|segment| segment.contains(offset))
-               .ok_or_else(|| {
-                  FileError::Relocation {
-                     path: path.to_owned(),
-                     offset,
-                  }
-               })?;
-            let at = offset - segment.addr;
-            segment.bytes.to_mut()[at..at + 8].copy_from_slice(&addend.to_le_bytes());
+            for (offset, addend) in relocs {
+               let segment = image
+                  .segments
+                  .iter_mut()
+                  .find(|segment| segment.contains(offset))
+                  .ok_or_else(|| {
+                     FileError::Relocation {
+                        path: path.to_owned(),
+                        offset,
+                     }
+                  })?;
+               let at = offset - segment.addr;
+               segment.bytes.to_mut()[at..at + 8].copy_from_slice(&addend.to_le_bytes());
+            }
          }
       }
 

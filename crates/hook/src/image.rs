@@ -22,6 +22,7 @@ const NT_GNU_BUILD_ID: u32 = 3;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
 const PF_R: u32 = 4;
+const PT_ARM_EXIDX: u32 = 0x7000_0001;
 
 /// The `NT_GNU_BUILD_ID` note of an ELF module, 1 to 32 bytes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -109,6 +110,13 @@ pub struct Image<'a> {
    pub segments:     Vec<Segment<'a>>,
    /// Address of `.eh_frame_hdr`, from `PT_GNU_EH_FRAME`.
    pub eh_frame_hdr: Option<usize>,
+   /// `.ARM.exidx` address and byte length, from `PT_ARM_EXIDX`. ARM32 unwinds
+   /// through this table, so it carries the function starts `.eh_frame_hdr`
+   /// holds on other targets.
+   pub arm_exidx:    Option<(usize, usize)>,
+   /// Width of a pointer in this image, 4 for ELF32 and 8 for ELF64. A file
+   /// parsed offline keeps the target's width, not the host's.
+   pub pointer_width: usize,
 }
 
 #[cfg(unix)]
@@ -153,6 +161,8 @@ impl Image<'static> {
             build_id: None,
             segments: Vec::new(),
             eh_frame_hdr: None,
+            arm_exidx: None,
+            pointer_width: size_of::<usize>(),
          };
          for header in headers {
             let addr = bias + header.p_vaddr as usize;
@@ -173,6 +183,7 @@ impl Image<'static> {
                   image.build_id = BuildId::from_notes(bytes());
                },
                libc::PT_GNU_EH_FRAME => image.eh_frame_hdr = Some(addr),
+               PT_ARM_EXIDX => image.arm_exidx = Some((addr, len)),
                _ => {},
             }
          }
@@ -326,9 +337,11 @@ impl Image<'_> {
    /// Pointer-aligned slots in non-executable segments that hold `target`.
    #[must_use]
    pub fn pointers_to(&self, target: usize) -> Vec<usize> {
-      let width = size_of::<usize>();
+      let width = self.pointer_width;
       self
-         .find_in(&target.to_ne_bytes(), |segment| !segment.executable)
+         .find_in(&target.to_le_bytes()[..width], |segment| {
+            !segment.executable
+         })
          .into_iter()
          .filter(|slot| slot % width == 0)
          .collect()
@@ -357,9 +370,10 @@ impl Image<'_> {
 
    #[must_use]
    pub fn read_usize(&self, addr: usize) -> Option<usize> {
-      Some(usize::from_ne_bytes(
-         self.read(addr, size_of::<usize>())?.try_into().ok()?,
-      ))
+      let mut word = [0u8; 8];
+      let bytes = self.read(addr, self.pointer_width)?;
+      word[..self.pointer_width].copy_from_slice(bytes);
+      Some(usize::try_from(u64::from_le_bytes(word)).unwrap_or(usize::MAX))
    }
 
    #[must_use]
@@ -375,22 +389,32 @@ impl Image<'_> {
          .any(|segment| segment.executable && segment.contains(addr))
    }
 
-   /// Whether an FDE in `.eh_frame_hdr` starts at `addr`. Linkers often put
+   /// Whether an unwind table starts a function at `addr`. Linkers often put
    /// `.rodata` in the executable segment, so [`Image::is_code`] alone accepts
    /// pointers to strings. Images without a search table fall back to it.
    #[must_use]
    pub fn is_function(&self, addr: usize) -> bool {
+      if let Some((base, len)) = self.arm_exidx {
+         // Thumb code pointers carry bit 0, the exidx table holds the even
+         // function address.
+         let target = addr & !1;
+         return self.exidx_containing(base, len / 8, target) == Some(target);
+      }
       if self.eh_frame_hdr.is_none() {
          return self.is_code(addr);
       }
       self.function_containing(addr) == Some(addr)
    }
 
-   /// Start of the last FDE in `.eh_frame_hdr`'s search table at or below
-   /// `addr`. The table holds starts only, so an address past a function's end
-   /// still maps to it.
+   /// Start of the last function at or below `addr` in the unwind table. The
+   /// table holds starts only, so an address past a function's end still maps
+   /// to it. ARM32 reads `.ARM.exidx`, every other target `.eh_frame_hdr`.
    #[must_use]
    pub fn function_containing(&self, addr: usize) -> Option<usize> {
+      if let Some((base, len)) = self.arm_exidx {
+         return self.exidx_containing(base, len / 8, addr);
+      }
+
       const UDATA4: u8 = 0x03;
       const SDATA4: u8 = 0x0B;
       const DATAREL_SDATA4: u8 = 0x3B;
@@ -407,7 +431,35 @@ impl Image<'_> {
       let start = |index: usize| {
          word(hdr + 12 + index * 8).and_then(|rel| hdr.checked_add_signed(rel as isize))
       };
+
       let count = usize::try_from(word(hdr + 8)?).ok()?;
+      let (mut low, mut high) = (0, count);
+      while low < high {
+         let mid = low + (high - low) / 2;
+         if start(mid)? <= addr {
+            low = mid + 1;
+         } else {
+            high = mid;
+         }
+      }
+      start(low.checked_sub(1)?)
+   }
+
+   /// Binary search over `.ARM.exidx`, whose `count` entries are 8 bytes each
+   /// and sorted by function address. The first word is a prel31 offset from the
+   /// entry to the function it unwinds.
+   fn exidx_containing(&self, base: usize, count: usize, addr: usize) -> Option<usize> {
+      let start = |index: usize| {
+         let at = base + index * 8;
+         let word = self.read_u32(at)?;
+         let offset = word & 0x7FFF_FFFF;
+         let offset = if offset & 0x4000_0000 != 0 {
+            (offset | 0x8000_0000) as i32
+         } else {
+            offset as i32
+         };
+         at.checked_add_signed(offset as isize)
+      };
       let (mut low, mut high) = (0, count);
       while low < high {
          let mid = low + (high - low) / 2;
