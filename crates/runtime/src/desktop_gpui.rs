@@ -897,7 +897,6 @@ pub fn wrap_with_accessories(
 
 const DESKTOP_FULL: &[&str] = &[
    "silent-typing",
-   "nsfw-gate-bypass",
    "message-latency",
    "message-logger",
    "no-profile-themes",
