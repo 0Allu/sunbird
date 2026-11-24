@@ -1,10 +1,15 @@
 use std::{
    ffi::c_void,
+   path::PathBuf,
+   process::Command,
    ptr,
    sync::{
+      Mutex,
       OnceLock,
+      PoisonError,
       atomic::{
          AtomicBool,
+         AtomicU32,
          AtomicUsize,
          Ordering,
       },
@@ -12,19 +17,30 @@ use std::{
    thread,
 };
 
-use crate::Error;
+use crate::{
+   Error,
+   TrayConfig,
+};
 
 const CF_UNICODETEXT: u32 = 13;
 const GMEM_MOVEABLE: u32 = 0x0002;
 const SW_SHOWNORMAL: i32 = 1;
 
+const WM_NULL: u32 = 0x0000;
+const WM_DESTROY: u32 = 0x0002;
+const WM_COMMAND: u32 = 0x0111;
+const WM_HOTKEY: u32 = 0x0312;
 const WM_USER: u32 = 0x0400;
 const WM_TRAY: u32 = WM_USER + 1;
 const WM_LBUTTONUP: usize = 0x0202;
 const WM_LBUTTONDBLCLK: usize = 0x0203;
 const WM_RBUTTONUP: usize = 0x0205;
-const WM_COMMAND: u32 = 0x0111;
-const WM_DESTROY: u32 = 0x0002;
+const NIN_BALLOONUSERCLICK: usize = 0x0405;
+
+const MOD_CONTROL: u32 = 0x0002;
+const MOD_SHIFT: u32 = 0x0004;
+const MOD_NOREPEAT: u32 = 0x4000;
+const HOTKEY_ID: i32 = 0x5342;
 
 const NIM_ADD: u32 = 0x0000_0000;
 const NIM_MODIFY: u32 = 0x0000_0001;
@@ -33,35 +49,46 @@ const NIF_MESSAGE: u32 = 0x0000_0001;
 const NIF_ICON: u32 = 0x0000_0002;
 const NIF_TIP: u32 = 0x0000_0004;
 const NIF_INFO: u32 = 0x0000_0010;
-const NIIF_INFO: u32 = 0x0000_0001;
+const NIIF_USER: u32 = 0x0000_0004;
 
 const MF_STRING: u32 = 0x0000_0000;
+const MF_SEPARATOR: u32 = 0x0000_0800;
 const TPM_RIGHTBUTTON: u32 = 0x0002;
 const TPM_NONOTIFY: u32 = 0x0080;
 const TPM_RETURNCMD: u32 = 0x0100;
 
 const ID_OPEN_SETTINGS: usize = 1001;
+const ID_RELOAD_ALL: usize = 1002;
+const ID_CHECK_UPDATES: usize = 1003;
+const ID_COPY_URL: usize = 1004;
+const ID_OPEN_PLUGINS: usize = 1005;
+
 const IDI_APPLICATION: usize = 32512;
 const TRAY_UID: u32 = 0x5342_5244; // "SBRD"
+const BI_RGB: u32 = 0;
+const DIB_RGB_COLORS: u32 = 0;
 
 static TRAY_STARTED: AtomicBool = AtomicBool::new(false);
 static TRAY_HWND: AtomicUsize = AtomicUsize::new(0);
-static DASHBOARD_URL: OnceLock<String> = OnceLock::new();
+static TRAY_ICON: AtomicUsize = AtomicUsize::new(0);
+static TASKBAR_CREATED_MSG: AtomicU32 = AtomicU32::new(0);
+static TRAY_CONFIG: OnceLock<TrayConfig> = OnceLock::new();
+static PENDING_BALLOONS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
 #[repr(C)]
 struct WndClassExW {
-   cb_size:       u32,
-   style:         u32,
-   wnd_proc:      unsafe extern "system" fn(*mut c_void, u32, usize, isize) -> isize,
-   cls_extra:     i32,
-   wnd_extra:     i32,
-   instance:      *mut c_void,
-   icon:          *mut c_void,
-   cursor:        *mut c_void,
-   background:    *mut c_void,
-   menu_name:     *const u16,
-   class_name:    *const u16,
-   icon_sm:       *mut c_void,
+   cb_size:    u32,
+   style:      u32,
+   wnd_proc:   unsafe extern "system" fn(*mut c_void, u32, usize, isize) -> isize,
+   cls_extra:  i32,
+   wnd_extra:  i32,
+   instance:   *mut c_void,
+   icon:       *mut c_void,
+   cursor:     *mut c_void,
+   background: *mut c_void,
+   menu_name:  *const u16,
+   class_name: *const u16,
+   icon_sm:    *mut c_void,
 }
 
 #[repr(C)]
@@ -99,6 +126,30 @@ struct NotifyIconDataW {
    h_balloon_icon:       *mut c_void,
 }
 
+#[repr(C)]
+struct BitmapInfoHeader {
+   bi_size:           u32,
+   bi_width:          i32,
+   bi_height:         i32,
+   bi_planes:         u16,
+   bi_bit_count:      u16,
+   bi_compression:    u32,
+   bi_size_image:     u32,
+   bi_x_pels:         i32,
+   bi_y_pels:         i32,
+   bi_clr_used:       u32,
+   bi_clr_important:  u32,
+}
+
+#[repr(C)]
+struct IconInfo {
+   f_icon:    i32,
+   x_hotspot: u32,
+   y_hotspot: u32,
+   hbm_mask:  *mut c_void,
+   hbm_color: *mut c_void,
+}
+
 #[link(name = "user32")]
 unsafe extern "system" {
    fn OpenClipboard(hwnd: *mut c_void) -> i32;
@@ -106,6 +157,7 @@ unsafe extern "system" {
    fn EmptyClipboard() -> i32;
    fn SetClipboardData(format: u32, mem: *mut c_void) -> *mut c_void;
    fn RegisterClassExW(cls: *const WndClassExW) -> u16;
+   fn RegisterWindowMessageW(name: *const u16) -> u32;
    fn CreateWindowExW(
       ex_style: u32,
       class_name: *const u16,
@@ -120,13 +172,18 @@ unsafe extern "system" {
       instance: *mut c_void,
       param: *mut c_void,
    ) -> *mut c_void;
+   fn DestroyWindow(hwnd: *mut c_void) -> i32;
    fn DefWindowProcW(hwnd: *mut c_void, msg: u32, wparam: usize, lparam: isize) -> isize;
    fn GetMessageW(msg: *mut Msg, hwnd: *mut c_void, min: u32, max: u32) -> i32;
    fn TranslateMessage(msg: *const Msg) -> i32;
    fn DispatchMessageW(msg: *const Msg) -> isize;
+   fn PostMessageW(hwnd: *mut c_void, msg: u32, wparam: usize, lparam: isize) -> i32;
    fn LoadIconW(instance: *mut c_void, name: *const u16) -> *mut c_void;
+   fn CreateIconIndirect(info: *mut IconInfo) -> *mut c_void;
+   fn DestroyIcon(icon: *mut c_void) -> i32;
    fn CreatePopupMenu() -> *mut c_void;
    fn AppendMenuW(menu: *mut c_void, flags: u32, id: usize, item: *const u16) -> i32;
+   fn SetMenuDefaultItem(menu: *mut c_void, item: u32, by_pos: u32) -> i32;
    fn TrackPopupMenu(
       menu: *mut c_void,
       flags: u32,
@@ -139,7 +196,29 @@ unsafe extern "system" {
    fn DestroyMenu(menu: *mut c_void) -> i32;
    fn GetCursorPos(pt: *mut Point) -> i32;
    fn SetForegroundWindow(hwnd: *mut c_void) -> i32;
+   fn RegisterHotKey(hwnd: *mut c_void, id: i32, modifiers: u32, vk: u32) -> i32;
+   fn UnregisterHotKey(hwnd: *mut c_void, id: i32) -> i32;
    fn PostQuitMessage(code: i32);
+}
+
+#[link(name = "gdi32")]
+unsafe extern "system" {
+   fn CreateDIBSection(
+      hdc: *mut c_void,
+      bmi: *const BitmapInfoHeader,
+      usage: u32,
+      bits: *mut *mut c_void,
+      section: *mut c_void,
+      offset: u32,
+   ) -> *mut c_void;
+   fn CreateBitmap(
+      width: i32,
+      height: i32,
+      planes: u32,
+      bit_count: u32,
+      bits: *const c_void,
+   ) -> *mut c_void;
+   fn DeleteObject(obj: *mut c_void) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -181,11 +260,133 @@ fn os_err(context: &str) -> Error {
    }
 }
 
-fn open_dashboard() {
-   if let Some(url) = DASHBOARD_URL.get()
-      && let Err(err) = crate::open_url(url)
-   {
+/// Builds a crisp 32×32 ARGB Sunbird amber emblem icon for the system tray.
+unsafe fn create_sunbird_icon() -> *mut c_void {
+   const SIZE: i32 = 32;
+   #[expect(clippy::cast_possible_truncation, reason = "BITMAPINFOHEADER is 40 bytes")]
+   let bmi = BitmapInfoHeader {
+      bi_size:          size_of::<BitmapInfoHeader>() as u32,
+      bi_width:         SIZE,
+      bi_height:        -SIZE, // top-down DIB
+      bi_planes:        1,
+      bi_bit_count:     32,
+      bi_compression:   BI_RGB,
+      bi_size_image:    0,
+      bi_x_pels:        0,
+      bi_y_pels:        0,
+      bi_clr_used:      0,
+      bi_clr_important: 0,
+   };
+   let mut bits: *mut c_void = ptr::null_mut();
+   // SAFETY: Win32 GDI DIB creation and icon assembly; temporary bitmaps are deleted.
+   unsafe {
+      let color = CreateDIBSection(
+         ptr::null_mut(),
+         &raw const bmi,
+         DIB_RGB_COLORS,
+         &raw mut bits,
+         ptr::null_mut(),
+         0,
+      );
+      if color.is_null() || bits.is_null() {
+         return LoadIconW(ptr::null_mut(), IDI_APPLICATION as *const u16);
+      }
+      let pixels = std::slice::from_raw_parts_mut(bits.cast::<u32>(), (SIZE * SIZE) as usize);
+      for y in 0..SIZE {
+         for x in 0..SIZE {
+            let dx = f32::from(i16::try_from(x).unwrap_or(0)) - 15.5;
+            let dy = f32::from(i16::try_from(y).unwrap_or(0)) - 15.5;
+            let dist = dx.hypot(dy);
+            // Outer dark charcoal ring, rich amber sun body, bright gold core.
+            let pixel = if dist <= 5.5 {
+               0xFFFF_F3B0 // warm bright core (BGRA: 0xAARRGGBB in little-endian u32)
+            } else if dist <= 12.5 {
+               0xFFF5_9E0B // Sunbird amber
+            } else if dist <= 14.5 {
+               0xFF1E_1F22 // dark Discord surface border
+            } else {
+               0x0000_0000 // transparent
+            };
+            pixels[(y * SIZE + x) as usize] = pixel;
+         }
+      }
+      let mask_bytes = [0u8; (SIZE * SIZE / 8) as usize];
+      let mask = CreateBitmap(SIZE, SIZE, 1, 1, mask_bytes.as_ptr().cast());
+      let mut info = IconInfo {
+         f_icon:    1,
+         x_hotspot: 0,
+         y_hotspot: 0,
+         hbm_mask:  mask,
+         hbm_color: color,
+      };
+      let icon = CreateIconIndirect(&raw mut info);
+      DeleteObject(color);
+      if !mask.is_null() {
+         DeleteObject(mask);
+      }
+      if icon.is_null() {
+         LoadIconW(ptr::null_mut(), IDI_APPLICATION as *const u16)
+      } else {
+         icon
+      }
+   }
+}
+
+fn find_edge_exe() -> Option<PathBuf> {
+   let candidates = [
+      r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+      r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+   ];
+   candidates
+      .into_iter()
+      .map(PathBuf::from)
+      .find(|path| path.is_file())
+}
+
+/// Opens the Sunbird Settings dashboard in a standalone chromeless Edge app
+/// window when Edge is available, falling back to the default system browser.
+pub fn open_dashboard() {
+   let Some(config) = TRAY_CONFIG.get() else {
+      return;
+   };
+   let url = &config.dashboard_url;
+   if let Some(edge) = find_edge_exe() {
+      let profile_dir = config
+         .plugins_dir
+         .parent()
+         .unwrap_or(&config.plugins_dir)
+         .join("app-ui");
+      let spawned = Command::new(edge)
+         .arg(format!("--app={url}"))
+         .arg("--window-size=1020,740")
+         .arg(format!("--user-data-dir={}", profile_dir.display()))
+         .spawn();
+      if spawned.is_ok() {
+         return;
+      }
+   }
+   if let Err(err) = crate::open_url(url) {
       log::warn!("tray: could not open dashboard: {err}");
+   }
+}
+
+fn open_plugins_folder() {
+   let Some(config) = TRAY_CONFIG.get() else {
+      return;
+   };
+   let _ = std::fs::create_dir_all(&config.plugins_dir);
+   let op = wide("open");
+   let target = wide(&config.plugins_dir.to_string_lossy());
+   // SAFETY: NUL-terminated UTF-16 strings passed to ShellExecuteW.
+   unsafe {
+      ShellExecuteW(
+         ptr::null_mut(),
+         op.as_ptr(),
+         target.as_ptr(),
+         ptr::null(),
+         ptr::null(),
+         SW_SHOWNORMAL,
+      );
    }
 }
 
@@ -211,8 +412,17 @@ fn empty_nid(hwnd: *mut c_void) -> NotifyIconDataW {
    }
 }
 
-pub fn start_tray(dashboard_url: &str) {
-   let _ = DASHBOARD_URL.set(dashboard_url.to_owned());
+unsafe fn add_tray_icon(hwnd: *mut c_void, icon: *mut c_void) -> bool {
+   let mut nid = empty_nid(hwnd);
+   nid.u_flags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+   nid.h_icon = icon;
+   fill_wide(&mut nid.sz_tip, "Sunbird — Click or press Ctrl+Shift+U for Settings");
+   // SAFETY: `hwnd` and `icon` are live Win32 handles on the tray thread.
+   unsafe { Shell_NotifyIconW(NIM_ADD, &raw mut nid) != 0 }
+}
+
+pub fn start_tray(config: TrayConfig) {
+   let _ = TRAY_CONFIG.set(config);
    if TRAY_STARTED.swap(true, Ordering::AcqRel) {
       return;
    }
@@ -224,8 +434,12 @@ pub fn start_tray(dashboard_url: &str) {
 fn run_tray_loop() {
    let class_name = wide("SunbirdTrayWindow");
    let title = wide("Sunbird");
-   // SAFETY: Win32 hidden message window and tray registration on dedicated thread.
+   let taskbar_msg_name = wide("TaskbarCreated");
+   // SAFETY: Win32 hidden message window, hotkey, and tray registration on dedicated thread.
    unsafe {
+      let taskbar_msg = RegisterWindowMessageW(taskbar_msg_name.as_ptr());
+      TASKBAR_CREATED_MSG.store(taskbar_msg, Ordering::Release);
+
       let instance = GetModuleHandleW(ptr::null());
       #[expect(clippy::cast_possible_truncation, reason = "WNDCLASSEXW is 80 bytes")]
       let cb_size = size_of::<WndClassExW>() as u32;
@@ -243,7 +457,9 @@ fn run_tray_loop() {
          class_name: class_name.as_ptr(),
          icon_sm: ptr::null_mut(),
       };
-      RegisterClassExW(&raw const cls);
+      if RegisterClassExW(&raw const cls) == 0 {
+         log::debug!("tray: RegisterClassExW returned 0 (may already exist)");
+      }
 
       let hwnd = CreateWindowExW(
          0,
@@ -260,19 +476,41 @@ fn run_tray_loop() {
          ptr::null_mut(),
       );
       if hwnd.is_null() {
-         log::warn!("tray: CreateWindowExW failed");
+         log::warn!("tray: CreateWindowExW failed: {}", std::io::Error::last_os_error());
          return;
       }
 
-      let mut nid = empty_nid(hwnd);
-      nid.u_flags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-      nid.h_icon = LoadIconW(ptr::null_mut(), IDI_APPLICATION as *const u16);
-      fill_wide(&mut nid.sz_tip, "Sunbird — Click for Settings");
-      if Shell_NotifyIconW(NIM_ADD, &raw mut nid) == 0 {
+      let icon = create_sunbird_icon();
+      TRAY_ICON.store(icon as usize, Ordering::Release);
+
+      if !add_tray_icon(hwnd, icon) {
          log::warn!("tray: Shell_NotifyIconW(NIM_ADD) failed");
+         DestroyWindow(hwnd);
+         DestroyIcon(icon);
+         TRAY_ICON.store(0, Ordering::Release);
          return;
       }
       TRAY_HWND.store(hwnd as usize, Ordering::Release);
+
+      if RegisterHotKey(
+         hwnd,
+         HOTKEY_ID,
+         MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT,
+         u32::from(b'U'),
+      ) == 0
+      {
+         log::info!("tray: Ctrl+Shift+U hotkey already in use by another app");
+      }
+
+      // Flush any startup notifications queued before the tray HWND was ready.
+      let pending = std::mem::take(
+         &mut *PENDING_BALLOONS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner),
+      );
+      for (t, b) in pending {
+         send_balloon(hwnd, icon, &t, &b);
+      }
 
       let mut msg = Msg {
          hwnd:    ptr::null_mut(),
@@ -287,26 +525,65 @@ fn run_tray_loop() {
          DispatchMessageW(&raw const msg);
       }
 
+      UnregisterHotKey(hwnd, HOTKEY_ID);
       TRAY_HWND.store(0, Ordering::Release);
       let mut del = empty_nid(hwnd);
       Shell_NotifyIconW(NIM_DELETE, &raw mut del);
+      DestroyIcon(icon);
+      TRAY_ICON.store(0, Ordering::Release);
+   }
+}
+
+fn send_balloon(hwnd: *mut c_void, icon: *mut c_void, title: &str, body: &str) {
+   let mut nid = empty_nid(hwnd);
+   nid.u_flags = NIF_INFO;
+   nid.dw_info_flags = NIIF_USER;
+   nid.h_balloon_icon = icon;
+   fill_wide(&mut nid.sz_info_title, title);
+   fill_wide(&mut nid.sz_info, body);
+   // SAFETY: `hwnd` is a live tray window registered via NIM_ADD.
+   unsafe {
+      Shell_NotifyIconW(NIM_MODIFY, &raw mut nid);
    }
 }
 
 pub fn balloon(title: &str, body: &str) {
    let raw = TRAY_HWND.load(Ordering::Acquire);
    if raw == 0 {
+      let mut queue = PENDING_BALLOONS
+         .lock()
+         .unwrap_or_else(PoisonError::into_inner);
+      if queue.len() < 8 {
+         queue.push((title.to_owned(), body.to_owned()));
+      }
       return;
    }
-   let hwnd = raw as *mut c_void;
-   let mut nid = empty_nid(hwnd);
-   nid.u_flags = NIF_INFO;
-   nid.dw_info_flags = NIIF_INFO;
-   fill_wide(&mut nid.sz_info_title, title);
-   fill_wide(&mut nid.sz_info, body);
-   // SAFETY: `hwnd` is a live tray window registered via NIM_ADD.
-   unsafe {
-      Shell_NotifyIconW(NIM_MODIFY, &raw mut nid);
+   let icon = TRAY_ICON.load(Ordering::Acquire) as *mut c_void;
+   send_balloon(raw as *mut c_void, icon, title, body);
+}
+
+fn run_menu_action(cmd: usize) {
+   match cmd {
+      ID_OPEN_SETTINGS => open_dashboard(),
+      ID_RELOAD_ALL => {
+         if let Some(cb) = TRAY_CONFIG.get().and_then(|c| c.on_reload_all.as_ref()) {
+            cb();
+         }
+      },
+      ID_CHECK_UPDATES => {
+         if let Some(cb) = TRAY_CONFIG.get().and_then(|c| c.on_check_updates.as_ref()) {
+            cb();
+         }
+      },
+      ID_COPY_URL => {
+         if let Some(cfg) = TRAY_CONFIG.get()
+            && crate::copy(&cfg.dashboard_url).is_ok()
+         {
+            balloon("Sunbird", &format!("Copied {}", cfg.dashboard_url));
+         }
+      },
+      ID_OPEN_PLUGINS => open_plugins_folder(),
+      _ => {},
    }
 }
 
@@ -316,19 +593,45 @@ unsafe extern "system" fn tray_wnd_proc(
    wparam: usize,
    lparam: isize,
 ) -> isize {
+   let taskbar_msg = TASKBAR_CREATED_MSG.load(Ordering::Acquire);
+   if taskbar_msg != 0 && msg == taskbar_msg {
+      let icon = TRAY_ICON.load(Ordering::Acquire) as *mut c_void;
+      if !icon.is_null() {
+         // SAFETY: re-registering tray icon after explorer.exe restart.
+         unsafe { add_tray_icon(hwnd, icon) };
+      }
+      return 0;
+   }
+
    match msg {
       WM_TRAY => {
-         #[expect(clippy::cast_sign_loss, reason = "Win32 tray event code sits in low bits of lparam")]
+         #[expect(
+            clippy::cast_sign_loss,
+            reason = "Win32 tray event code sits in low bits of lparam"
+         )]
          let event = (lparam as usize) & 0xffff;
          match event {
-            WM_LBUTTONUP | WM_LBUTTONDBLCLK => open_dashboard(),
+            WM_LBUTTONUP | WM_LBUTTONDBLCLK | NIN_BALLOONUSERCLICK => open_dashboard(),
             WM_RBUTTONUP => {
                // SAFETY: Win32 popup menu owned and destroyed in this scope.
                unsafe {
                   let menu = CreatePopupMenu();
                   if !menu.is_null() {
-                     let label = wide("Open Sunbird Settings");
-                     AppendMenuW(menu, MF_STRING, ID_OPEN_SETTINGS, label.as_ptr());
+                     let open_lbl = wide("Open Sunbird Settings\tCtrl+Shift+U");
+                     let reload_lbl = wide("Reload All Plugins");
+                     let update_lbl = wide("Check for Updates");
+                     let copy_lbl = wide("Copy Dashboard URL");
+                     let folder_lbl = wide("Open Plugins Folder");
+
+                     AppendMenuW(menu, MF_STRING, ID_OPEN_SETTINGS, open_lbl.as_ptr());
+                     AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
+                     AppendMenuW(menu, MF_STRING, ID_RELOAD_ALL, reload_lbl.as_ptr());
+                     AppendMenuW(menu, MF_STRING, ID_CHECK_UPDATES, update_lbl.as_ptr());
+                     AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
+                     AppendMenuW(menu, MF_STRING, ID_COPY_URL, copy_lbl.as_ptr());
+                     AppendMenuW(menu, MF_STRING, ID_OPEN_PLUGINS, folder_lbl.as_ptr());
+                     SetMenuDefaultItem(menu, 0, 1);
+
                      let mut pt = Point { x: 0, y: 0 };
                      GetCursorPos(&raw mut pt);
                      SetForegroundWindow(hwnd);
@@ -341,10 +644,12 @@ unsafe extern "system" fn tray_wnd_proc(
                         hwnd,
                         ptr::null(),
                      );
+                     // Required per MSDN KB135788 so clicking outside dismisses the menu cleanly.
+                     PostMessageW(hwnd, WM_NULL, 0, 0);
                      DestroyMenu(menu);
                      #[expect(clippy::cast_sign_loss, reason = "menu command ids are positive")]
-                     if cmd > 0 && (cmd as usize) == ID_OPEN_SETTINGS {
-                        open_dashboard();
+                     if cmd > 0 {
+                        run_menu_action(cmd as usize);
                      }
                   }
                }
@@ -353,8 +658,14 @@ unsafe extern "system" fn tray_wnd_proc(
          }
          0
       },
-      WM_COMMAND if wparam == ID_OPEN_SETTINGS => {
-         open_dashboard();
+      WM_HOTKEY => {
+         if wparam == usize::try_from(HOTKEY_ID).unwrap_or(0) {
+            open_dashboard();
+         }
+         0
+      },
+      WM_COMMAND => {
+         run_menu_action(wparam & 0xffff);
          0
       },
       WM_DESTROY => {

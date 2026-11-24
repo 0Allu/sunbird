@@ -2,11 +2,16 @@
 //!
 //! Desktop Phoenix renders natively in Rust with GPUI rather than Android's
 //! serialized UI-op bridge (`phoenix-ui-mobile`). This crate owns the
-//! desktop-side UI interactions: clipboard, opening URLs in the system browser,
-//! system tray + notifications/toasts, and the self-contained Desktop Settings
-//! dashboard served over localhost.
+//! desktop-side UI interactions: clipboard, opening URLs / standalone settings
+//! window, system tray + global hotkey (`Ctrl+Shift+U`) + native notifications,
+//! and the self-contained Desktop Settings dashboard served over localhost.
 
 #[cfg(windows)] mod windows;
+
+use std::{
+   path::PathBuf,
+   sync::Arc,
+};
 
 /// Self-contained HTML/JS/CSS companion dashboard for Desktop settings,
 /// plugin management, catalog installs, OTA updates, and JS console.
@@ -20,16 +25,28 @@ pub enum Error {
    Unsupported,
 }
 
-/// Starts the desktop system tray icon pointing at `dashboard_url`.
-///
-/// Clicking the tray icon opens the Sunbird settings dashboard in the system
-/// browser, and subsequent [`toast`] / [`notify`] calls show native balloon
-/// notifications through the tray icon.
-pub fn start_tray(dashboard_url: &str) {
+/// Configuration and runtime callbacks for the desktop system tray.
+pub struct TrayConfig {
+   pub dashboard_url:    String,
+   pub plugins_dir:      PathBuf,
+   pub on_reload_all:    Option<Arc<dyn Fn() + Send + Sync>>,
+   pub on_check_updates: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+/// Starts the desktop system tray icon and `Ctrl+Shift+U` global hotkey
+/// pointing at `config.dashboard_url`.
+pub fn start_tray(config: TrayConfig) {
    #[cfg(windows)]
-   windows::start_tray(dashboard_url);
+   windows::start_tray(config);
    #[cfg(not(windows))]
-   let _ = dashboard_url;
+   let _ = config;
+}
+
+/// Opens the Sunbird Settings dashboard in a standalone chromeless app window
+/// (Microsoft Edge `--app` mode when available, else the system browser).
+pub fn open_settings() {
+   #[cfg(windows)]
+   windows::open_dashboard();
 }
 
 /// Copies `text` to the system clipboard.

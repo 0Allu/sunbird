@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Sunbird — Desktop Settings</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%231e1f22'/><circle cx='16' cy='16' r='12' fill='%23f59e0b'/><circle cx='16' cy='16' r='5' fill='%23fff3b0'/></svg>" />
 <style>
   :root {
     --bg: #111214;
@@ -13,7 +14,6 @@
     --text: #f2f3f5;
     --muted: #949ba4;
     --accent: #f59e0b;
-    --accent-hover: #d97706;
     --green: #23a55a;
     --red: #da373c;
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -29,7 +29,7 @@
     min-height: 100vh;
   }
   nav {
-    width: 220px;
+    width: 230px;
     background: var(--surface);
     border-right: 1px solid var(--border);
     padding: 20px 12px;
@@ -45,7 +45,15 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 8px;
   }
+  .brand-left { display: flex; align-items: center; gap: 8px; }
+  .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--green); flex-shrink: 0;
+    box-shadow: 0 0 8px rgba(35,165,90,0.6);
+  }
+  .dot.offline { background: var(--red); box-shadow: 0 0 8px rgba(218,55,60,0.6); }
   .pill {
     font: 11px/1 var(--mono);
     background: var(--card);
@@ -54,6 +62,18 @@
     padding: 4px 7px;
     border-radius: 999px;
   }
+  .badge {
+    font: 11px/1 var(--sans);
+    font-weight: 600;
+    padding: 3px 7px;
+    border-radius: 999px;
+    display: inline-block;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+  .badge.desktop { background: rgba(35,165,90,0.18); color: #86efac; border: 1px solid rgba(35,165,90,0.4); }
+  .badge.partial { background: rgba(245,158,11,0.16); color: #fcd34d; border: 1px solid rgba(245,158,11,0.35); }
+  .badge.mobile { background: rgba(148,155,164,0.16); color: var(--muted); border: 1px solid var(--border); }
   nav button {
     all: unset;
     cursor: pointer;
@@ -64,6 +84,24 @@
   }
   nav button:hover { background: rgba(255,255,255,0.05); color: var(--text); }
   nav button.active { background: var(--card); color: var(--text); }
+  .nav-footer {
+    margin-top: auto;
+    padding: 12px 10px 4px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  kbd {
+    font: 11px var(--mono);
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 5px;
+    color: var(--text);
+  }
   main {
     flex: 1;
     max-width: 920px;
@@ -71,8 +109,8 @@
     overflow-y: auto;
   }
   h1 { margin: 0 0 6px; font-size: 22px; }
-  .sub { color: var(--muted); margin: 0 0 20px; }
-  .toolbar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .sub { color: var(--muted); margin: 0 0 18px; }
+  .toolbar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
   .card {
     background: var(--card);
     border: 1px solid var(--border);
@@ -98,6 +136,14 @@
     font: 12px/1.4 var(--mono);
     white-space: pre-wrap;
   }
+  .banner {
+    margin-bottom: 16px;
+    padding: 10px 14px;
+    background: rgba(218,55,60,0.16);
+    border: 1px solid rgba(218,55,60,0.5);
+    border-radius: 8px;
+    color: #fca5a5;
+  }
   .warn {
     margin-top: 8px;
     padding: 6px 10px;
@@ -115,6 +161,7 @@
     border-radius: 6px;
     cursor: pointer;
     font: 500 13px var(--sans);
+    white-space: nowrap;
   }
   .btn:hover { filter: brightness(1.12); }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #111; font-weight: 600; }
@@ -168,7 +215,7 @@
     border-radius: 8px;
     padding: 12px;
     font: 12px/1.5 var(--mono);
-    max-height: 420px;
+    max-height: 440px;
     overflow: auto;
     white-space: pre-wrap;
     word-break: break-word;
@@ -183,24 +230,45 @@
     border-radius: 8px;
     box-shadow: 0 8px 24px rgba(0,0,0,0.45);
     display: none;
+    max-width: 420px;
   }
+  .toast.error { border-color: var(--red); color: #fca5a5; }
   .hidden { display: none; }
 </style>
 </head>
 <body>
 <nav>
   <div class="brand">
-    <span>Sunbird</span>
+    <span class="brand-left"><span id="conn-dot" class="dot"></span><span>Sunbird</span></span>
     <span id="version-pill" class="pill">…</span>
   </div>
   <button class="active" data-tab="plugins">Plugins</button>
   <button data-tab="catalog">Plugin Catalog</button>
   <button data-tab="updates">Updates</button>
   <button data-tab="console">Console</button>
+  <div class="nav-footer">
+    <div class="row">
+      <span>Staff Unlock</span>
+      <label class="switch">
+        <input id="staff-toggle" type="checkbox" />
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div>Shortcut: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>U</kbd></div>
+  </div>
 </nav>
 <main>
+  <div id="conn-banner" class="banner hidden"></div>
+
   <section id="tab-plugins">
-    <h1>Installed Plugins</h1>
+    <div class="row" style="margin-bottom:6px">
+      <h1>Installed Plugins</h1>
+      <div class="toolbar" style="margin:0">
+        <input id="local-js-input" type="file" accept=".js" class="hidden" />
+        <button class="btn" id="upload-js-btn">Load .js File</button>
+        <button class="btn" id="reload-all-btn">Reload All</button>
+      </div>
+    </div>
     <p class="sub">Toggle plugins, reload live, or configure plugin settings.</p>
     <div id="plugins-list"></div>
   </section>
@@ -229,7 +297,7 @@
 
   <section id="tab-console" class="hidden">
     <h1>Runtime Console</h1>
-    <p class="sub">Evaluate JavaScript in the QuickJS plugin runtime and inspect logs.</p>
+    <p class="sub">Evaluate JavaScript in the QuickJS plugin runtime (<kbd>Ctrl</kbd>+<kbd>Enter</kbd> to run).</p>
     <div class="card">
       <textarea id="eval-input" rows="3" placeholder="Object.keys(phoenix.gateway).length"></textarea>
       <div class="toolbar" style="margin:10px 0 0">
@@ -245,19 +313,47 @@
 <script>
 const $ = (s) => document.querySelector(s);
 let installedNames = new Set();
+let activeTab = 'plugins';
+let catalogTimer = null;
 
-function notify(msg) {
-  const el = $('#toast');
-  el.textContent = msg;
-  el.style.display = 'block';
-  clearTimeout(notify._t);
-  notify._t = setTimeout(() => { el.style.display = 'none'; }, 3000);
+const DESKTOP_FULL = new Set([
+  'silent-typing', 'nsfw-gate-bypass', 'message-latency', 'no-profile-themes',
+  'dearrow', 'translate', 'clear-urls', 'fix-embeds'
+]);
+const DESKTOP_PARTIAL = new Set(['global-badges', 'message-logger', 'spoiler-mode', 'fakenitro']);
+
+function compatBadge(name) {
+  if (DESKTOP_FULL.has(name)) return '<span class="badge desktop">Desktop Ready</span>';
+  if (DESKTOP_PARTIAL.has(name)) return '<span class="badge partial">Partial Desktop</span>';
+  return '<span class="badge mobile">Mobile UI</span>';
 }
 
-async function api(path, opts) {
+function notify(msg, isError = false) {
+  const el = $('#toast');
+  el.textContent = msg;
+  el.classList.toggle('error', isError);
+  el.style.display = 'block';
+  clearTimeout(notify._t);
+  notify._t = setTimeout(() => { el.style.display = 'none'; }, isError ? 4500 : 3000);
+}
+
+function setConnected(ok, errMsg = '') {
+  $('#conn-dot').classList.toggle('offline', !ok);
+  const banner = $('#conn-banner');
+  if (ok) {
+    banner.classList.add('hidden');
+  } else {
+    banner.textContent = 'Lost connection to Sunbird runtime: ' + errMsg;
+    banner.classList.remove('hidden');
+  }
+}
+
+async function api(path, opts = {}, rawText = false) {
   const res = await fetch(path, opts);
   const text = await res.text();
   if (!res.ok) throw new Error(text || res.statusText);
+  setConnected(true);
+  if (rawText) return text;
   try { return JSON.parse(text); } catch { return text; }
 }
 
@@ -267,188 +363,322 @@ function esc(s) {
   return d.innerHTML;
 }
 
+function switchTab(tab) {
+  activeTab = tab;
+  clearTimeout(catalogTimer);
+  document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
+  document.querySelectorAll('main section').forEach((s) => s.classList.toggle('hidden', s.id !== 'tab-' + tab));
+  if (tab === 'plugins') loadPlugins();
+  if (tab === 'catalog') loadCatalog();
+  if (tab === 'updates') loadUpdates();
+  if (tab === 'console') loadLogs();
+}
+
 document.querySelectorAll('nav button').forEach((btn) => {
-  btn.onclick = () => {
-    document.querySelectorAll('nav button').forEach((b) => b.classList.remove('active'));
-    document.querySelectorAll('main section').forEach((s) => s.classList.add('hidden'));
-    btn.classList.add('active');
-    const tab = btn.dataset.tab;
-    $('#tab-' + tab).classList.remove('hidden');
-    if (tab === 'plugins') loadPlugins();
-    if (tab === 'catalog') loadCatalog();
-    if (tab === 'updates') loadUpdates();
-    if (tab === 'console') loadLogs();
-  };
+  btn.onclick = () => switchTab(btn.dataset.tab);
 });
 
-async function loadPlugins() {
-  const status = await api('/status');
-  $('#version-pill').textContent = status.version || 'dev';
-  installedNames = new Set(status.plugins.map((p) => p.name));
-  const root = $('#plugins-list');
-  if (!status.plugins.length) {
-    root.innerHTML = '<div class="card"><div class="meta">No plugins installed yet. Open Plugin Catalog to install some.</div></div>';
-    return;
+$('#staff-toggle').onchange = async (e) => {
+  const wanted = e.target.checked;
+  try {
+    await api('/debug/staff', { method: 'POST', body: wanted ? 'true' : 'false' });
+    notify(`Staff unlock ${wanted ? 'enabled' : 'disabled'}`);
+  } catch (err) {
+    e.target.checked = !wanted;
+    notify(`Failed: ${err.message}`, true);
   }
-  root.innerHTML = '';
-  for (const p of status.plugins) {
-    const card = document.createElement('div');
-    card.className = 'card';
-    const meta = [p.version && 'v' + p.version, p.author && 'by ' + p.author].filter(Boolean).join(' · ');
-    card.innerHTML = `
-      <div class="row">
-        <div>
-          <div class="title">${esc(p.name)}</div>
-          ${meta ? `<div class="meta">${esc(meta)}</div>` : ''}
-          ${p.description ? `<div class="meta" style="margin-top:2px;color:var(--text)">${esc(p.description)}</div>` : ''}
-        </div>
-        <div class="row">
-          <button class="btn" data-act="reload">Reload</button>
-          ${p.installed ? '<button class="btn danger" data-act="delete">Remove</button>' : ''}
-          <label class="switch">
-            <input type="checkbox" ${p.enabled ? 'checked' : ''} data-act="toggle" />
-            <span class="slider"></span>
-          </label>
-        </div>
-      </div>
-      ${p.error ? `<div class="err">${esc(p.error)}</div>` : ''}
-    `;
-    card.querySelector('[data-act="toggle"]').onchange = async (e) => {
-      await api(`/plugins/${encodeURIComponent(p.name)}/${e.target.checked ? 'enable' : 'disable'}`, { method: 'POST' });
-      notify(`${p.name} ${e.target.checked ? 'enabled' : 'disabled'}`);
-      loadPlugins();
-    };
-    card.querySelector('[data-act="reload"]').onclick = async () => {
-      await api(`/plugins/${encodeURIComponent(p.name)}/reload`, { method: 'POST' });
-      notify(`Reloaded ${p.name}`);
-      loadPlugins();
-    };
-    const del = card.querySelector('[data-act="delete"]');
-    if (del) {
-      del.onclick = async () => {
-        await api(`/plugins/${encodeURIComponent(p.name)}`, { method: 'DELETE' });
-        notify(`Removed ${p.name}`);
-        loadPlugins();
-      };
-    }
-    if (p.settings && p.settings.length) {
-      const box = document.createElement('div');
-      box.className = 'settings';
-      for (const s of p.settings) {
-        const row = document.createElement('div');
-        row.className = 'setting';
-        row.innerHTML = `
-          <div class="setting-info">
-            <div>${esc(s.title)}</div>
-            ${s.description ? `<div class="meta">${esc(s.description)}</div>` : ''}
-          </div>
-          <div class="setting-ctrl"></div>
-        `;
-        const ctrl = row.querySelector('.setting-ctrl');
-        const save = (value) => api(`/plugins/${encodeURIComponent(p.name)}/setting`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key: s.key, value })
-        }).then(() => notify(`Saved ${s.title}`));
+};
 
-        if (s.type === 'switch') {
-          ctrl.innerHTML = `<label class="switch"><input type="checkbox" ${s.value ? 'checked' : ''} /><span class="slider"></span></label>`;
-          ctrl.querySelector('input').onchange = (e) => save(e.target.checked);
-        } else if (s.type === 'text' || s.type === 'secret') {
-          const inp = document.createElement('input');
-          inp.type = s.type === 'secret' ? 'password' : 'text';
-          inp.value = s.type === 'secret' ? '' : (s.value || '');
-          inp.placeholder = s.type === 'secret' ? (s.has_value ? '•••••••• (set)' : 'Enter secret') : '';
-          const btn = document.createElement('button');
-          btn.className = 'btn';
-          btn.textContent = 'Save';
-          btn.onclick = () => save(inp.value);
-          ctrl.append(inp, btn);
-        } else if (s.type === 'number') {
-          const inp = document.createElement('input');
-          inp.type = 'number';
-          inp.step = 'any';
-          inp.value = s.value;
-          inp.style.width = '110px';
-          const btn = document.createElement('button');
-          btn.className = 'btn';
-          btn.textContent = 'Save';
-          btn.onclick = () => save(Number(inp.value));
-          ctrl.append(inp, btn);
-        } else if (s.type === 'select') {
-          const sel = document.createElement('select');
-          for (const opt of s.options) {
-            const o = document.createElement('option');
-            o.value = opt.value;
-            o.textContent = opt.label;
-            if (opt.value === s.value) o.selected = true;
-            sel.append(o);
-          }
-          sel.onchange = () => save(sel.value);
-          ctrl.append(sel);
-        } else if (s.type === 'button') {
-          const btn = document.createElement('button');
-          btn.className = 'btn';
-          btn.textContent = s.title;
-          btn.onclick = () => api(`/plugins/${encodeURIComponent(p.name)}/press`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ key: s.key })
-          }).then(() => notify(`Triggered ${s.title}`));
-          ctrl.append(btn);
-        }
-        box.append(row);
-      }
-      card.append(box);
+$('#reload-all-btn').onclick = async () => {
+  try {
+    await api('/plugins/reload-all', { method: 'POST' });
+    notify('Reloaded all enabled plugins');
+    loadPlugins();
+  } catch (err) {
+    notify(`Reload failed: ${err.message}`, true);
+  }
+};
+
+$('#upload-js-btn').onclick = () => $('#local-js-input').click();
+$('#local-js-input').onchange = async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  const name = file.name.replace(/\.js$/i, '');
+  try {
+    const source = await file.text();
+    await api(`/plugins/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/javascript; charset=utf-8' },
+      body: source
+    });
+    notify(`Installed ${name}`);
+    loadPlugins();
+  } catch (err) {
+    notify(`Install failed: ${err.message}`, true);
+  }
+};
+
+async function loadPlugins() {
+  try {
+    const status = await api('/status');
+    $('#version-pill').textContent = status.version || 'dev';
+    $('#staff-toggle').checked = !!status.staff;
+    installedNames = new Set(status.plugins.map((p) => p.name));
+    const root = $('#plugins-list');
+    if (!status.plugins.length) {
+      root.innerHTML = `
+        <div class="card">
+          <div class="title" style="margin-bottom:6px">Welcome to Sunbird Desktop</div>
+          <div class="meta" style="margin-bottom:14px;color:var(--text)">
+            Sunbird is connected to Discord Phoenix. Install plugins from the official catalog or load a local <code>.js</code> bundle to get started.
+          </div>
+          <div class="toolbar" style="margin:0">
+            <button class="btn primary" id="empty-browse-btn">Browse Plugin Catalog</button>
+            <button class="btn" id="empty-upload-btn">Load Local .js File</button>
+          </div>
+        </div>
+      `;
+      $('#empty-browse-btn').onclick = () => switchTab('catalog');
+      $('#empty-upload-btn').onclick = () => $('#local-js-input').click();
+      return;
     }
-    root.append(card);
+    root.innerHTML = '';
+    for (const p of status.plugins) {
+      const card = document.createElement('div');
+      card.className = 'card';
+      const meta = [p.version && 'v' + p.version, p.author && 'by ' + p.author].filter(Boolean).join(' · ');
+      card.innerHTML = `
+        <div class="row">
+          <div>
+            <div class="title">${esc(p.name)}</div>
+            ${meta ? `<div class="meta">${esc(meta)}</div>` : ''}
+            ${p.description ? `<div class="meta" style="margin-top:2px;color:var(--text)">${esc(p.description)}</div>` : ''}
+          </div>
+          <div class="row">
+            <button class="btn" data-act="reload">Reload</button>
+            ${p.installed ? '<button class="btn danger" data-act="delete">Remove</button>' : ''}
+            <label class="switch">
+              <input type="checkbox" ${p.enabled ? 'checked' : ''} data-act="toggle" />
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+        ${p.error ? `<div class="err">${esc(p.error)}</div>` : ''}
+      `;
+      card.querySelector('[data-act="toggle"]').onchange = async (e) => {
+        const checked = e.target.checked;
+        try {
+          await api(`/plugins/${encodeURIComponent(p.name)}/${checked ? 'enable' : 'disable'}`, { method: 'POST' });
+          notify(`${p.name} ${checked ? 'enabled' : 'disabled'}`);
+          loadPlugins();
+        } catch (err) {
+          e.target.checked = !checked;
+          notify(`Toggle failed: ${err.message}`, true);
+        }
+      };
+      card.querySelector('[data-act="reload"]').onclick = async () => {
+        try {
+          await api(`/plugins/${encodeURIComponent(p.name)}/reload`, { method: 'POST' });
+          notify(`Reloaded ${p.name}`);
+          loadPlugins();
+        } catch (err) {
+          notify(`Reload failed: ${err.message}`, true);
+        }
+      };
+      const del = card.querySelector('[data-act="delete"]');
+      if (del) {
+        del.onclick = async () => {
+          if (!confirm(`Remove plugin "${p.name}"?`)) return;
+          try {
+            await api(`/plugins/${encodeURIComponent(p.name)}`, { method: 'DELETE' });
+            notify(`Removed ${p.name}`);
+            loadPlugins();
+          } catch (err) {
+            notify(`Remove failed: ${err.message}`, true);
+          }
+        };
+      }
+      if (p.settings && p.settings.length) {
+        const box = document.createElement('div');
+        box.className = 'settings';
+        for (const s of p.settings) {
+          const row = document.createElement('div');
+          row.className = 'setting';
+          row.innerHTML = `
+            <div class="setting-info">
+              <div>${esc(s.title)}</div>
+              ${s.description ? `<div class="meta">${esc(s.description)}</div>` : ''}
+            </div>
+            <div class="setting-ctrl"></div>
+          `;
+          const ctrl = row.querySelector('.setting-ctrl');
+          const save = async (value) => {
+            try {
+              await api(`/plugins/${encodeURIComponent(p.name)}/setting`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ key: s.key, value })
+              });
+              notify(`Saved ${s.title}`);
+              return true;
+            } catch (err) {
+              notify(`Save failed: ${err.message}`, true);
+              return false;
+            }
+          };
+
+          if (s.type === 'switch') {
+            ctrl.innerHTML = `<label class="switch"><input type="checkbox" ${s.value ? 'checked' : ''} /><span class="slider"></span></label>`;
+            ctrl.querySelector('input').onchange = async (e) => {
+              const ok = await save(e.target.checked);
+              if (!ok) e.target.checked = !e.target.checked;
+            };
+          } else if (s.type === 'text' || s.type === 'secret') {
+            const inp = document.createElement('input');
+            inp.type = s.type === 'secret' ? 'password' : 'text';
+            inp.value = s.type === 'secret' ? '' : (s.value || '');
+            inp.placeholder = s.type === 'secret' ? (s.has_value ? '•••••••• (set)' : 'Enter secret') : '';
+            const btn = document.createElement('button');
+            btn.className = 'btn';
+            btn.textContent = 'Save';
+            btn.onclick = async () => {
+              if (s.type === 'secret' && !inp.value) {
+                notify('Enter a value before saving a secret', true);
+                return;
+              }
+              if (await save(inp.value) && s.type === 'secret') {
+                inp.value = '';
+                inp.placeholder = '•••••••• (set)';
+              }
+            };
+            ctrl.append(inp, btn);
+          } else if (s.type === 'number') {
+            const inp = document.createElement('input');
+            inp.type = 'number';
+            inp.step = 'any';
+            inp.value = s.value;
+            inp.style.width = '110px';
+            const btn = document.createElement('button');
+            btn.className = 'btn';
+            btn.textContent = 'Save';
+            btn.onclick = () => {
+              const num = Number(inp.value);
+              if (inp.value === '' || !Number.isFinite(num)) {
+                notify('Enter a valid number', true);
+                return;
+              }
+              save(num);
+            };
+            ctrl.append(inp, btn);
+          } else if (s.type === 'select') {
+            const sel = document.createElement('select');
+            for (const opt of s.options) {
+              const o = document.createElement('option');
+              o.value = opt.value;
+              o.textContent = opt.label;
+              if (opt.value === s.value) o.selected = true;
+              sel.append(o);
+            }
+            sel.onchange = () => save(sel.value);
+            ctrl.append(sel);
+          } else if (s.type === 'button') {
+            const btn = document.createElement('button');
+            btn.className = 'btn';
+            btn.textContent = s.title;
+            btn.onclick = async () => {
+              try {
+                await api(`/plugins/${encodeURIComponent(p.name)}/press`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ key: s.key })
+                });
+                notify(`Triggered ${s.title}`);
+              } catch (err) {
+                notify(`Action failed: ${err.message}`, true);
+              }
+            };
+            ctrl.append(btn);
+          }
+          box.append(row);
+        }
+        card.append(box);
+      }
+      root.append(card);
+    }
+  } catch (err) {
+    setConnected(false, err.message);
   }
 }
 
 async function loadCatalog() {
   const root = $('#catalog-list');
-  const data = await api('/catalog');
-  if (data.state === 'loading' || data.state === 'unfetched') {
-    root.innerHTML = '<div class="card"><div class="meta">Fetching catalog from assets.sunbird.tools…</div></div>';
-    setTimeout(loadCatalog, 800);
-    return;
-  }
-  if (data.state === 'failed') {
-    root.innerHTML = `<div class="card"><div class="err">${esc(data.error)}</div></div>`;
-    return;
-  }
-  root.innerHTML = '';
-  for (const item of data.plugins) {
-    const installed = installedNames.has(item.name);
-    const card = document.createElement('div');
-    card.className = 'card';
-    card.innerHTML = `
-      <div class="row">
-        <div>
-          <div class="title">${esc(item.name)}</div>
-          <div class="meta" style="color:var(--text)">${esc(item.description)}</div>
-        </div>
-        <button class="btn ${installed ? '' : 'primary'}">${installed ? 'Reinstall' : 'Install'}</button>
-      </div>
-      ${item.warning ? `<div class="warn">${esc(item.warning)}</div>` : ''}
-    `;
-    card.querySelector('button').onclick = async (e) => {
-      e.target.disabled = true;
-      try {
-        await api('/catalog/install', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: item.name })
-        });
-        notify(`Installed ${item.name}`);
-        installedNames.add(item.name);
-        loadCatalog();
-      } catch (err) {
-        notify(`Install failed: ${err.message}`);
-        e.target.disabled = false;
+  try {
+    const data = await api('/catalog');
+    if (data.state === 'loading' || data.state === 'unfetched') {
+      root.innerHTML = '<div class="card"><div class="meta">Fetching catalog from assets.sunbird.tools…</div></div>';
+      if (activeTab === 'catalog') {
+        clearTimeout(catalogTimer);
+        catalogTimer = setTimeout(loadCatalog, 700);
       }
-    };
-    root.append(card);
+      return;
+    }
+    if (data.state === 'failed') {
+      root.innerHTML = `
+        <div class="card">
+          <div class="err" style="margin-top:0">${esc(data.error)}</div>
+          <button class="btn primary" id="retry-catalog-btn" style="margin-top:10px">Retry</button>
+        </div>
+      `;
+      $('#retry-catalog-btn').onclick = async () => {
+        try {
+          await api('/catalog/refresh', { method: 'POST' });
+          loadCatalog();
+        } catch (err) {
+          notify(`Retry failed: ${err.message}`, true);
+        }
+      };
+      return;
+    }
+    root.innerHTML = '';
+    const sorted = [...data.plugins].sort((a, b) => {
+      const rank = (n) => DESKTOP_FULL.has(n) ? 0 : (DESKTOP_PARTIAL.has(n) ? 1 : 2);
+      return rank(a.name) - rank(b.name) || a.name.localeCompare(b.name);
+    });
+    for (const item of sorted) {
+      const installed = installedNames.has(item.name);
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.innerHTML = `
+        <div class="row">
+          <div>
+            <div class="title">${esc(item.name)}${compatBadge(item.name)}</div>
+            <div class="meta" style="color:var(--text)">${esc(item.description)}</div>
+          </div>
+          <button class="btn ${installed ? '' : 'primary'}">${installed ? 'Reinstall' : 'Install'}</button>
+        </div>
+        ${item.warning ? `<div class="warn">${esc(item.warning)}</div>` : ''}
+      `;
+      card.querySelector('button').onclick = async (e) => {
+        e.target.disabled = true;
+        try {
+          await api('/catalog/install', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: item.name })
+          });
+          notify(`Installed ${item.name}`);
+          installedNames.add(item.name);
+          loadCatalog();
+        } catch (err) {
+          notify(`Install failed: ${err.message}`, true);
+          e.target.disabled = false;
+        }
+      };
+      root.append(card);
+    }
+  } catch (err) {
+    setConnected(false, err.message);
   }
 }
 
@@ -463,54 +693,101 @@ $('#install-url-btn').onclick = async () => {
     });
     notify(`Installed ${res.installed || 'plugin'}`);
     $('#custom-url').value = '';
-    loadPlugins();
+    await loadPlugins();
+    if (activeTab === 'catalog') loadCatalog();
   } catch (err) {
-    notify(`Install failed: ${err.message}`);
+    notify(`Install failed: ${err.message}`, true);
   }
 };
 
 async function loadUpdates() {
-  const st = await api('/update');
-  const lines = [`Current version: ${st.version}`];
-  if (st.busy) lines.push('Status: working…');
-  if (st.status) lines.push(`Detail: ${st.status}`);
-  if (st.found) {
-    if (st.found.loader) lines.push(`New loader available: ${st.found.loader}`);
-    if (st.found.plugins.length) lines.push(`Plugin updates: ${st.found.plugins.join(', ')}`);
-  } else {
-    lines.push('Up to date.');
+  try {
+    const st = await api('/update');
+    const lines = [`Current version: ${st.version}`];
+    if (st.busy) lines.push('Status: working…');
+    if (st.status) lines.push(`Detail: ${st.status}`);
+    if (st.found) {
+      if (st.found.loader) lines.push(`Latest Android/site build: ${st.found.loader}`);
+      if (st.found.plugins.length) lines.push(`Plugin updates: ${st.found.plugins.join(', ')}`);
+    } else {
+      lines.push('Up to date.');
+    }
+    $('#update-box').innerHTML = lines.map((l) => `<div>${esc(l)}</div>`).join('');
+    $('#apply-update-btn').disabled = !st.found || !st.found.plugins.length || st.busy;
+    return st;
+  } catch (err) {
+    setConnected(false, err.message);
+    return null;
   }
-  $('#update-box').innerHTML = lines.map((l) => `<div>${esc(l)}</div>`).join('');
-  $('#apply-update-btn').disabled = !st.found || !st.found.plugins.length || st.busy;
+}
+
+async function pollUpdateUntilDone(refreshPlugins) {
+  for (let i = 0; i < 15; i++) {
+    await new Promise((r) => setTimeout(r, 700));
+    const st = await loadUpdates();
+    if (!st || !st.busy) break;
+  }
+  if (refreshPlugins) loadPlugins();
 }
 
 $('#check-update-btn').onclick = async () => {
-  await api('/update/check', { method: 'POST' });
-  notify('Checking for updates…');
-  setTimeout(loadUpdates, 1200);
+  try {
+    await api('/update/check', { method: 'POST' });
+    notify('Checking for updates…');
+    pollUpdateUntilDone(false);
+  } catch (err) {
+    notify(`Check failed: ${err.message}`, true);
+  }
 };
 $('#apply-update-btn').onclick = async () => {
-  await api('/update/apply', { method: 'POST' });
-  notify('Applying plugin updates…');
-  setTimeout(loadUpdates, 1500);
+  try {
+    await api('/update/apply', { method: 'POST' });
+    notify('Applying plugin updates…');
+    pollUpdateUntilDone(true);
+  } catch (err) {
+    notify(`Apply failed: ${err.message}`, true);
+  }
 };
 
 async function loadLogs() {
-  const text = await api('/logs');
-  $('#logs-out').textContent = text || '(no logs yet)';
+  try {
+    const text = await api('/logs', {}, true);
+    const out = $('#logs-out');
+    out.textContent = text || '(no logs yet)';
+    out.scrollTop = out.scrollHeight;
+  } catch (err) {
+    setConnected(false, err.message);
+  }
 }
 $('#logs-refresh-btn').onclick = loadLogs;
-$('#eval-run-btn').onclick = async () => {
+
+async function runEval() {
   const code = $('#eval-input').value;
+  if (!code.trim()) return;
   const out = $('#eval-out');
   out.classList.remove('hidden');
   try {
-    out.textContent = await api('/eval', { method: 'POST', body: code });
+    const raw = await api('/eval', { method: 'POST', body: code }, true);
+    try {
+      const parsed = JSON.parse(raw);
+      out.textContent = typeof parsed === 'object' && parsed !== null
+        ? JSON.stringify(parsed, null, 2)
+        : raw;
+    } catch {
+      out.textContent = raw;
+    }
   } catch (err) {
     out.textContent = 'Error: ' + err.message;
   }
   loadLogs();
-};
+}
+$('#eval-run-btn').onclick = runEval;
+$('#eval-input').addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+    e.preventDefault();
+    runEval();
+  }
+});
 
 loadPlugins();
 </script>
