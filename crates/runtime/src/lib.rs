@@ -530,6 +530,7 @@ fn hook(image: &Image<'static>) -> Result<&'static GatewayRegistry, Error> {
 pub fn prepare() -> Result<(), Error> {
    let image = target()?;
    open_access_gate(&image);
+   staff::prepare(&image);
    desktop_settings::install(&image);
    let registry = hook(&image)?;
    *PREPARED

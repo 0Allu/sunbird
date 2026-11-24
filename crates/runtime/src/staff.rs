@@ -29,7 +29,12 @@ pub fn start(on: bool, image: &'static phoenix_hook::image::Image<'static>) {
    imp::start(image);
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(windows)]
+pub fn prepare(image: &phoenix_hook::image::Image<'_>) {
+   imp::prepare(image);
+}
+
+#[cfg(all(target_os = "android", target_arch = "aarch64"))]
 mod imp {
    use std::{
       ffi::c_void,
@@ -137,7 +142,7 @@ mod imp {
    }
 }
 
-#[cfg(target_arch = "arm")]
+#[cfg(all(target_os = "android", target_arch = "arm"))]
 mod imp {
    use std::{
       ffi::{
@@ -204,11 +209,187 @@ mod imp {
    }
 }
 
-#[cfg(not(any(target_arch = "aarch64", target_arch = "arm")))]
+#[cfg(all(windows, target_arch = "x86_64"))]
+mod imp {
+   use std::{
+      ffi::c_void,
+      ptr,
+      sync::{
+         OnceLock,
+         atomic::{
+            AtomicBool,
+            Ordering,
+         },
+      },
+   };
+
+   use phoenix_hook::{
+      image::Image,
+      pattern::Pattern,
+   };
+
+   /// `(user.flags | flag_override) & 1` compiled by rustc/LLVM on x86_64:
+   ///
+   /// ```text
+   /// cmp dword ptr [reg + tag_off], 1     ; 83 B8..BF <u32 tag_off> 01
+   /// jne +0x0e                            ; 75 0E
+   /// mov rax, qword ptr [reg + val_off]   ; 48 8B 80..87 <u32 val_off>
+   /// cmp reg2, 1                          ; 83 F8..FF 01
+   /// je +0x09                             ; 74 09
+   /// jmp +0x0e                            ; EB 0E
+   /// xor eax, eax                         ; 31 C0
+   /// cmp reg2, 1                          ; 83 F8..FF 01
+   /// jne +0x07                            ; 75 07
+   /// or rax, qword ptr [reg + usr_off]    ; 48 0B 80..87 <u32 usr_off>
+   /// ```
+   ///
+   /// Matches both direct `&StoreState` reads (passed to gateway reducers) and
+   /// `&RwLock<StoreState>` reads (shifted by the `0x10`-byte lock header).
+   /// Picking the smaller offset pair targets `&StoreState` directly.
+   const STAFF_CHECK: Pattern = Pattern::new(
+      "83 ?? ?? ?? ?? ?? 01 75 0E 48 8B ?? ?? ?? ?? ?? 83 ?? 01 74 09 EB 0E 31 C0 83 ?? 01 75 07 \
+       48 0B ?? ?? ?? ?? ??",
+   );
+   const CMP_MODRM: usize = 1;
+   const TAG_DISP: usize = 2;
+   const MOV_MODRM: usize = 11;
+   const VALUE_DISP: usize = 12;
+   const OR_MODRM: usize = 32;
+   const LOCK_HEADER: usize = 0x10;
+   const STAFF: u64 = 1;
+
+   static LOCATED: OnceLock<Option<Field>> = OnceLock::new();
+   static LOGGED: AtomicBool = AtomicBool::new(false);
+
+   #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+   struct Field {
+      tag:   usize,
+      value: usize,
+   }
+
+   /// Scans `Discord.exe` synchronously during `DllMain` so `flag_override` is
+   /// ready before the first gateway event fires.
+   pub(super) fn prepare(image: &Image<'_>) {
+      LOCATED.get_or_init(|| locate(image));
+   }
+
+   pub(super) fn start(image: &'static Image<'static>) {
+      LOCATED.get_or_init(|| locate(image));
+   }
+
+   fn locate(image: &Image<'_>) -> Option<Field> {
+      let mut found = Vec::new();
+      let mut total = 0usize;
+      for base in image.scan(STAFF_CHECK) {
+         let Some(bytes) = image.read(base, OR_MODRM + 1) else {
+            continue;
+         };
+         let cmp_modrm = bytes[CMP_MODRM];
+         let mov_modrm = bytes[MOV_MODRM];
+         let or_modrm = bytes[OR_MODRM];
+         // disp32 without SIB (`0xB8..=0xBF` except `0xBC`; `0x80..=0x87` except `0x84`)
+         // and all three reads must share the same base register.
+         if !(0xB8..=0xBF).contains(&cmp_modrm) || cmp_modrm == 0xBC {
+            continue;
+         }
+         if !(0x80..=0x87).contains(&mov_modrm) || mov_modrm == 0x84 {
+            continue;
+         }
+         if !(0x80..=0x87).contains(&or_modrm) || or_modrm == 0x84 {
+            continue;
+         }
+         let reg = cmp_modrm & 7;
+         if (mov_modrm & 7) != reg || (or_modrm & 7) != reg {
+            continue;
+         }
+         let Some(tag) = image.read_u32(base + TAG_DISP).map(|v| v as usize) else {
+            continue;
+         };
+         let Some(value) = image.read_u32(base + VALUE_DISP).map(|v| v as usize) else {
+            continue;
+         };
+         if value != tag.wrapping_add(8) {
+            continue;
+         }
+         total += 1;
+         found.push(Field { tag, value });
+      }
+      found.sort_unstable();
+      found.dedup();
+      let field = match found.as_slice() {
+         [only] => *only,
+         [direct, locked]
+            if locked.tag == direct.tag + LOCK_HEADER
+               && locked.value == direct.value + LOCK_HEADER =>
+         {
+            *direct
+         },
+         [] => {
+            log::warn!("staff: flag read not found, leaving flag_override as is");
+            return None;
+         },
+         _ => {
+            log::warn!(
+               "staff: flag reads disagree on flag_override ({} variants), leaving it as is",
+               found.len()
+            );
+            return None;
+         },
+      };
+      log::info!(
+         "staff: located flag_override at tag={:#x} value={:#x} ({total} reads)",
+         field.tag,
+         field.value
+      );
+      Some(field)
+   }
+
+   /// # Safety
+   ///
+   /// `state` is the `&StoreState` a gateway handler was called with, and the
+   /// caller runs inside that handler.
+   pub unsafe fn apply(state: *mut c_void) {
+      let Some(Some(field)) = LOCATED.get() else {
+         return;
+      };
+      if state.is_null() {
+         return;
+      }
+      // SAFETY: the flag read loads `tag` as `u32` (`1` == `Some`) and `value`
+      // as `u64` from `&StoreState`, which every gateway handler receives first.
+      unsafe {
+         let tag = state.byte_add(field.tag).cast::<u32>();
+         let value = state.byte_add(field.value).cast::<u64>();
+         let had = ptr::read(tag) == 1;
+         let current = if had { ptr::read(value) } else { 0 };
+         let wanted = if super::enabled() {
+            current | STAFF
+         } else {
+            current & !STAFF
+         };
+         if wanted == current {
+            return;
+         }
+         ptr::write(value, wanted);
+         ptr::write(tag, u32::from(wanted != 0));
+      }
+      if super::enabled() && !LOGGED.swap(true, Ordering::AcqRel) {
+         log::info!("staff: unlocked (flag_override bit 0 set)");
+      }
+   }
+}
+
+#[cfg(not(any(
+   all(target_os = "android", any(target_arch = "aarch64", target_arch = "arm")),
+   all(windows, target_arch = "x86_64")
+)))]
 mod imp {
    use std::ffi::c_void;
 
    use phoenix_hook::image::Image;
+
+   #[cfg(windows)]
+   pub(super) fn prepare(_image: &Image<'_>) {}
 
    pub(super) fn start(_image: &'static Image<'static>) {}
 
@@ -218,4 +399,4 @@ mod imp {
    pub unsafe fn apply(_state: *mut c_void) {}
 }
 
-#[cfg(not(target_arch = "arm"))] pub use imp::apply;
+#[cfg(not(all(target_os = "android", target_arch = "arm")))] pub use imp::apply;
