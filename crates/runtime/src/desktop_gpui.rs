@@ -1,11 +1,11 @@
 //! Native GPUI / Mana widget bindings for Desktop Phoenix User Settings.
 //!
-//! Resolves `Discord.exe`'s own compiled GPUI (`Div`, `AnyElement`,
-//! `SharedString`) and Mana (`Switch`, `Button`, `TextBlock`, `ActionRow`)
-//! builders from unique string anchors during [`crate::prepare`] — no
-//! hardcoded addresses and no webview overlay. All controls render natively
-//! inside Discord's GPUI render tree with Discord's theme, fonts, spacing, and
-//! scroll container.
+//! Resolves `Discord.exe`'s own compiled GPUI (`Div`, `StyleRefinement`,
+//! `AnyElement`, `SharedString`) and Mana (`Switch`, `Button`, `TextBlock`,
+//! `ActionRow`) builders from unique string anchors during [`crate::prepare`] —
+//! no hardcoded addresses and no webview overlay. All controls render natively
+//! inside Discord's GPUI render tree with category tabs, rounded bordered
+//! cards, collapsible plugin settings dropdowns, and native select dropdowns.
 
 use std::{
    collections::HashSet,
@@ -28,6 +28,7 @@ use crate::{
    update::{
       self,
       Catalog,
+      Listed,
    },
 };
 
@@ -126,10 +127,31 @@ static BUTTON_FN_VTBL: RcFnVtbl = RcFnVtbl {
    extra:         ptr::null(),
 };
 
+#[derive(Clone, Copy)]
+#[repr(u8)]
+enum BtnVariant {
+   Primary   = 0,
+   Secondary = 1,
+   Critical  = 3,
+}
+
+#[derive(Clone, Copy)]
+#[repr(u8)]
+enum BtnSize {
+   Small  = 1,
+   Medium = 2,
+}
+
+/// Encodes `Some(AbsoluteLength::Pixels(px))` in GPUI's `StyleRefinement`.
+fn gpui_px(px: f32) -> u64 {
+   u64::from(px.to_bits()) << 32
+}
+
 type DivNewFn = unsafe extern "C" fn(*mut RawDiv, *const c_void) -> *mut RawDiv;
 type DivMutFn = unsafe extern "C" fn(*mut RawDiv, *mut RawDiv) -> *mut RawDiv;
-type DivGapFn = unsafe extern "C" fn(*mut RawDiv, *mut RawDiv, f32) -> *mut RawDiv;
+type DivStyleMutFn = unsafe extern "C" fn(*mut RawDiv) -> *mut u8;
 type DivChildDivFn = unsafe extern "C" fn(*mut RawDiv, *mut RawDiv, *mut RawDiv) -> *mut RawDiv;
+type DivChildBtnFn = unsafe extern "C" fn(*mut RawDiv, *mut RawDiv, *mut RawButton) -> *mut RawDiv;
 type DivIntoAnyFn = unsafe extern "C" fn(*mut RawAnyElement, *mut RawDiv) -> *mut RawAnyElement;
 type TextBlockFn =
    unsafe extern "C" fn(*mut RawDiv, *const SharedString, *const SharedString) -> *mut RawDiv;
@@ -147,19 +169,20 @@ type ActionRowFn = unsafe extern "C" fn(
 type AllocOrOomFn = unsafe extern "C" fn(usize, usize) -> *mut u8;
 
 struct GpuiSymbols {
-   caller_loc:      *const c_void,
-   div_new:         DivNewFn,
-   div_flex:        DivMutFn,
-   div_flex_col:    DivMutFn,
-   div_gap:         DivGapFn,
-   div_child_div:   DivChildDivFn,
-   div_into_any:    DivIntoAnyFn,
-   text_block:      TextBlockFn,
-   switch_new:      SwitchNewFn,
-   switch_into_div: SwitchIntoDivFn,
-   button_new:      ButtonNewFn,
-   action_row:      ActionRowFn,
-   alloc_or_oom:    AllocOrOomFn,
+   caller_loc:       *const c_void,
+   div_new:          DivNewFn,
+   div_flex:         DivMutFn,
+   div_flex_col:     DivMutFn,
+   div_style_mut:    DivStyleMutFn,
+   div_child_div:    DivChildDivFn,
+   div_child_button: DivChildBtnFn,
+   div_into_any:     DivIntoAnyFn,
+   text_block:       TextBlockFn,
+   switch_new:       SwitchNewFn,
+   switch_into_div:  SwitchIntoDivFn,
+   button_new:       ButtonNewFn,
+   action_row:       ActionRowFn,
+   alloc_or_oom:     AllocOrOomFn,
 }
 
 // SAFETY: function pointers and static `.rdata` `Location` pointer in `Discord.exe`.
@@ -168,8 +191,65 @@ unsafe impl Sync for GpuiSymbols {}
 
 static SYMBOLS: OnceLock<GpuiSymbols> = OnceLock::new();
 
+// ---------------------------------------------------------------------------
+// Interactive UI state (tabs, filters, collapsible dropdowns, open selects)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+   Plugins,
+   Catalog,
+   General,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PluginFilter {
+   All,
+   Enabled,
+   Disabled,
+}
+
+struct UiState {
+   tab:                  Tab,
+   filter:               PluginFilter,
+   expanded_plugins:     HashSet<String>,
+   open_select:          Option<(String, String)>,
+   cat_desktop_open:     bool,
+   cat_partial_open:     bool,
+   cat_mobile_open:      bool,
+}
+
+impl Default for UiState {
+   fn default() -> Self {
+      Self {
+         tab:              Tab::Plugins,
+         filter:           PluginFilter::All,
+         expanded_plugins: HashSet::new(),
+         open_select:      None,
+         cat_desktop_open: true,
+         cat_partial_open: false,
+         cat_mobile_open:  false,
+      }
+   }
+}
+
+static UI_STATE: LazyLock<Mutex<UiState>> = LazyLock::new(|| Mutex::new(UiState::default()));
+
 #[derive(Clone)]
 enum Action {
+   SetTab(Tab),
+   SetFilter(PluginFilter),
+   ToggleExpandPlugin(String),
+   ToggleSelectDropdown {
+      plugin: String,
+      key:    String,
+   },
+   PickSelectOption {
+      plugin: String,
+      key:    String,
+      value:  String,
+   },
+   ToggleCatalogGroup(u8),
    ToggleStaff,
    ReloadAll,
    OpenDevTools,
@@ -182,11 +262,6 @@ enum Action {
    ToggleSetting {
       plugin: String,
       key:    String,
-   },
-   CycleSelect {
-      plugin: String,
-      key:    String,
-      next:   String,
    },
    PressButton {
       plugin: String,
@@ -252,6 +327,48 @@ unsafe extern "C" fn button_callback(
          return;
       };
       match action {
+         Action::SetTab(tab) => {
+            let mut ui = UI_STATE.lock().unwrap_or_else(PoisonError::into_inner);
+            ui.tab = tab;
+            ui.open_select = None;
+         },
+         Action::SetFilter(filter) => {
+            UI_STATE
+               .lock()
+               .unwrap_or_else(PoisonError::into_inner)
+               .filter = filter;
+         },
+         Action::ToggleExpandPlugin(name) => {
+            let mut ui = UI_STATE.lock().unwrap_or_else(PoisonError::into_inner);
+            if !ui.expanded_plugins.remove(&name) {
+               ui.expanded_plugins.insert(name);
+            }
+            ui.open_select = None;
+         },
+         Action::ToggleSelectDropdown { plugin, key } => {
+            let mut ui = UI_STATE.lock().unwrap_or_else(PoisonError::into_inner);
+            let target = (plugin, key);
+            if ui.open_select.as_ref() == Some(&target) {
+               ui.open_select = None;
+            } else {
+               ui.open_select = Some(target);
+            }
+         },
+         Action::PickSelectOption { plugin, key, value } => {
+            crate::set_setting(&plugin, &key, Chosen::Text(value));
+            UI_STATE
+               .lock()
+               .unwrap_or_else(PoisonError::into_inner)
+               .open_select = None;
+         },
+         Action::ToggleCatalogGroup(group) => {
+            let mut ui = UI_STATE.lock().unwrap_or_else(PoisonError::into_inner);
+            match group {
+               0 => ui.cat_desktop_open = !ui.cat_desktop_open,
+               1 => ui.cat_partial_open = !ui.cat_partial_open,
+               _ => ui.cat_mobile_open = !ui.cat_mobile_open,
+            }
+         },
          Action::ReloadAll => crate::reload_all(),
          Action::OpenDevTools => phoenix_ui_desktop::open_devtools(),
          Action::CheckUpdates => update::check(),
@@ -262,9 +379,6 @@ unsafe extern "C" fn button_callback(
             if let Err(err) = crate::uninstall(&name) {
                log::warn!("sunbird settings: uninstall {name}: {err}");
             }
-         },
-         Action::CycleSelect { plugin, key, next } => {
-            crate::set_setting(&plugin, &key, Chosen::Text(next));
          },
          Action::PressButton { plugin, key } => crate::press(&plugin, &key),
          Action::InstallCatalog(name) => {
@@ -321,7 +435,7 @@ fn find_lea_xrefs(image: &Image<'_>, target: usize) -> Vec<usize> {
 
 /// Scans `image` in `[start, start + len)` for `E8 rel32` direct calls whose
 /// destination is a `.pdata` function start or a valid leaf/thunk function
-/// entry in `.text` (e.g. `Button::new` and `Div::into_any_element`).
+/// entry in `.text`.
 fn calls_in(image: &Image<'_>, start: usize, len: usize) -> Vec<(usize, usize)> {
    let Some(bytes) = image.read(start, len) else {
       return Vec::new();
@@ -362,8 +476,6 @@ fn calls_in(image: &Image<'_>, start: usize, len: usize) -> Vec<(usize, usize)> 
    out
 }
 
-/// Decodes the last `lea rdx, [rip + disp32]` (`48 8D 15 <i32>`) in
-/// `[call_addr - 0x20, call_addr)`.
 fn find_rdx_lea_before(image: &Image<'_>, call_addr: usize) -> Option<usize> {
    let start = call_addr.checked_sub(0x20)?;
    let bytes = image.read(start, 0x20)?;
@@ -383,8 +495,7 @@ fn find_rdx_lea_before(image: &Image<'_>, call_addr: usize) -> Option<usize> {
 }
 
 /// Resolves Discord's native GPUI / Mana widget builders from unique string
-/// anchors. Safe to call from `DllMain` (`prepare()`): performs only read-only
-/// memory scans.
+/// anchors. Safe to call from `DllMain` (`prepare()`).
 pub fn locate(image: &Image<'static>) -> bool {
    if SYMBOLS.get().is_some() {
       return true;
@@ -449,14 +560,14 @@ pub fn locate(image: &Image<'static>) -> bool {
    let action_row = after_btn[4].1;
    let div_into_any = after_btn[5].1;
 
-   // Inside `action_row`, decode `div_gap`, `text_block`, and `div_child_div`,
-   // and cross-check `div_new` and `div_flex` against Anchor A.
+   // Inside `action_row`, cross-check `div_new` and `div_flex`, then extract
+   // `div_style_mut`, `text_block`, `div_child_button`, and `div_child_div`.
    let Some((ar_start, ar_end)) = image.function_bounds(action_row) else {
       log::warn!("desktop gpui: no .pdata bounds for ActionRow {action_row:#x}");
       return false;
    };
    let ar_calls = calls_in(image, ar_start, ar_end - ar_start);
-   if ar_calls.len() < 12 || ar_calls[0].1 != div_new || ar_calls[2].1 != div_flex {
+   if ar_calls.len() < 16 || ar_calls[0].1 != div_new || ar_calls[2].1 != div_flex {
       log::warn!(
          "desktop gpui: ActionRow cross-check failed (len={}, div_match={}, flex_match={})",
          ar_calls.len(),
@@ -465,39 +576,46 @@ pub fn locate(image: &Image<'static>) -> bool {
       );
       return false;
    }
-   let div_gap = ar_calls[1].1;
+   let div_py = ar_calls[1].1;
+   let py_calls = calls_in(image, div_py, 0x40);
+   let Some(&(_, div_style_mut)) = py_calls.first() else {
+      log::warn!("desktop gpui: could not resolve div_style_mut inside div_py");
+      return false;
+   };
    let text_block = ar_calls[6].1;
-   let div_child_div = ar_calls.last().expect("checked len >= 12").1;
+   let div_child_button = ar_calls[14].1;
+   let div_child_div = ar_calls.last().expect("checked len >= 16").1;
 
-   // SAFETY: every resolved address was verified via `Image::is_function` and
-   // matches the exact Rust-ABI signatures verified in Discord.exe.
+   // SAFETY: every resolved address was verified via `is_function` / cross-check
+   // and matches the exact Rust-ABI signatures verified in Discord.exe.
    let symbols = unsafe {
       GpuiSymbols {
-         caller_loc:      caller_loc as *const c_void,
-         div_new:         std::mem::transmute::<usize, DivNewFn>(div_new),
-         div_flex:        std::mem::transmute::<usize, DivMutFn>(div_flex),
-         div_flex_col:    std::mem::transmute::<usize, DivMutFn>(div_flex_col),
-         div_gap:         std::mem::transmute::<usize, DivGapFn>(div_gap),
-         div_child_div:   std::mem::transmute::<usize, DivChildDivFn>(div_child_div),
-         div_into_any:    std::mem::transmute::<usize, DivIntoAnyFn>(div_into_any),
-         text_block:      std::mem::transmute::<usize, TextBlockFn>(text_block),
-         switch_new:      std::mem::transmute::<usize, SwitchNewFn>(switch_new),
-         switch_into_div: std::mem::transmute::<usize, SwitchIntoDivFn>(switch_into_div),
-         button_new:      std::mem::transmute::<usize, ButtonNewFn>(button_new),
-         action_row:      std::mem::transmute::<usize, ActionRowFn>(action_row),
-         alloc_or_oom:    std::mem::transmute::<usize, AllocOrOomFn>(alloc_or_oom),
+         caller_loc:       caller_loc as *const c_void,
+         div_new:          std::mem::transmute::<usize, DivNewFn>(div_new),
+         div_flex:         std::mem::transmute::<usize, DivMutFn>(div_flex),
+         div_flex_col:     std::mem::transmute::<usize, DivMutFn>(div_flex_col),
+         div_style_mut:    std::mem::transmute::<usize, DivStyleMutFn>(div_style_mut),
+         div_child_div:    std::mem::transmute::<usize, DivChildDivFn>(div_child_div),
+         div_child_button: std::mem::transmute::<usize, DivChildBtnFn>(div_child_button),
+         div_into_any:     std::mem::transmute::<usize, DivIntoAnyFn>(div_into_any),
+         text_block:       std::mem::transmute::<usize, TextBlockFn>(text_block),
+         switch_new:       std::mem::transmute::<usize, SwitchNewFn>(switch_new),
+         switch_into_div:  std::mem::transmute::<usize, SwitchIntoDivFn>(switch_into_div),
+         button_new:       std::mem::transmute::<usize, ButtonNewFn>(button_new),
+         action_row:       std::mem::transmute::<usize, ActionRowFn>(action_row),
+         alloc_or_oom:     std::mem::transmute::<usize, AllocOrOomFn>(alloc_or_oom),
       }
    };
    let _ = SYMBOLS.set(symbols);
    log::info!(
-      "desktop gpui: resolved native Mana builders (div={div_new:#x}, switch={switch_new:#x}, \
-       button={button_new:#x}, row={action_row:#x})"
+      "desktop gpui: resolved native Mana builders (div={div_new:#x}, style={div_style_mut:#x}, \
+       switch={switch_new:#x}, button={button_new:#x}, row={action_row:#x})"
    );
    true
 }
 
 // ---------------------------------------------------------------------------
-// Safe builder helpers over Discord's native GPUI / Mana widgets
+// Native GPUI / Mana Layout & Styling Helpers
 // ---------------------------------------------------------------------------
 
 struct Builder {
@@ -521,14 +639,28 @@ impl Builder {
       }
    }
 
-   fn v_stack(&self, gap_px: f32) -> RawDiv {
-      // SAFETY: sequentially constructs `div().flex().flex_col().gap(px)` using
-      // Discord's native GPUI builders.
+   fn raw_div(&self) -> RawDiv {
+      // SAFETY: constructs an empty GPUI `Div`.
       unsafe {
-         let mut d0 = MaybeUninit::<RawDiv>::uninit();
-         (self.sym.div_new)(d0.as_mut_ptr(), self.sym.caller_loc);
-         let mut d0 = d0.assume_init();
+         let mut d = MaybeUninit::<RawDiv>::uninit();
+         (self.sym.div_new)(d.as_mut_ptr(), self.sym.caller_loc);
+         d.assume_init()
+      }
+   }
 
+   fn style_div(&self, div: &mut RawDiv, f: impl FnOnce(*mut u8)) {
+      // SAFETY: `div_style_mut` returns a valid mutable pointer to `Div`'s
+      // `StyleRefinement` (verified offsets from `Discord.exe`).
+      let style = unsafe { (self.sym.div_style_mut)(&raw mut *div) };
+      if !style.is_null() {
+         f(style);
+      }
+   }
+
+   fn v_stack(&self, gap_px: f32) -> RawDiv {
+      // SAFETY: `div().flex().flex_col()` + true `gap` at StyleRefinement +0x1b8/+0x1c0.
+      unsafe {
+         let mut d0 = self.raw_div();
          let mut d1 = MaybeUninit::<RawDiv>::uninit();
          (self.sym.div_flex)(d1.as_mut_ptr(), &raw mut d0);
          let mut d1 = d1.assume_init();
@@ -537,17 +669,131 @@ impl Builder {
          (self.sym.div_flex_col)(d2.as_mut_ptr(), &raw mut d1);
          let mut d2 = d2.assume_init();
 
-         let mut d3 = MaybeUninit::<RawDiv>::uninit();
-         (self.sym.div_gap)(d3.as_mut_ptr(), &raw mut d2, gap_px);
-         d3.assume_init()
+         self.style_div(&mut d2, |s| {
+            let g = gpui_px(gap_px);
+            s.add(0x1b8).cast::<u64>().write(g);
+            s.add(0x1c0).cast::<u64>().write(g);
+         });
+         d2
       }
    }
 
+   fn h_row(&self, gap_px: f32, space_between: bool) -> RawDiv {
+      // SAFETY: `div().flex().items_center().gap(px)` (+ optional `justify_between`).
+      unsafe {
+         let mut d0 = self.raw_div();
+         let mut d1 = MaybeUninit::<RawDiv>::uninit();
+         (self.sym.div_flex)(d1.as_mut_ptr(), &raw mut d0);
+         let mut d1 = d1.assume_init();
+
+         self.style_div(&mut d1, |s| {
+            let g = gpui_px(gap_px);
+            s.add(0x1b8).cast::<u64>().write(g);
+            s.add(0x1c0).cast::<u64>().write(g);
+            s.add(0x279).write(4); // align_items = Center
+            if space_between {
+               s.add(0x27c).write(6); // justify_content = SpaceBetween
+            }
+         });
+         d1
+      }
+   }
+
+   /// Rounded bordered card container matching Discord's native Settings cards.
+   fn card(&self, gap_px: f32, pad_px: f32, radius_px: f32, border_alpha: f32) -> RawDiv {
+      let mut d = self.v_stack(gap_px);
+      // SAFETY: verified StyleRefinement offsets:
+      // +0x110..+0x130 = border_widths, +0x130..+0x150 = corner_radii,
+      // +0x198..+0x1b8 = padding, +0x250 = Option<Hsla> border_color.
+      self.style_div(&mut d, |s| unsafe {
+         let bw = gpui_px(1.0);
+         for off in [0x110usize, 0x118, 0x120, 0x128] {
+            s.add(off).cast::<u64>().write(bw);
+         }
+         let r = gpui_px(radius_px);
+         for off in [0x130usize, 0x138, 0x140, 0x148] {
+            s.add(off).cast::<u64>().write(r);
+         }
+         let p = gpui_px(pad_px);
+         for off in [0x198usize, 0x1a0, 0x1a8, 0x1b0] {
+            s.add(off).cast::<u64>().write(p);
+         }
+         // Neutral translucent border that adapts across dark, ash, midnight, and light themes.
+         s.add(0x250).cast::<u32>().write(1);
+         s.add(0x254).cast::<[f32; 4]>().write([0.62, 0.05, 0.55, border_alpha]);
+      });
+      d
+   }
+
+   /// Subtle 1px horizontal divider line between sections or rows.
+   fn divider(&self) -> RawDiv {
+      let mut d = self.raw_div();
+      // SAFETY: 1px bottom border with translucent neutral color and vertical margin.
+      self.style_div(&mut d, |s| unsafe {
+         s.add(0x120).cast::<u64>().write(gpui_px(1.0)); // border_bottom = 1px
+         s.add(0x1f0).cast::<u64>().write(gpui_px(1.0)); // height = 1px
+         s.add(0x250).cast::<u32>().write(1);
+         s.add(0x254).cast::<[f32; 4]>().write([0.62, 0.05, 0.55, 0.16]);
+      });
+      d
+   }
+
    fn push_div(&self, mut parent: RawDiv, mut child: RawDiv) -> RawDiv {
-      // SAFETY: transfers ownership of both `RawDiv`s into `div_child_div`.
+      // SAFETY: moves both `RawDiv`s into `div_child_div`.
       unsafe {
          let mut out = MaybeUninit::<RawDiv>::uninit();
          (self.sym.div_child_div)(out.as_mut_ptr(), &raw mut parent, &raw mut child);
+         out.assume_init()
+      }
+   }
+
+   fn build_button(
+      &self,
+      id: &str,
+      label: &str,
+      variant: BtnVariant,
+      size: BtnSize,
+      action: Action,
+   ) -> RawButton {
+      let id_static = intern(id);
+      let label_ss = SharedString::from_str(label);
+      // SAFETY: creates a native Mana `Button`, sets variant (+0x323), size
+      // (+0x31d), and attaches our `Rc<dyn Fn>` click callback at +0x298..+0x2a8.
+      unsafe {
+         let mut btn = MaybeUninit::<RawButton>::uninit();
+         (self.sym.button_new)(
+            btn.as_mut_ptr(),
+            id_static.as_ptr(),
+            id_static.len(),
+            &raw const label_ss,
+         );
+         let mut btn = btn.assume_init();
+         let base = btn.0.as_mut_ptr();
+         base.add(0x323).write(variant as u8);
+         base.add(0x31d).write(size as u8);
+         let rc_ptr = self.alloc_rc_action(action);
+         base.add(0x298).cast::<*mut RcInner>().write(rc_ptr);
+         base.add(0x2a0)
+            .cast::<*const RcFnVtbl>()
+            .write(&raw const BUTTON_FN_VTBL);
+         btn
+      }
+   }
+
+   fn push_button(
+      &self,
+      mut parent: RawDiv,
+      id: &str,
+      label: &str,
+      variant: BtnVariant,
+      size: BtnSize,
+      action: Action,
+   ) -> RawDiv {
+      let mut btn = self.build_button(id, label, variant, size, action);
+      // SAFETY: appends native Mana `Button` directly into `parent`.
+      unsafe {
+         let mut out = MaybeUninit::<RawDiv>::uninit();
+         (self.sym.div_child_button)(out.as_mut_ptr(), &raw mut parent, &raw mut btn);
          out.assume_init()
       }
    }
@@ -573,9 +819,8 @@ impl Builder {
    ) -> RawDiv {
       let id_static = intern(id);
       let label_ss = SharedString::from_str(label);
-      // SAFETY: builds a native Mana `Switch`, populates its `label` (+0x98),
-      // optional `description` (+0xb0), and `on_change` `Rc<dyn Fn>` (+0x230),
-      // then wraps it in a `Div` via `switch_into_div`.
+      // SAFETY: creates a native Mana `Switch`, sets label (+0x98), optional
+      // description (+0xb0), and `on_change` `Rc<dyn Fn>` (+0x230..+0x240).
       unsafe {
          let mut sw = MaybeUninit::<RawSwitch>::uninit();
          (self.sym.switch_new)(
@@ -611,31 +856,15 @@ impl Builder {
       title: &str,
       subtitle: &str,
       button_label: &str,
+      variant: BtnVariant,
+      size: BtnSize,
       action: Action,
    ) -> RawDiv {
-      let id_static = intern(id);
       let title_ss = SharedString::from_str(title);
       let sub_ss = SharedString::from_str(subtitle);
-      let btn_ss = SharedString::from_str(button_label);
-      // SAFETY: builds a native Mana `Button`, attaches our `on_click`
-      // `Rc<dyn Fn>` at +0x298..0x2a8, and passes it into Discord's native
-      // `ActionRow(title, subtitle, button)` builder.
+      let mut btn = self.build_button(id, button_label, variant, size, action);
+      // SAFETY: builds Discord's native `ActionRow(title, subtitle, button)`.
       unsafe {
-         let mut btn = MaybeUninit::<RawButton>::uninit();
-         (self.sym.button_new)(
-            btn.as_mut_ptr(),
-            id_static.as_ptr(),
-            id_static.len(),
-            &raw const btn_ss,
-         );
-         let mut btn = btn.assume_init();
-         let rc_ptr = self.alloc_rc_action(action);
-         let base = btn.0.as_mut_ptr();
-         base.add(0x298).cast::<*mut RcInner>().write(rc_ptr);
-         base.add(0x2a0)
-            .cast::<*const RcFnVtbl>()
-            .write(&raw const BUTTON_FN_VTBL);
-
          let mut out = MaybeUninit::<RawDiv>::uninit();
          (self.sym.action_row)(
             out.as_mut_ptr(),
@@ -656,329 +885,678 @@ impl Builder {
 }
 
 // ---------------------------------------------------------------------------
-// Sunbird Native GPUI Settings Page
+// Sunbird Categorized Native GPUI Settings Page
 // ---------------------------------------------------------------------------
 
-/// Renders the entire native Sunbird Settings page into `sret` (`AnyElement`).
-/// Returns `false` if native GPUI symbols were not located (caller falls back
-/// to Discord's original page 24).
+const DESKTOP_FULL: &[&str] = &[
+   "silent-typing",
+   "nsfw-gate-bypass",
+   "message-latency",
+   "no-profile-themes",
+   "dearrow",
+   "translate",
+   "clear-urls",
+   "fix-embeds",
+];
+
+const DESKTOP_PARTIAL: &[&str] = &[
+   "global-badges",
+   "message-logger",
+   "spoiler-mode",
+   "fakenitro",
+];
+
+/// Renders the categorized native Sunbird Settings page into `sret`.
 pub fn render_sunbird_page(sret: *mut RawAnyElement) -> bool {
    let Some(sym) = SYMBOLS.get() else {
       return false;
    };
    let b = Builder { sym };
 
-   // Clear actions from the previous render pass before building this frame.
    ACTIONS
       .lock()
       .unwrap_or_else(PoisonError::into_inner)
       .clear();
 
+   let (tab, filter, expanded_plugins, open_select, cat_desktop, cat_partial, cat_mobile) = {
+      let ui = UI_STATE.lock().unwrap_or_else(PoisonError::into_inner);
+      (
+         ui.tab,
+         ui.filter,
+         ui.expanded_plugins.clone(),
+         ui.open_select.clone(),
+         ui.cat_desktop_open,
+         ui.cat_partial_open,
+         ui.cat_mobile_open,
+      )
+   };
+
    let plugins = crate::plugins();
    let enabled_count = plugins.iter().filter(|p| p.enabled).count();
-   let installed_names: HashSet<String> = plugins.iter().map(|p| p.name.clone()).collect();
+   let disabled_count = plugins.len().saturating_sub(enabled_count);
 
-   let mut root = b.v_stack(20.0);
+   let mut root = b.v_stack(16.0);
 
-   // 1. Header
+   // 1. Header + Category Tab Bar
    let summary = format!(
-      "v{} · {enabled_count}/{} plugins active · Press Ctrl+Shift+I for Runtime DevTools",
+      "v{} · {enabled_count}/{} plugins active · Ctrl+Shift+I for DevTools",
       update::VERSION,
       plugins.len()
    );
    root = b.push_div(root, b.text_block("Sunbird", &summary));
 
-   // 2. Core controls
+   let tab_var = |t: Tab| {
+      if tab == t {
+         BtnVariant::Primary
+      } else {
+         BtnVariant::Secondary
+      }
+   };
+   let mut tab_bar = b.h_row(8.0, false);
+   tab_bar = b.push_button(
+      tab_bar,
+      "sunbird-tab-plugins",
+      &format!("Plugins ({})", plugins.len()),
+      tab_var(Tab::Plugins),
+      BtnSize::Small,
+      Action::SetTab(Tab::Plugins),
+   );
+   tab_bar = b.push_button(
+      tab_bar,
+      "sunbird-tab-catalog",
+      "Plugin Catalog",
+      tab_var(Tab::Catalog),
+      BtnSize::Small,
+      Action::SetTab(Tab::Catalog),
+   );
+   tab_bar = b.push_button(
+      tab_bar,
+      "sunbird-tab-general",
+      "General & Updates",
+      tab_var(Tab::General),
+      BtnSize::Small,
+      Action::SetTab(Tab::General),
+   );
+   root = b.push_div(root, tab_bar);
+   root = b.push_div(root, b.divider());
+
+   // 2. Active Category Content
+   match tab {
+      Tab::Plugins => {
+         root = render_plugins_tab(
+            &b,
+            root,
+            &plugins,
+            enabled_count,
+            disabled_count,
+            filter,
+            &expanded_plugins,
+            open_select.as_ref(),
+         );
+      },
+      Tab::Catalog => {
+         let installed: HashSet<String> = plugins.iter().map(|p| p.name.clone()).collect();
+         root = render_catalog_tab(&b, root, &installed, cat_desktop, cat_partial, cat_mobile);
+      },
+      Tab::General => {
+         root = render_general_tab(&b, root);
+      },
+   }
+
+   b.into_any(root, sret);
+   true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_plugins_tab(
+   b: &Builder,
+   mut root: RawDiv,
+   plugins: &[crate::PluginInfo],
+   enabled_count: usize,
+   disabled_count: usize,
+   filter: PluginFilter,
+   expanded: &HashSet<String>,
+   open_select: Option<&(String, String)>,
+) -> RawDiv {
+   // Filter pills + Reload All toolbar
+   let filt_var = |f: PluginFilter| {
+      if filter == f {
+         BtnVariant::Primary
+      } else {
+         BtnVariant::Secondary
+      }
+   };
+   let mut left_pills = b.h_row(6.0, false);
+   left_pills = b.push_button(
+      left_pills,
+      "sunbird-filter-all",
+      &format!("All ({})", plugins.len()),
+      filt_var(PluginFilter::All),
+      BtnSize::Small,
+      Action::SetFilter(PluginFilter::All),
+   );
+   left_pills = b.push_button(
+      left_pills,
+      "sunbird-filter-enabled",
+      &format!("Enabled ({enabled_count})"),
+      filt_var(PluginFilter::Enabled),
+      BtnSize::Small,
+      Action::SetFilter(PluginFilter::Enabled),
+   );
+   left_pills = b.push_button(
+      left_pills,
+      "sunbird-filter-disabled",
+      &format!("Disabled ({disabled_count})"),
+      filt_var(PluginFilter::Disabled),
+      BtnSize::Small,
+      Action::SetFilter(PluginFilter::Disabled),
+   );
+
+   let mut toolbar = b.h_row(8.0, true);
+   toolbar = b.push_div(toolbar, left_pills);
+   toolbar = b.push_button(
+      toolbar,
+      "sunbird-toolbar-reload-all",
+      "Reload All",
+      BtnVariant::Secondary,
+      BtnSize::Small,
+      Action::ReloadAll,
+   );
+   root = b.push_div(root, toolbar);
+
+   let filtered: Vec<&crate::PluginInfo> = plugins
+      .iter()
+      .filter(|p| match filter {
+         PluginFilter::All => true,
+         PluginFilter::Enabled => p.enabled,
+         PluginFilter::Disabled => !p.enabled,
+      })
+      .collect();
+
+   if filtered.is_empty() {
+      let msg = if plugins.is_empty() {
+         "Open the Plugin Catalog tab to install plugins."
+      } else {
+         "No plugins match the current filter."
+      };
+      let mut empty = b.card(8.0, 16.0, 8.0, 0.18);
+      empty = b.push_div(empty, b.text_block("Nothing here", msg));
+      return b.push_div(root, empty);
+   }
+
+   let mut list = b.v_stack(10.0);
+   for plugin in filtered {
+      let is_open = expanded.contains(&plugin.name);
+      let mut card = b.card(10.0, 14.0, 8.0, if plugin.enabled { 0.22 } else { 0.14 });
+
+      let title = match &plugin.header.version {
+         Some(ver) => format!("{}  v{ver}", plugin.name),
+         None => plugin.name.clone(),
+      };
+      let mut desc_parts = Vec::new();
+      if let Some(d) = &plugin.header.description {
+         desc_parts.push(d.clone());
+      }
+      if let Some(a) = &plugin.header.author {
+         desc_parts.push(format!("by {a}"));
+      }
+      if let Some(err) = &plugin.error {
+         desc_parts.push(format!("Error: {err}"));
+      }
+      let desc = desc_parts.join(" · ");
+
+      card = b.push_div(
+         card,
+         b.switch_row(
+            &format!("sunbird-plugin-{}", plugin.name),
+            &title,
+            (!desc.is_empty()).then_some(desc.as_str()),
+            plugin.enabled,
+            Action::TogglePlugin(plugin.name.clone()),
+         ),
+      );
+
+      let has_settings = plugin.enabled && !plugin.settings.is_empty();
+      if has_settings || plugin.installed {
+         let mut actions = b.h_row(8.0, false);
+         if has_settings {
+            let lbl = if is_open {
+               format!("▾ Hide Settings ({})", plugin.settings.len())
+            } else {
+               format!("▸ Settings ({})", plugin.settings.len())
+            };
+            actions = b.push_button(
+               actions,
+               &format!("sunbird-expand-{}", plugin.name),
+               &lbl,
+               if is_open {
+                  BtnVariant::Primary
+               } else {
+                  BtnVariant::Secondary
+               },
+               BtnSize::Small,
+               Action::ToggleExpandPlugin(plugin.name.clone()),
+            );
+         }
+         if plugin.enabled && plugin.installed {
+            actions = b.push_button(
+               actions,
+               &format!("sunbird-reload-{}", plugin.name),
+               "Reload",
+               BtnVariant::Secondary,
+               BtnSize::Small,
+               Action::ReloadPlugin(plugin.name.clone()),
+            );
+         }
+         if !plugin.enabled && plugin.installed {
+            actions = b.push_button(
+               actions,
+               &format!("sunbird-remove-{}", plugin.name),
+               "Remove",
+               BtnVariant::Critical,
+               BtnSize::Small,
+               Action::UninstallPlugin(plugin.name.clone()),
+            );
+         }
+         card = b.push_div(card, actions);
+      }
+
+      // Collapsible per-plugin settings dropdown drawer
+      if has_settings && is_open {
+         card = b.push_div(card, b.divider());
+         let mut drawer = b.card(10.0, 12.0, 6.0, 0.14);
+         for setting in &plugin.settings {
+            let sid = format!("sunbird-set-{}-{}", plugin.name, setting.key);
+            let sdesc = setting.description.as_deref().unwrap_or("");
+            match &setting.control {
+               Control::Switch(val) => {
+                  drawer = b.push_div(
+                     drawer,
+                     b.switch_row(
+                        &sid,
+                        &setting.title,
+                        setting.description.as_deref(),
+                        *val,
+                        Action::ToggleSetting {
+                           plugin: plugin.name.clone(),
+                           key:    setting.key.clone(),
+                        },
+                     ),
+                  );
+               },
+               Control::Select { options, chosen } => {
+                  let cur_label = options
+                     .iter()
+                     .find(|o| o.value == *chosen)
+                     .map_or(chosen.as_str(), |o| o.label.as_str());
+                  let dropdown_open = open_select
+                     .is_some_and(|(p, k)| p == &plugin.name && k == &setting.key);
+                  let trigger_lbl = if dropdown_open {
+                     format!("{cur_label} ▴")
+                  } else {
+                     format!("{cur_label} ▾")
+                  };
+                  drawer = b.push_div(
+                     drawer,
+                     b.action_row(
+                        &sid,
+                        &setting.title,
+                        sdesc,
+                        &trigger_lbl,
+                        if dropdown_open {
+                           BtnVariant::Primary
+                        } else {
+                           BtnVariant::Secondary
+                        },
+                        BtnSize::Small,
+                        Action::ToggleSelectDropdown {
+                           plugin: plugin.name.clone(),
+                           key:    setting.key.clone(),
+                        },
+                     ),
+                  );
+                  if dropdown_open && !options.is_empty() {
+                     let mut menu = b.card(6.0, 8.0, 6.0, 0.24);
+                     for opt in options {
+                        let selected = opt.value == *chosen;
+                        let opt_lbl = if selected {
+                           format!("✓  {}", opt.label)
+                        } else {
+                           opt.label.clone()
+                        };
+                        menu = b.push_button(
+                           menu,
+                           &format!("{sid}-opt-{}", opt.value),
+                           &opt_lbl,
+                           if selected {
+                              BtnVariant::Primary
+                           } else {
+                              BtnVariant::Secondary
+                           },
+                           BtnSize::Small,
+                           Action::PickSelectOption {
+                              plugin: plugin.name.clone(),
+                              key:    setting.key.clone(),
+                              value:  opt.value.clone(),
+                           },
+                        );
+                     }
+                     drawer = b.push_div(drawer, menu);
+                  }
+               },
+               Control::Button => {
+                  drawer = b.push_div(
+                     drawer,
+                     b.action_row(
+                        &sid,
+                        &setting.title,
+                        sdesc,
+                        &setting.title,
+                        BtnVariant::Secondary,
+                        BtnSize::Small,
+                        Action::PressButton {
+                           plugin: plugin.name.clone(),
+                           key:    setting.key.clone(),
+                        },
+                     ),
+                  );
+               },
+               Control::Text(val) => {
+                  let sub = if sdesc.is_empty() {
+                     format!("Value: {val}")
+                  } else {
+                     format!("{sdesc} · Value: {val}")
+                  };
+                  drawer = b.push_div(drawer, b.text_block(&setting.title, &sub));
+               },
+               Control::Secret(val) => {
+                  let state = if val.is_empty() { "not set" } else { "configured" };
+                  let sub = if sdesc.is_empty() {
+                     format!("Secret ({state})")
+                  } else {
+                     format!("{sdesc} ({state})")
+                  };
+                  drawer = b.push_div(drawer, b.text_block(&setting.title, &sub));
+               },
+               Control::Number(val) => {
+                  let sub = if sdesc.is_empty() {
+                     format!("Value: {val}")
+                  } else {
+                     format!("{sdesc} · Value: {val}")
+                  };
+                  drawer = b.push_div(drawer, b.text_block(&setting.title, &sub));
+               },
+            }
+         }
+         card = b.push_div(card, drawer);
+      }
+
+      list = b.push_div(list, card);
+   }
+
+   b.push_div(root, list)
+}
+
+fn render_catalog_group(
+   b: &Builder,
+   mut root: RawDiv,
+   group_id: u8,
+   title: &str,
+   subtitle: &str,
+   items: &[&Listed],
+   installed: &HashSet<String>,
+   open: bool,
+) -> RawDiv {
+   if items.is_empty() {
+      return root;
+   }
+   let btn_lbl = if open {
+      format!("▾ Hide ({})", items.len())
+   } else {
+      format!("▸ Show ({})", items.len())
+   };
+   let mut section = b.card(10.0, 14.0, 8.0, 0.18);
+   section = b.push_div(
+      section,
+      b.action_row(
+         &format!("sunbird-cat-group-{group_id}"),
+         title,
+         subtitle,
+         &btn_lbl,
+         BtnVariant::Secondary,
+         BtnSize::Small,
+         Action::ToggleCatalogGroup(group_id),
+      ),
+   );
+   if open {
+      section = b.push_div(section, b.divider());
+      let mut list = b.v_stack(8.0);
+      for item in items {
+         let is_installed = installed.contains(&item.name);
+         let sub = match &item.warning {
+            Some(w) if !w.is_empty() => format!("{} · Note: {w}", item.description),
+            _ => item.description.clone(),
+         };
+         let mut row_card = b.card(6.0, 12.0, 6.0, 0.14);
+         row_card = b.push_div(
+            row_card,
+            b.action_row(
+               &format!("sunbird-cat-{}", item.name),
+               &item.name,
+               &sub,
+               if is_installed { "Reinstall" } else { "Install" },
+               if is_installed {
+                  BtnVariant::Secondary
+               } else {
+                  BtnVariant::Primary
+               },
+               BtnSize::Small,
+               Action::InstallCatalog(item.name.clone()),
+            ),
+         );
+         list = b.push_div(list, row_card);
+      }
+      section = b.push_div(section, list);
+   }
+   root = b.push_div(root, section);
+   root
+}
+
+fn render_catalog_tab(
+   b: &Builder,
+   mut root: RawDiv,
+   installed: &HashSet<String>,
+   desktop_open: bool,
+   partial_open: bool,
+   mobile_open: bool,
+) -> RawDiv {
    root = b.push_div(
       root,
+      b.action_row(
+         "sunbird-catalog-refresh",
+         "Official Plugin Catalog",
+         "Install plugins directly from assets.sunbird.tools.",
+         "Refresh",
+         BtnVariant::Secondary,
+         BtnSize::Small,
+         Action::RefreshCatalog,
+      ),
+   );
+
+   let catalog = update::catalog();
+   match catalog {
+      Catalog::Unfetched => {
+         update::fetch_catalog();
+         let mut box_div = b.card(8.0, 14.0, 8.0, 0.18);
+         box_div = b.push_div(
+            box_div,
+            b.text_block(
+               "Fetching catalog...",
+               "Loading official plugins from assets.sunbird.tools.",
+            ),
+         );
+         root = b.push_div(root, box_div);
+      },
+      Catalog::Loading => {
+         let mut box_div = b.card(8.0, 14.0, 8.0, 0.18);
+         box_div = b.push_div(
+            box_div,
+            b.text_block(
+               "Fetching catalog...",
+               "Loading official plugins from assets.sunbird.tools.",
+            ),
+         );
+         root = b.push_div(root, box_div);
+      },
+      Catalog::Failed(err) => {
+         let mut box_div = b.card(8.0, 14.0, 8.0, 0.22);
+         box_div = b.push_div(
+            box_div,
+            b.action_row(
+               "sunbird-catalog-retry",
+               "Could not reach catalog",
+               &err,
+               "Retry",
+               BtnVariant::Primary,
+               BtnSize::Small,
+               Action::RefreshCatalog,
+            ),
+         );
+         root = b.push_div(root, box_div);
+      },
+      Catalog::Loaded(items) => {
+         let desktop: Vec<&Listed> = items
+            .iter()
+            .filter(|i| DESKTOP_FULL.contains(&i.name.as_str()))
+            .collect();
+         let partial: Vec<&Listed> = items
+            .iter()
+            .filter(|i| DESKTOP_PARTIAL.contains(&i.name.as_str()))
+            .collect();
+         let mobile: Vec<&Listed> = items
+            .iter()
+            .filter(|i| {
+               !DESKTOP_FULL.contains(&i.name.as_str())
+                  && !DESKTOP_PARTIAL.contains(&i.name.as_str())
+            })
+            .collect();
+
+         root = render_catalog_group(
+            b,
+            root,
+            0,
+            "Desktop Ready",
+            "Fully supported on Desktop Phoenix.",
+            &desktop,
+            installed,
+            desktop_open,
+         );
+         root = render_catalog_group(
+            b,
+            root,
+            1,
+            "Partial Desktop Support",
+            "Core hooks work on desktop; some mobile UI badges/accessories are pending.",
+            &partial,
+            installed,
+            partial_open,
+         );
+         root = render_catalog_group(
+            b,
+            root,
+            2,
+            "Mobile UI Plugins",
+            "Primarily target Android Phoenix's UI tree.",
+            &mobile,
+            installed,
+            mobile_open,
+         );
+      },
+   }
+   root
+}
+
+fn render_general_tab(b: &Builder, mut root: RawDiv) -> RawDiv {
+   // Card 1: Discord & Developer controls
+   let mut dev_card = b.card(12.0, 16.0, 8.0, 0.20);
+   dev_card = b.push_div(
+      dev_card,
       b.switch_row(
          "sunbird-staff-unlock",
          "Staff Unlock",
-         Some("Unlock Discord staff-only settings, experiments, and internal menus."),
+         Some("Unlock Discord staff-only settings, experiments, and internal developer menus."),
          crate::staff_enabled(),
          Action::ToggleStaff,
       ),
    );
-   root = b.push_div(
-      root,
-      b.action_row(
-         "sunbird-reload-all",
-         "Reload All Plugins",
-         "Re-evaluate every enabled plugin without restarting Discord.",
-         "Reload All",
-         Action::ReloadAll,
-      ),
-   );
-   root = b.push_div(
-      root,
+   dev_card = b.push_div(dev_card, b.divider());
+   dev_card = b.push_div(
+      dev_card,
       b.action_row(
          "sunbird-open-devtools",
          "Runtime Console & DevTools",
          "Evaluate JavaScript in QuickJS and view live runtime logs (Ctrl+Shift+I).",
          "Open DevTools",
+         BtnVariant::Secondary,
+         BtnSize::Medium,
          Action::OpenDevTools,
       ),
    );
+   dev_card = b.push_div(dev_card, b.divider());
+   dev_card = b.push_div(
+      dev_card,
+      b.action_row(
+         "sunbird-reload-all",
+         "Reload All Plugins",
+         "Re-evaluate every currently enabled plugin without restarting Discord.",
+         "Reload All",
+         BtnVariant::Secondary,
+         BtnSize::Medium,
+         Action::ReloadAll,
+      ),
+   );
+   root = b.push_div(root, dev_card);
 
-   // 3. Updates row
+   // Card 2: Updates
    let upd_status = update::status();
    let upd_found = update::found();
-   let (upd_desc, upd_btn, upd_act) = if update::busy() {
+   let (upd_desc, upd_btn, upd_var, upd_act) = if update::busy() {
       (
          upd_status.unwrap_or_else(|| "Checking for updates...".to_owned()),
          "Working...",
+         BtnVariant::Secondary,
          Action::CheckUpdates,
       )
    } else if let Some(found) = upd_found
       && !found.plugins.is_empty()
    {
       (
-         format!("Plugin updates available: {}", found.plugins.join(", ")),
+         format!("Plugin updates ready: {}", found.plugins.join(", ")),
          "Apply Updates",
+         BtnVariant::Primary,
          Action::ApplyUpdates,
       )
    } else {
       (
          upd_status.unwrap_or_else(|| format!("Sunbird {} is up to date.", update::VERSION)),
-         "Check Updates",
+         "Check for Updates",
+         BtnVariant::Secondary,
          Action::CheckUpdates,
       )
    };
-   root = b.push_div(
-      root,
-      b.action_row("sunbird-updates", "Updates", &upd_desc, upd_btn, upd_act),
-   );
 
-   // 4. Installed Plugins
-   root = b.push_div(
-      root,
-      b.text_block(
-         "Installed Plugins",
-         "Toggle plugins on or off and configure plugin settings.",
+   let mut upd_card = b.card(10.0, 16.0, 8.0, 0.20);
+   upd_card = b.push_div(
+      upd_card,
+      b.action_row(
+         "sunbird-updates",
+         "Sunbird Updates",
+         &upd_desc,
+         upd_btn,
+         upd_var,
+         BtnSize::Medium,
+         upd_act,
       ),
    );
-   if plugins.is_empty() {
-      root = b.push_div(
-         root,
-         b.text_block(
-            "No plugins installed",
-            "Install a plugin from the Plugin Catalog below or drop a .js bundle into the plugins folder.",
-         ),
-      );
-   } else {
-      for plugin in &plugins {
-         let title = match &plugin.header.version {
-            Some(ver) => format!("{}  (v{ver})", plugin.name),
-            None => plugin.name.clone(),
-         };
-         let mut desc_parts = Vec::new();
-         if let Some(d) = &plugin.header.description {
-            desc_parts.push(d.clone());
-         }
-         if let Some(a) = &plugin.header.author {
-            desc_parts.push(format!("by {a}"));
-         }
-         if let Some(err) = &plugin.error {
-            desc_parts.push(format!("Error: {err}"));
-         }
-         let desc = desc_parts.join(" · ");
-         root = b.push_div(
-            root,
-            b.switch_row(
-               &format!("sunbird-plugin-{}", plugin.name),
-               &title,
-               (!desc.is_empty()).then_some(desc.as_str()),
-               plugin.enabled,
-               Action::TogglePlugin(plugin.name.clone()),
-            ),
-         );
-
-         if plugin.enabled {
-            for setting in &plugin.settings {
-               let sid = format!("sunbird-set-{}-{}", plugin.name, setting.key);
-               let label = format!("    {}", setting.title);
-               let sdesc = setting.description.as_deref().unwrap_or("");
-               match &setting.control {
-                  Control::Switch(val) => {
-                     root = b.push_div(
-                        root,
-                        b.switch_row(
-                           &sid,
-                           &label,
-                           setting.description.as_deref(),
-                           *val,
-                           Action::ToggleSetting {
-                              plugin: plugin.name.clone(),
-                              key:    setting.key.clone(),
-                           },
-                        ),
-                     );
-                  },
-                  Control::Select { options, chosen } => {
-                     let cur_idx = options
-                        .iter()
-                        .position(|o| o.value == *chosen)
-                        .unwrap_or(0);
-                     let cur_label = options
-                        .get(cur_idx)
-                        .map_or(chosen.as_str(), |o| o.label.as_str());
-                     let next_val = if options.is_empty() {
-                        chosen.clone()
-                     } else {
-                        options[(cur_idx + 1) % options.len()].value.clone()
-                     };
-                     root = b.push_div(
-                        root,
-                        b.action_row(
-                           &sid,
-                           &label,
-                           sdesc,
-                           cur_label,
-                           Action::CycleSelect {
-                              plugin: plugin.name.clone(),
-                              key:    setting.key.clone(),
-                              next:   next_val,
-                           },
-                        ),
-                     );
-                  },
-                  Control::Button => {
-                     root = b.push_div(
-                        root,
-                        b.action_row(
-                           &sid,
-                           &label,
-                           sdesc,
-                           &setting.title,
-                           Action::PressButton {
-                              plugin: plugin.name.clone(),
-                              key:    setting.key.clone(),
-                           },
-                        ),
-                     );
-                  },
-                  Control::Text(val) => {
-                     let sub = if sdesc.is_empty() {
-                        format!("Current value: {val}")
-                     } else {
-                        format!("{sdesc} (Current: {val})")
-                     };
-                     root = b.push_div(root, b.text_block(&label, &sub));
-                  },
-                  Control::Secret(val) => {
-                     let state = if val.is_empty() { "not set" } else { "configured" };
-                     let sub = if sdesc.is_empty() {
-                        format!("Secret ({state})")
-                     } else {
-                        format!("{sdesc} ({state})")
-                     };
-                     root = b.push_div(root, b.text_block(&label, &sub));
-                  },
-                  Control::Number(val) => {
-                     let sub = if sdesc.is_empty() {
-                        format!("Value: {val}")
-                     } else {
-                        format!("{sdesc} (Value: {val})")
-                     };
-                     root = b.push_div(root, b.text_block(&label, &sub));
-                  },
-               }
-            }
-            if plugin.installed {
-               root = b.push_div(
-                  root,
-                  b.action_row(
-                     &format!("sunbird-reload-{}", plugin.name),
-                     &format!("    Reload {}", plugin.name),
-                     "Reload this plugin's bundle live.",
-                     "Reload",
-                     Action::ReloadPlugin(plugin.name.clone()),
-                  ),
-               );
-            }
-         } else if plugin.installed {
-            root = b.push_div(
-               root,
-               b.action_row(
-                  &format!("sunbird-remove-{}", plugin.name),
-                  &format!("    Remove {}", plugin.name),
-                  "Delete this installed plugin from disk.",
-                  "Remove",
-                  Action::UninstallPlugin(plugin.name.clone()),
-               ),
-            );
-         }
-      }
-   }
-
-   // 5. Plugin Catalog
-   root = b.push_div(
-      root,
-      b.text_block(
-         "Plugin Catalog",
-         "Official plugins from assets.sunbird.tools.",
-      ),
-   );
-   let catalog = update::catalog();
-   match catalog {
-      Catalog::Unfetched => {
-         update::fetch_catalog();
-         root = b.push_div(
-            root,
-            b.action_row(
-               "sunbird-catalog-loading",
-               "Loading catalog...",
-               "Fetching official plugins from assets.sunbird.tools.",
-               "Refresh",
-               Action::RefreshCatalog,
-            ),
-         );
-      },
-      Catalog::Loading => {
-         root = b.push_div(
-            root,
-            b.action_row(
-               "sunbird-catalog-loading",
-               "Loading catalog...",
-               "Fetching official plugins from assets.sunbird.tools.",
-               "Refresh",
-               Action::RefreshCatalog,
-            ),
-         );
-      },
-      Catalog::Failed(err) => {
-         root = b.push_div(
-            root,
-            b.action_row(
-               "sunbird-catalog-retry",
-               "Catalog unavailable",
-               &err,
-               "Retry",
-               Action::RefreshCatalog,
-            ),
-         );
-      },
-      Catalog::Loaded(items) => {
-         for item in items {
-            let is_installed = installed_names.contains(&item.name);
-            let sub = match &item.warning {
-               Some(w) if !w.is_empty() => format!("{} · Note: {w}", item.description),
-               _ => item.description.clone(),
-            };
-            root = b.push_div(
-               root,
-               b.action_row(
-                  &format!("sunbird-cat-{}", item.name),
-                  &item.name,
-                  &sub,
-                  if is_installed { "Reinstall" } else { "Install" },
-                  Action::InstallCatalog(item.name.clone()),
-               ),
-            );
-         }
-      },
-   }
-
-   b.into_any(root, sret);
-   true
+   b.push_div(root, upd_card)
 }
