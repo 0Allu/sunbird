@@ -80,8 +80,7 @@ pub struct Update {
 }
 
 /// A plugin the site offers, as `plugins/index.json` lists it.
-#[cfg(target_os = "android")]
-#[derive(Clone, serde::Deserialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub struct Listed {
    pub name:        String,
    pub description: String,
@@ -90,7 +89,6 @@ pub struct Listed {
 }
 
 /// The site's plugin list, fetched when the install page first opens.
-#[cfg(target_os = "android")]
 #[derive(Clone)]
 pub enum Catalog {
    Unfetched,
@@ -99,7 +97,7 @@ pub enum Catalog {
    Failed(String),
 }
 
-#[cfg(target_os = "android")] static CATALOG: Mutex<Catalog> = Mutex::new(Catalog::Unfetched);
+static CATALOG: Mutex<Catalog> = Mutex::new(Catalog::Unfetched);
 static FOUND: Mutex<Option<Update>> = Mutex::new(None);
 static STATUS: Mutex<Option<String>> = Mutex::new(None);
 static BUSY: AtomicBool = AtomicBool::new(false);
@@ -127,7 +125,6 @@ fn set_status(message: Option<String>) {
    crate::refresh_settings();
 }
 
-#[cfg(target_os = "android")]
 pub fn catalog() -> Catalog {
    CATALOG
       .lock()
@@ -137,7 +134,6 @@ pub fn catalog() -> Catalog {
 
 /// Fetches the site's plugin list in the background, unless it is loaded or
 /// on its way. A failed fetch is retried on the next call.
-#[cfg(target_os = "android")]
 pub fn fetch_catalog() {
    {
       let mut catalog = CATALOG.lock().unwrap_or_else(PoisonError::into_inner);
@@ -165,7 +161,6 @@ pub fn fetch_catalog() {
 
 /// Installs a plugin the site lists. Site plugins can call API an older
 /// loader lacks, so they wait until the loader is current, like updates do.
-#[cfg(target_os = "android")]
 pub fn install_listed(name: &str) -> Result<String, crate::Error> {
    if let Some(version) = found().and_then(|update| update.loader) {
       return Err(crate::Error::LoaderOutdated { version });

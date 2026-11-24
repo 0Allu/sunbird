@@ -36,10 +36,23 @@ use phoenix_ui_mobile::{
    Prop,
    inspect::WireJson,
 };
-use serde::Serialize;
+use serde::{
+   Deserialize,
+   Serialize,
+};
 #[cfg(target_os = "android")] use serde_json::value::RawValue;
 
-use crate::PluginInfo;
+use crate::{
+   Chosen,
+   Control,
+   PluginInfo,
+   Setting,
+   update::{
+      self,
+      Catalog,
+      Listed,
+   },
+};
 
 pub const ADDR: &str = "127.0.0.1:4242";
 const MAX_BODY: usize = 4 << 20;
@@ -273,6 +286,12 @@ fn dispatch(
    body: &[u8],
 ) -> (&'static str, &'static str, Vec<u8>) {
    match (method, path) {
+      #[cfg(not(target_os = "android"))]
+      ("GET", "/ui") => (
+         "200 OK",
+         "text/html; charset=utf-8",
+         phoenix_ui_desktop::DASHBOARD_HTML.as_bytes().to_vec(),
+      ),
       ("GET", "/" | "/status") => {
          let plugins = crate::plugins();
          ok_json(&Status {
@@ -286,6 +305,8 @@ fn dispatch(
          let plugins = crate::plugins();
          ok_json(&plugins.iter().map(PluginJson::from).collect::<Vec<_>>())
       },
+      ("GET", "/catalog") => catalog_state(),
+      ("POST", "/catalog/install") => catalog_install(body),
       ("GET", "/logs") => {
          let mut lines = crate::console::lines();
          lines.reverse();
@@ -390,6 +411,74 @@ struct PluginJson<'a> {
    version:     Option<&'a str>,
    author:      Option<&'a str>,
    description: Option<&'a str>,
+   settings:    Vec<SettingJson<'a>>,
+}
+
+#[derive(Serialize)]
+struct ChoiceJson<'a> {
+   value: &'a str,
+   label: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum ControlJson<'a> {
+   Switch {
+      value: bool,
+   },
+   Text {
+      value: &'a str,
+   },
+   Secret {
+      has_value: bool,
+   },
+   Select {
+      value:   &'a str,
+      options: Vec<ChoiceJson<'a>>,
+   },
+   Number {
+      value: f64,
+   },
+   Button,
+}
+
+#[derive(Serialize)]
+struct SettingJson<'a> {
+   key:         &'a str,
+   title:       &'a str,
+   description: Option<&'a str>,
+   #[serde(flatten)]
+   control:     ControlJson<'a>,
+}
+
+impl<'a> From<&'a Setting> for SettingJson<'a> {
+   fn from(setting: &'a Setting) -> Self {
+      let control = match &setting.control {
+         Control::Switch(value) => ControlJson::Switch { value: *value },
+         Control::Text(value) => ControlJson::Text { value },
+         Control::Secret(value) => ControlJson::Secret {
+            has_value: !value.is_empty(),
+         },
+         Control::Select { options, chosen } => ControlJson::Select {
+            value:   chosen,
+            options: options
+               .iter()
+               .map(|choice| ChoiceJson {
+                  value: &choice.value,
+                  label: &choice.label,
+               })
+               .collect(),
+         },
+         Control::Number(value) => ControlJson::Number { value: *value },
+         Control::Button => ControlJson::Button,
+      };
+      Self {
+         key: &setting.key,
+         title: &setting.title,
+         description: setting.description.as_deref(),
+         control,
+      }
+   }
 }
 
 impl<'a> From<&'a PluginInfo> for PluginJson<'a> {
@@ -402,6 +491,7 @@ impl<'a> From<&'a PluginInfo> for PluginJson<'a> {
          version:     plugin.header.version.as_deref(),
          author:      plugin.header.author.as_deref(),
          description: plugin.header.description.as_deref(),
+         settings:    plugin.settings.iter().map(SettingJson::from).collect(),
       }
    }
 }
@@ -419,6 +509,8 @@ enum Done<'a> {
    Reloaded(&'a str),
    Enabled(&'a str),
    Disabled(&'a str),
+   Saved(&'a str),
+   Pressed(&'a str),
 }
 
 /// The newest entries of `log`, filtered by the `match` and `limit` query
@@ -547,7 +639,77 @@ fn plugin_route(method: &str, rest: &str, body: &[u8]) -> (&'static str, &'stati
          crate::refresh_settings();
          ok_json(&Done::Disabled(name))
       },
+      ("POST", Some("setting")) => {
+         #[derive(Deserialize)]
+         struct SetRequest {
+            key:   String,
+            value: Chosen,
+         }
+         let Ok(req) = serde_json::from_slice::<SetRequest>(body) else {
+            return err("400 Bad Request", "expected JSON {key, value}");
+         };
+         crate::set_setting(name, &req.key, req.value);
+         crate::refresh_settings();
+         ok_json(&Done::Saved(&req.key))
+      },
+      ("POST", Some("press")) => {
+         #[derive(Deserialize)]
+         struct PressRequest {
+            key: String,
+         }
+         let Ok(req) = serde_json::from_slice::<PressRequest>(body) else {
+            return err("400 Bad Request", "expected JSON {key}");
+         };
+         crate::press(name, &req.key);
+         ok_json(&Done::Pressed(&req.key))
+      },
       _ => err("404 Not Found", "unknown plugin route"),
+   }
+}
+
+fn catalog_state() -> (&'static str, &'static str, Vec<u8>) {
+   #[derive(Serialize)]
+   #[serde(tag = "state", rename_all = "lowercase")]
+   enum CatalogJson {
+      Unfetched,
+      Loading,
+      Loaded { plugins: Vec<Listed> },
+      Failed { error: String },
+   }
+
+   let current = update::catalog();
+   if matches!(current, Catalog::Unfetched) {
+      update::fetch_catalog();
+   }
+   match current {
+      Catalog::Unfetched => ok_json(&CatalogJson::Unfetched),
+      Catalog::Loading => ok_json(&CatalogJson::Loading),
+      Catalog::Loaded(plugins) => ok_json(&CatalogJson::Loaded { plugins }),
+      Catalog::Failed(error) => ok_json(&CatalogJson::Failed { error }),
+   }
+}
+
+fn catalog_install(body: &[u8]) -> (&'static str, &'static str, Vec<u8>) {
+   #[derive(Deserialize)]
+   struct InstallRequest {
+      name: Option<String>,
+      url:  Option<String>,
+   }
+
+   let Ok(req) = serde_json::from_slice::<InstallRequest>(body) else {
+      return err("400 Bad Request", "expected JSON {name} or {url}");
+   };
+   let outcome = match (req.name, req.url) {
+      (Some(name), _) => update::install_listed(&name),
+      (None, Some(url)) => crate::install(&url),
+      (None, None) => return err("400 Bad Request", "provide either name or url"),
+   };
+   match outcome {
+      Ok(installed) => {
+         crate::refresh_settings();
+         ok_json(&Done::Installed(&installed))
+      },
+      Err(message) => err("400 Bad Request", &message.to_string()),
    }
 }
 

@@ -3,9 +3,14 @@
 //! Desktop Phoenix renders natively in Rust with GPUI rather than Android's
 //! serialized UI-op bridge (`phoenix-ui-mobile`). This crate owns the
 //! desktop-side UI interactions: clipboard, opening URLs in the system browser,
-//! notifications/toasts, and future GPUI surface hooks.
+//! system tray + notifications/toasts, and the self-contained Desktop Settings
+//! dashboard served over localhost.
 
 #[cfg(windows)] mod windows;
+
+/// Self-contained HTML/JS/CSS companion dashboard for Desktop settings,
+/// plugin management, catalog installs, OTA updates, and JS console.
+pub const DASHBOARD_HTML: &str = include_str!("dashboard.html");
 
 #[derive(Debug, flub::Error)]
 pub enum Error {
@@ -13,6 +18,18 @@ pub enum Error {
    Platform { message: String },
    #[error("desktop ui: unsupported on this target")]
    Unsupported,
+}
+
+/// Starts the desktop system tray icon pointing at `dashboard_url`.
+///
+/// Clicking the tray icon opens the Sunbird settings dashboard in the system
+/// browser, and subsequent [`toast`] / [`notify`] calls show native balloon
+/// notifications through the tray icon.
+pub fn start_tray(dashboard_url: &str) {
+   #[cfg(windows)]
+   windows::start_tray(dashboard_url);
+   #[cfg(not(windows))]
+   let _ = dashboard_url;
 }
 
 /// Copies `text` to the system clipboard.
@@ -50,13 +67,23 @@ pub fn open_url(url: &str) -> Result<(), Error> {
 /// Shows a short desktop toast / notification message.
 pub fn toast(message: &str) {
    log::info!("[toast] {message}");
+   #[cfg(windows)]
+   windows::balloon("Sunbird", message);
 }
 
 /// Shows a titled desktop notification.
 pub fn notify(title: &str, body: Option<&str>) {
    match body {
-      Some(body) if !body.is_empty() => log::info!("[notify] {title}: {body}"),
-      _ => log::info!("[notify] {title}"),
+      Some(body) if !body.is_empty() => {
+         log::info!("[notify] {title}: {body}");
+         #[cfg(windows)]
+         windows::balloon(title, body);
+      },
+      _ => {
+         log::info!("[notify] {title}");
+         #[cfg(windows)]
+         windows::balloon("Sunbird", title);
+      },
    }
 }
 
@@ -68,5 +95,12 @@ mod tests {
    fn rejects_unsafe_url_schemes() {
       assert!(open_url("file:///C:/Windows/notepad.exe").is_err());
       assert!(open_url("javascript:alert(1)").is_err());
+   }
+
+   #[test]
+   fn dashboard_html_is_embedded() {
+      assert!(DASHBOARD_HTML.contains("<title>Sunbird"));
+      assert!(DASHBOARD_HTML.contains("/plugins"));
+      assert!(DASHBOARD_HTML.contains("/catalog"));
    }
 }

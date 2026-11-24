@@ -1,0 +1,518 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sunbird — Desktop Settings</title>
+<style>
+  :root {
+    --bg: #111214;
+    --surface: #1e1f22;
+    --card: #2b2d31;
+    --border: #383a40;
+    --text: #f2f3f5;
+    --muted: #949ba4;
+    --accent: #f59e0b;
+    --accent-hover: #d97706;
+    --green: #23a55a;
+    --red: #da373c;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 var(--sans);
+    display: flex;
+    min-height: 100vh;
+  }
+  nav {
+    width: 220px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    padding: 20px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .brand {
+    font-weight: 700;
+    font-size: 16px;
+    padding: 4px 10px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .pill {
+    font: 11px/1 var(--mono);
+    background: var(--card);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    padding: 4px 7px;
+    border-radius: 999px;
+  }
+  nav button {
+    all: unset;
+    cursor: pointer;
+    padding: 9px 12px;
+    border-radius: 6px;
+    color: var(--muted);
+    font-weight: 500;
+  }
+  nav button:hover { background: rgba(255,255,255,0.05); color: var(--text); }
+  nav button.active { background: var(--card); color: var(--text); }
+  main {
+    flex: 1;
+    max-width: 920px;
+    padding: 28px 32px;
+    overflow-y: auto;
+  }
+  h1 { margin: 0 0 6px; font-size: 22px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .toolbar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 12px;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .title { font-weight: 600; font-size: 15px; }
+  .meta { color: var(--muted); font-size: 12px; }
+  .err {
+    margin-top: 10px;
+    padding: 8px 10px;
+    background: rgba(218,55,60,0.14);
+    border: 1px solid rgba(218,55,60,0.45);
+    border-radius: 6px;
+    color: #fca5a5;
+    font: 12px/1.4 var(--mono);
+    white-space: pre-wrap;
+  }
+  .warn {
+    margin-top: 8px;
+    padding: 6px 10px;
+    background: rgba(245,158,11,0.12);
+    border: 1px solid rgba(245,158,11,0.35);
+    border-radius: 6px;
+    color: #fcd34d;
+    font-size: 12px;
+  }
+  .btn {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font: 500 13px var(--sans);
+  }
+  .btn:hover { filter: brightness(1.12); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #111; font-weight: 600; }
+  .btn.danger { background: rgba(218,55,60,0.16); border-color: rgba(218,55,60,0.5); color: #fca5a5; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  input[type="text"], input[type="password"], input[type="number"], select, textarea {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 7px 10px;
+    border-radius: 6px;
+    font: 13px var(--sans);
+  }
+  input[type="text"], input[type="password"], textarea { width: 100%; }
+  .settings {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .setting {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .setting-info { flex: 1; min-width: 0; }
+  .setting-ctrl { flex-shrink: 0; min-width: 180px; display: flex; justify-content: flex-end; gap: 6px; }
+  .switch {
+    position: relative;
+    width: 40px;
+    height: 22px;
+    display: inline-block;
+  }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute; inset: 0; cursor: pointer;
+    background: #4e5058; border-radius: 999px; transition: .15s;
+  }
+  .slider::before {
+    content: ""; position: absolute; left: 3px; top: 3px;
+    width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: .15s;
+  }
+  .switch input:checked + .slider { background: var(--green); }
+  .switch input:checked + .slider::before { transform: translateX(18px); }
+  pre.log {
+    background: #0d0e10;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    font: 12px/1.5 var(--mono);
+    max-height: 420px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .toast {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    background: var(--card);
+    border: 1px solid var(--accent);
+    padding: 10px 14px;
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+    display: none;
+  }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<nav>
+  <div class="brand">
+    <span>Sunbird</span>
+    <span id="version-pill" class="pill">…</span>
+  </div>
+  <button class="active" data-tab="plugins">Plugins</button>
+  <button data-tab="catalog">Plugin Catalog</button>
+  <button data-tab="updates">Updates</button>
+  <button data-tab="console">Console</button>
+</nav>
+<main>
+  <section id="tab-plugins">
+    <h1>Installed Plugins</h1>
+    <p class="sub">Toggle plugins, reload live, or configure plugin settings.</p>
+    <div id="plugins-list"></div>
+  </section>
+
+  <section id="tab-catalog" class="hidden">
+    <h1>Plugin Catalog</h1>
+    <p class="sub">Install official plugins from assets.sunbird.tools or any HTTPS bundle URL.</p>
+    <div class="card">
+      <div class="row">
+        <input id="custom-url" type="text" placeholder="https://example.com/my-plugin.js" />
+        <button class="btn primary" id="install-url-btn">Install URL</button>
+      </div>
+    </div>
+    <div id="catalog-list"></div>
+  </section>
+
+  <section id="tab-updates" class="hidden">
+    <h1>Updates</h1>
+    <p class="sub">Check for new Sunbird builds and over-the-air plugin updates.</p>
+    <div class="toolbar">
+      <button class="btn primary" id="check-update-btn">Check for updates</button>
+      <button class="btn" id="apply-update-btn">Apply plugin updates</button>
+    </div>
+    <div id="update-box" class="card"></div>
+  </section>
+
+  <section id="tab-console" class="hidden">
+    <h1>Runtime Console</h1>
+    <p class="sub">Evaluate JavaScript in the QuickJS plugin runtime and inspect logs.</p>
+    <div class="card">
+      <textarea id="eval-input" rows="3" placeholder="Object.keys(phoenix.gateway).length"></textarea>
+      <div class="toolbar" style="margin:10px 0 0">
+        <button class="btn primary" id="eval-run-btn">Run</button>
+        <button class="btn" id="logs-refresh-btn">Refresh logs</button>
+      </div>
+      <pre id="eval-out" class="log hidden" style="margin-top:10px"></pre>
+    </div>
+    <pre id="logs-out" class="log"></pre>
+  </section>
+</main>
+<div id="toast" class="toast"></div>
+<script>
+const $ = (s) => document.querySelector(s);
+let installedNames = new Set();
+
+function notify(msg) {
+  const el = $('#toast');
+  el.textContent = msg;
+  el.style.display = 'block';
+  clearTimeout(notify._t);
+  notify._t = setTimeout(() => { el.style.display = 'none'; }, 3000);
+}
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const text = await res.text();
+  if (!res.ok) throw new Error(text || res.statusText);
+  try { return JSON.parse(text); } catch { return text; }
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s == null ? '' : String(s);
+  return d.innerHTML;
+}
+
+document.querySelectorAll('nav button').forEach((btn) => {
+  btn.onclick = () => {
+    document.querySelectorAll('nav button').forEach((b) => b.classList.remove('active'));
+    document.querySelectorAll('main section').forEach((s) => s.classList.add('hidden'));
+    btn.classList.add('active');
+    const tab = btn.dataset.tab;
+    $('#tab-' + tab).classList.remove('hidden');
+    if (tab === 'plugins') loadPlugins();
+    if (tab === 'catalog') loadCatalog();
+    if (tab === 'updates') loadUpdates();
+    if (tab === 'console') loadLogs();
+  };
+});
+
+async function loadPlugins() {
+  const status = await api('/status');
+  $('#version-pill').textContent = status.version || 'dev';
+  installedNames = new Set(status.plugins.map((p) => p.name));
+  const root = $('#plugins-list');
+  if (!status.plugins.length) {
+    root.innerHTML = '<div class="card"><div class="meta">No plugins installed yet. Open Plugin Catalog to install some.</div></div>';
+    return;
+  }
+  root.innerHTML = '';
+  for (const p of status.plugins) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    const meta = [p.version && 'v' + p.version, p.author && 'by ' + p.author].filter(Boolean).join(' · ');
+    card.innerHTML = `
+      <div class="row">
+        <div>
+          <div class="title">${esc(p.name)}</div>
+          ${meta ? `<div class="meta">${esc(meta)}</div>` : ''}
+          ${p.description ? `<div class="meta" style="margin-top:2px;color:var(--text)">${esc(p.description)}</div>` : ''}
+        </div>
+        <div class="row">
+          <button class="btn" data-act="reload">Reload</button>
+          ${p.installed ? '<button class="btn danger" data-act="delete">Remove</button>' : ''}
+          <label class="switch">
+            <input type="checkbox" ${p.enabled ? 'checked' : ''} data-act="toggle" />
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+      ${p.error ? `<div class="err">${esc(p.error)}</div>` : ''}
+    `;
+    card.querySelector('[data-act="toggle"]').onchange = async (e) => {
+      await api(`/plugins/${encodeURIComponent(p.name)}/${e.target.checked ? 'enable' : 'disable'}`, { method: 'POST' });
+      notify(`${p.name} ${e.target.checked ? 'enabled' : 'disabled'}`);
+      loadPlugins();
+    };
+    card.querySelector('[data-act="reload"]').onclick = async () => {
+      await api(`/plugins/${encodeURIComponent(p.name)}/reload`, { method: 'POST' });
+      notify(`Reloaded ${p.name}`);
+      loadPlugins();
+    };
+    const del = card.querySelector('[data-act="delete"]');
+    if (del) {
+      del.onclick = async () => {
+        await api(`/plugins/${encodeURIComponent(p.name)}`, { method: 'DELETE' });
+        notify(`Removed ${p.name}`);
+        loadPlugins();
+      };
+    }
+    if (p.settings && p.settings.length) {
+      const box = document.createElement('div');
+      box.className = 'settings';
+      for (const s of p.settings) {
+        const row = document.createElement('div');
+        row.className = 'setting';
+        row.innerHTML = `
+          <div class="setting-info">
+            <div>${esc(s.title)}</div>
+            ${s.description ? `<div class="meta">${esc(s.description)}</div>` : ''}
+          </div>
+          <div class="setting-ctrl"></div>
+        `;
+        const ctrl = row.querySelector('.setting-ctrl');
+        const save = (value) => api(`/plugins/${encodeURIComponent(p.name)}/setting`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key: s.key, value })
+        }).then(() => notify(`Saved ${s.title}`));
+
+        if (s.type === 'switch') {
+          ctrl.innerHTML = `<label class="switch"><input type="checkbox" ${s.value ? 'checked' : ''} /><span class="slider"></span></label>`;
+          ctrl.querySelector('input').onchange = (e) => save(e.target.checked);
+        } else if (s.type === 'text' || s.type === 'secret') {
+          const inp = document.createElement('input');
+          inp.type = s.type === 'secret' ? 'password' : 'text';
+          inp.value = s.type === 'secret' ? '' : (s.value || '');
+          inp.placeholder = s.type === 'secret' ? (s.has_value ? '•••••••• (set)' : 'Enter secret') : '';
+          const btn = document.createElement('button');
+          btn.className = 'btn';
+          btn.textContent = 'Save';
+          btn.onclick = () => save(inp.value);
+          ctrl.append(inp, btn);
+        } else if (s.type === 'number') {
+          const inp = document.createElement('input');
+          inp.type = 'number';
+          inp.step = 'any';
+          inp.value = s.value;
+          inp.style.width = '110px';
+          const btn = document.createElement('button');
+          btn.className = 'btn';
+          btn.textContent = 'Save';
+          btn.onclick = () => save(Number(inp.value));
+          ctrl.append(inp, btn);
+        } else if (s.type === 'select') {
+          const sel = document.createElement('select');
+          for (const opt of s.options) {
+            const o = document.createElement('option');
+            o.value = opt.value;
+            o.textContent = opt.label;
+            if (opt.value === s.value) o.selected = true;
+            sel.append(o);
+          }
+          sel.onchange = () => save(sel.value);
+          ctrl.append(sel);
+        } else if (s.type === 'button') {
+          const btn = document.createElement('button');
+          btn.className = 'btn';
+          btn.textContent = s.title;
+          btn.onclick = () => api(`/plugins/${encodeURIComponent(p.name)}/press`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: s.key })
+          }).then(() => notify(`Triggered ${s.title}`));
+          ctrl.append(btn);
+        }
+        box.append(row);
+      }
+      card.append(box);
+    }
+    root.append(card);
+  }
+}
+
+async function loadCatalog() {
+  const root = $('#catalog-list');
+  const data = await api('/catalog');
+  if (data.state === 'loading' || data.state === 'unfetched') {
+    root.innerHTML = '<div class="card"><div class="meta">Fetching catalog from assets.sunbird.tools…</div></div>';
+    setTimeout(loadCatalog, 800);
+    return;
+  }
+  if (data.state === 'failed') {
+    root.innerHTML = `<div class="card"><div class="err">${esc(data.error)}</div></div>`;
+    return;
+  }
+  root.innerHTML = '';
+  for (const item of data.plugins) {
+    const installed = installedNames.has(item.name);
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+      <div class="row">
+        <div>
+          <div class="title">${esc(item.name)}</div>
+          <div class="meta" style="color:var(--text)">${esc(item.description)}</div>
+        </div>
+        <button class="btn ${installed ? '' : 'primary'}">${installed ? 'Reinstall' : 'Install'}</button>
+      </div>
+      ${item.warning ? `<div class="warn">${esc(item.warning)}</div>` : ''}
+    `;
+    card.querySelector('button').onclick = async (e) => {
+      e.target.disabled = true;
+      try {
+        await api('/catalog/install', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: item.name })
+        });
+        notify(`Installed ${item.name}`);
+        installedNames.add(item.name);
+        loadCatalog();
+      } catch (err) {
+        notify(`Install failed: ${err.message}`);
+        e.target.disabled = false;
+      }
+    };
+    root.append(card);
+  }
+}
+
+$('#install-url-btn').onclick = async () => {
+  const url = $('#custom-url').value.trim();
+  if (!url) return;
+  try {
+    const res = await api('/catalog/install', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
+    });
+    notify(`Installed ${res.installed || 'plugin'}`);
+    $('#custom-url').value = '';
+    loadPlugins();
+  } catch (err) {
+    notify(`Install failed: ${err.message}`);
+  }
+};
+
+async function loadUpdates() {
+  const st = await api('/update');
+  const lines = [`Current version: ${st.version}`];
+  if (st.busy) lines.push('Status: working…');
+  if (st.status) lines.push(`Detail: ${st.status}`);
+  if (st.found) {
+    if (st.found.loader) lines.push(`New loader available: ${st.found.loader}`);
+    if (st.found.plugins.length) lines.push(`Plugin updates: ${st.found.plugins.join(', ')}`);
+  } else {
+    lines.push('Up to date.');
+  }
+  $('#update-box').innerHTML = lines.map((l) => `<div>${esc(l)}</div>`).join('');
+  $('#apply-update-btn').disabled = !st.found || !st.found.plugins.length || st.busy;
+}
+
+$('#check-update-btn').onclick = async () => {
+  await api('/update/check', { method: 'POST' });
+  notify('Checking for updates…');
+  setTimeout(loadUpdates, 1200);
+};
+$('#apply-update-btn').onclick = async () => {
+  await api('/update/apply', { method: 'POST' });
+  notify('Applying plugin updates…');
+  setTimeout(loadUpdates, 1500);
+};
+
+async function loadLogs() {
+  const text = await api('/logs');
+  $('#logs-out').textContent = text || '(no logs yet)';
+}
+$('#logs-refresh-btn').onclick = loadLogs;
+$('#eval-run-btn').onclick = async () => {
+  const code = $('#eval-input').value;
+  const out = $('#eval-out');
+  out.classList.remove('hidden');
+  try {
+    out.textContent = await api('/eval', { method: 'POST', body: code });
+  } catch (err) {
+    out.textContent = 'Error: ' + err.message;
+  }
+  loadLogs();
+};
+
+loadPlugins();
+</script>
+</body>
+</html>
