@@ -1,8 +1,9 @@
 //! Function hooks and signature scanning for phoenix.
 //!
 //! - [`Hook`] is the inline-hook interface. [`Inline`] picks the backend for
-//!   the target, `ShadowHook` on Android ARM and Dobby everywhere else (iOS,
-//!   x86_64 Android and Linux).
+//!   the target, `ShadowHook` on Android ARM and Dobby on x86_64 Android and
+//!   Linux. Apple platforms have none, since stock iOS never maps patched code
+//!   executable.
 //! - [`Image`](image::Image) views a loaded ELF module, scans it for
 //!   [`Pattern`](pattern::Pattern)s, and swaps pointers in its read-only data.
 
@@ -13,6 +14,7 @@ use std::{
 
 #[cfg(all(
    unix,
+   not(target_vendor = "apple"),
    not(all(
       target_os = "android",
       any(target_arch = "aarch64", target_arch = "arm")
@@ -33,6 +35,7 @@ pub mod shadowhook;
 
 #[cfg(all(
    unix,
+   not(target_vendor = "apple"),
    not(all(
       target_os = "android",
       any(target_arch = "aarch64", target_arch = "arm")
