@@ -3,7 +3,6 @@
 //! Remote debug shell in Phoenix Unlocker settings.
 
 use std::{
-   collections::VecDeque,
    io::{
       BufRead,
       BufReader,
@@ -14,43 +13,51 @@ use std::{
       TcpListener,
       TcpStream,
    },
-   sync::{
-      LazyLock,
-      Mutex,
-      PoisonError,
-      atomic::{
-         AtomicBool,
-         Ordering,
-      },
+   sync::atomic::{
+      AtomicBool,
+      Ordering,
    },
    thread,
    time::Duration,
 };
+#[cfg(target_os = "android")]
+use std::{
+   collections::VecDeque,
+   sync::{
+      LazyLock,
+      Mutex,
+      PoisonError,
+   },
+};
 
+#[cfg(target_os = "android")]
 use phoenix_ui_mobile::{
    Op,
    Prop,
    inspect::WireJson,
 };
 use serde::Serialize;
-use serde_json::value::RawValue;
+#[cfg(target_os = "android")] use serde_json::value::RawValue;
 
 use crate::PluginInfo;
 
 pub const ADDR: &str = "127.0.0.1:4242";
 const MAX_BODY: usize = 4 << 20;
-const MAX_OPS_LOG: usize = 64;
-const MAX_EVENTS_LOG: usize = 128;
+#[cfg(target_os = "android")] const MAX_OPS_LOG: usize = 64;
+#[cfg(target_os = "android")] const MAX_EVENTS_LOG: usize = 128;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static RUNNING: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "android")]
 static OPS_LOG: LazyLock<Mutex<VecDeque<Box<RawValue>>>> =
    LazyLock::new(|| Mutex::new(VecDeque::with_capacity(MAX_OPS_LOG)));
+#[cfg(target_os = "android")]
 static EVENTS_LOG: LazyLock<Mutex<VecDeque<Box<RawValue>>>> =
    LazyLock::new(|| Mutex::new(VecDeque::with_capacity(MAX_EVENTS_LOG)));
 
 /// A view or host event for the debug ring buffer. Never put HTTP headers or
 /// credentials in one.
+#[cfg(target_os = "android")]
 #[derive(Serialize)]
 #[serde(tag = "source", rename_all = "camelCase")]
 pub enum Trace<'a> {
@@ -71,6 +78,7 @@ pub enum Trace<'a> {
 
 /// Records a decoded Phoenix UI-op batch into the debug ring buffer when the
 /// remote debug shell is enabled. Zero-cost atomic check when disabled.
+#[cfg(target_os = "android")]
 pub fn record_ops(ops: &[Op]) {
    #[derive(Serialize)]
    struct Batch<'a> {
@@ -90,12 +98,14 @@ pub fn record_ops(ops: &[Op]) {
 
 /// Records `trace` into the debug ring buffer when the remote debug shell is
 /// enabled.
+#[cfg(target_os = "android")]
 pub fn record(trace: &Trace<'_>) {
    if enabled() {
       push(&EVENTS_LOG, MAX_EVENTS_LOG, trace);
    }
 }
 
+#[cfg(target_os = "android")]
 fn push(log: &Mutex<VecDeque<Box<RawValue>>>, max: usize, entry: &impl Serialize) {
    let entry = match serde_json::value::to_raw_value(entry) {
       Ok(entry) => entry,
@@ -224,6 +234,7 @@ fn read_request(stream: &TcpStream) -> std::io::Result<(String, String, String, 
 
 /// The percent-decoded value of `key`, as `encodeURIComponent` or a form wrote
 /// it. A `%` not followed by two hex digits stays as it is.
+#[cfg(target_os = "android")]
 fn query_param(query: &str, key: &str) -> Option<String> {
    let (_, raw) = query
       .split('&')
@@ -258,7 +269,7 @@ fn query_param(query: &str, key: &str) -> Option<String> {
 fn dispatch(
    method: &str,
    path: &str,
-   query: &str,
+   #[cfg_attr(not(target_os = "android"), allow(unused_variables))] query: &str,
    body: &[u8],
 ) -> (&'static str, &'static str, Vec<u8>) {
    match (method, path) {
@@ -294,8 +305,11 @@ fn dispatch(
             Err(message) => err("500 Internal Server Error", &message),
          }
       },
+      #[cfg(target_os = "android")]
       ("GET", "/ops") => recent(&OPS_LOG, query, 20),
+      #[cfg(target_os = "android")]
       ("GET", "/events") => recent(&EVENTS_LOG, query, 50),
+      #[cfg(target_os = "android")]
       ("POST", "/clear") => {
          OPS_LOG
             .lock()
@@ -307,12 +321,14 @@ fn dispatch(
             .clear();
          ok_json(&Done::Cleared)
       },
+      #[cfg(target_os = "android")]
       ("GET", "/tree") => {
          let depth = query_param(query, "depth")
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(6);
          tree(None, depth)
       },
+      #[cfg(target_os = "android")]
       ("GET", _) if path.starts_with("/tree/") => {
          let Ok(id) = path["/tree/".len()..].parse::<i32>() else {
             return err("400 Bad Request", "invalid node id");
@@ -331,6 +347,7 @@ fn dispatch(
          crate::update::apply();
          ok_json(&Done::Started)
       },
+      #[cfg(target_os = "android")]
       ("POST", "/update/self") => {
          crate::update::self_update_from_site();
          ok_json(&Done::Started)
@@ -339,7 +356,7 @@ fn dispatch(
          let text = String::from_utf8_lossy(body);
          let on = matches!(text.trim(), "1" | "true" | "on");
          crate::set_staff_enabled(on);
-         crate::settings::refresh();
+         crate::refresh_settings();
          ok_json(&Done::Staff(crate::staff_enabled()))
       },
       _ if path.starts_with("/plugins/") => plugin_route(method, &path["/plugins/".len()..], body),
@@ -393,6 +410,7 @@ impl<'a> From<&'a PluginInfo> for PluginJson<'a> {
 #[derive(Serialize)]
 #[serde(rename_all = "lowercase")]
 enum Done<'a> {
+   #[cfg(target_os = "android")]
    Cleared,
    Started,
    Staff(bool),
@@ -405,6 +423,7 @@ enum Done<'a> {
 
 /// The newest entries of `log`, filtered by the `match` and `limit` query
 /// parameters.
+#[cfg(target_os = "android")]
 fn recent(
    log: &Mutex<VecDeque<Box<RawValue>>>,
    query: &str,
@@ -430,6 +449,7 @@ fn recent(
    )
 }
 
+#[cfg(target_os = "android")]
 fn tree(root: Option<i32>, depth: usize) -> (&'static str, &'static str, Vec<u8>) {
    crate::patches::with_tree(root, depth, |tree| {
       tree.map_or_else(
@@ -497,7 +517,7 @@ fn plugin_route(method: &str, rest: &str, body: &[u8]) -> (&'static str, &'stati
          };
          match crate::save_source(name, source) {
             Ok(()) => {
-               crate::settings::refresh();
+               crate::refresh_settings();
                ok_json(&Done::Installed(name))
             },
             Err(message) => err("500 Internal Server Error", &message.to_string()),
@@ -506,7 +526,7 @@ fn plugin_route(method: &str, rest: &str, body: &[u8]) -> (&'static str, &'stati
       ("DELETE", None) => {
          match crate::uninstall(name) {
             Ok(()) => {
-               crate::settings::refresh();
+               crate::refresh_settings();
                ok_json(&Done::Uninstalled(name))
             },
             Err(message) => err("500 Internal Server Error", &message.to_string()),
@@ -514,17 +534,17 @@ fn plugin_route(method: &str, rest: &str, body: &[u8]) -> (&'static str, &'stati
       },
       ("POST", Some("reload")) => {
          crate::reload(name);
-         crate::settings::refresh();
+         crate::refresh_settings();
          ok_json(&Done::Reloaded(name))
       },
       ("POST", Some("enable")) => {
          crate::set_enabled(name, true);
-         crate::settings::refresh();
+         crate::refresh_settings();
          ok_json(&Done::Enabled(name))
       },
       ("POST", Some("disable")) => {
          crate::set_enabled(name, false);
-         crate::settings::refresh();
+         crate::refresh_settings();
          ok_json(&Done::Disabled(name))
       },
       _ => err("404 Not Found", "unknown plugin route"),

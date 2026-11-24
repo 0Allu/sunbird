@@ -23,7 +23,6 @@ use crate::{
       Engine,
       Registry,
       drain,
-      ui::remover,
    },
 };
 
@@ -266,16 +265,12 @@ pub fn add_discord_hooks<'js>(
                .borrow_mut()
                .insert(id, (owner.clone(), handler));
             discord::add_request_hook(id, owner.clone(), parsed);
-            remover(
-               &ctx,
-               move |ctx| {
-                  if let Some(registry) = ctx.userdata::<Registry<'js>>() {
-                     registry.request_hooks.borrow_mut().remove(&id);
-                  }
-                  discord::remove_request_hook(id);
-               },
-               None,
-            )
+            Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
+               if let Some(registry) = ctx.userdata::<Registry<'js>>() {
+                  registry.request_hooks.borrow_mut().remove(&id);
+               }
+               discord::remove_request_hook(id);
+            })
          },
       )?,
    )?;
@@ -299,16 +294,12 @@ pub fn add_discord_hooks<'js>(
                .borrow_mut()
                .insert(id, (owner_res.clone(), handler));
             discord::add_response_hook(id, owner_res.clone(), parsed);
-            remover(
-               &ctx,
-               move |ctx| {
-                  if let Some(registry) = ctx.userdata::<Registry<'js>>() {
-                     registry.response_hooks.borrow_mut().remove(&id);
-                  }
-                  discord::remove_response_hook(id);
-               },
-               None,
-            )
+            Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
+               if let Some(registry) = ctx.userdata::<Registry<'js>>() {
+                  registry.response_hooks.borrow_mut().remove(&id);
+               }
+               discord::remove_response_hook(id);
+            })
          },
       )?,
    )?;

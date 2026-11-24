@@ -1,8 +1,9 @@
-#[cfg(target_os = "android")] mod background;
+mod background;
 #[cfg(target_os = "android")] mod bridge;
+#[cfg(not(target_os = "android"))] mod desktop_ui;
 mod hooks;
-#[cfg(target_os = "android")] mod http;
-#[cfg(target_os = "android")] mod intercept;
+mod http;
+mod intercept;
 mod messages;
 #[cfg(target_os = "android")] mod mount;
 #[cfg(target_os = "android")] mod page;
@@ -29,7 +30,6 @@ use phoenix_sigs::registry::{
    EventId,
    GatewayRegistry,
 };
-#[cfg(target_os = "android")] use rquickjs::function::Opt;
 use rquickjs::{
    CatchResultExt,
    CaughtError,
@@ -41,7 +41,10 @@ use rquickjs::{
    Object,
    Runtime,
    Value,
-   function::Rest,
+   function::{
+      Opt,
+      Rest,
+   },
 };
 
 use crate::{
@@ -53,6 +56,7 @@ use crate::{
    STATE,
    Setting,
    State,
+   discord,
    gateway,
    io_error,
    js::{
@@ -60,25 +64,26 @@ use crate::{
          Hook,
          add_gateway_api,
       },
+      http::{
+         discord_object,
+         start_fetch,
+      },
       messages::messages_object,
       settings::{
          Definition,
          settings_object,
       },
-      storage::storage,
+      storage::{
+         storage,
+         stores_object,
+      },
    },
 };
 #[cfg(target_os = "android")]
 use crate::{
-   discord,
    js::{
       bridge::bridge_object,
-      http::{
-         discord_object,
-         start_fetch,
-      },
       messages::patch_api,
-      storage::stores_object,
       ui::Callbacks,
       view::EventHook,
    },
@@ -157,8 +162,11 @@ struct Registry<'js> {
    unloads:        RefCell<HashMap<String, Vec<Function<'js>>>>,
    /// The resolve and reject of each promise a worker thread will settle, by
    /// id.
-   #[cfg(target_os = "android")]
    pending:        RefCell<HashMap<u64, (Function<'js>, Function<'js>)>>,
+   /// `phoenix.discord.onRequest` interceptors, by id.
+   request_hooks:  RefCell<HashMap<u64, (String, Function<'js>)>>,
+   /// `phoenix.discord.onResponse` interceptors, by id.
+   response_hooks: RefCell<HashMap<u64, (String, Function<'js>)>>,
    #[cfg(target_os = "android")]
    ui:             RefCell<HashMap<ContributionId, Callbacks<'js>>>,
    /// Slash commands by lowercase name, with the plugin that registered each.
@@ -167,12 +175,6 @@ struct Registry<'js> {
    /// `phoenix.messages.onSend` interceptors in registration order, by id.
    #[cfg(target_os = "android")]
    interceptors:   RefCell<Vec<(u64, String, Function<'js>)>>,
-   /// `phoenix.discord.onRequest` interceptors, by id.
-   #[cfg(target_os = "android")]
-   request_hooks:  RefCell<HashMap<u64, (String, Function<'js>)>>,
-   /// `phoenix.discord.onResponse` interceptors, by id.
-   #[cfg(target_os = "android")]
-   response_hooks: RefCell<HashMap<u64, (String, Function<'js>)>>,
    /// `phoenix.messages.onEmojiPick` handlers in registration order, by id.
    #[cfg(target_os = "android")]
    pickers:        RefCell<Vec<(u64, String, Function<'js>)>>,
@@ -321,6 +323,16 @@ impl Engine {
             }
          }
          registry.defined.borrow_mut().remove(name);
+         registry
+            .request_hooks
+            .borrow_mut()
+            .retain(|_, (plugin, _)| plugin != name);
+         discord::forget_request_hooks(name);
+         registry
+            .response_hooks
+            .borrow_mut()
+            .retain(|_, (plugin, _)| plugin != name);
+         discord::forget_response_hooks(name);
          #[cfg(target_os = "android")]
          {
             registry
@@ -335,16 +347,6 @@ impl Engine {
             interceptors.retain(|(_, plugin, _)| plugin != name);
             patches::set_interceptors(interceptors.len());
             drop(interceptors);
-            registry
-               .request_hooks
-               .borrow_mut()
-               .retain(|_, (plugin, _)| plugin != name);
-            discord::forget_request_hooks(name);
-            registry
-               .response_hooks
-               .borrow_mut()
-               .retain(|_, (plugin, _)| plugin != name);
-            discord::forget_response_hooks(name);
             let mut pickers = registry.pickers.borrow_mut();
             pickers.retain(|(_, plugin, _)| plugin != name);
             patches::set_emoji_pickers(pickers.len());
@@ -423,7 +425,6 @@ impl Engine {
 
    /// Adds `name` or replaces its source, then runs it unless the user turned
    /// it off.
-   #[cfg(target_os = "android")]
    pub fn install(&mut self, name: &str, source: String) {
       let enabled = if let Some(loaded) = self.plugins.get_mut(name) {
          loaded.source = source;
@@ -446,7 +447,6 @@ impl Engine {
 
    /// Drops `name` and what the user chose for it. A bundled plugin it
    /// replaced comes back at the next start.
-   #[cfg(target_os = "android")]
    pub fn uninstall(&mut self, name: &str) {
       self.unload(name);
       self.plugins.remove(name);
@@ -476,10 +476,7 @@ impl Engine {
             disabled.insert(name.clone());
          }
       }
-      #[cfg(target_os = "android")]
       let remote_shell = crate::remote_shell_enabled();
-      #[cfg(not(target_os = "android"))]
-      let remote_shell = false;
       let json = self.context.with(|ctx| {
          let registry = ctx.userdata::<Registry<'_>>();
          let chosen = registry.as_ref().map(|registry| registry.chosen.borrow());
@@ -571,18 +568,15 @@ fn registry<'js>(ctx: &Ctx<'js>, events: &GatewayRegistry) -> rquickjs::Result<R
       defined: RefCell::default(),
       chosen: RefCell::default(),
       unloads: RefCell::default(),
-      #[cfg(target_os = "android")]
       pending: RefCell::default(),
+      request_hooks: RefCell::default(),
+      response_hooks: RefCell::default(),
       #[cfg(target_os = "android")]
       ui: RefCell::default(),
       #[cfg(target_os = "android")]
       commands: RefCell::default(),
       #[cfg(target_os = "android")]
       interceptors: RefCell::default(),
-      #[cfg(target_os = "android")]
-      request_hooks: RefCell::default(),
-      #[cfg(target_os = "android")]
-      response_hooks: RefCell::default(),
       #[cfg(target_os = "android")]
       pickers: RefCell::default(),
       #[cfg(target_os = "android")]
@@ -628,6 +622,8 @@ fn api<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
    let messages = messages_object(ctx)?;
    #[cfg(target_os = "android")]
    patch_api(ctx, plugin, &api, &messages)?;
+   #[cfg(not(target_os = "android"))]
+   api.set("ui", desktop_ui::desktop_ui_object(ctx)?)?;
    api.set("messages", messages)?;
    api.set("log", log_object(ctx, plugin)?)?;
    api.set("storage", storage(ctx, plugin)?)?;
@@ -646,13 +642,10 @@ fn api<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
          Ok::<_, rquickjs::Error>(())
       })?,
    )?;
-   #[cfg(target_os = "android")]
    api.set("stores", stores_object(ctx)?)?;
-   #[cfg(target_os = "android")]
    api.set("discord", discord_object(ctx, plugin)?)?;
    #[cfg(target_os = "android")]
    api.set("bridge", bridge_object(ctx)?)?;
-   #[cfg(target_os = "android")]
    api.set(
       "fetch",
       Function::new(
@@ -714,7 +707,6 @@ pub fn load_plugins(state: &'static State, bundled: Vec<Plugin>) -> Result<Vec<S
       Err(err) => return Err(io_error(&choices_path)(err)),
    };
    crate::staff::start(choices.staff, &state.image);
-   #[cfg(target_os = "android")]
    crate::set_remote_shell_flag(choices.remote_shell);
 
    let dir = state.plugins_dir();

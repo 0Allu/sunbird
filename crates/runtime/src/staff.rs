@@ -29,7 +29,7 @@ pub fn start(on: bool, image: &'static phoenix_hook::image::Image<'static>) {
    imp::start(image);
 }
 
-#[cfg(not(target_arch = "arm"))]
+#[cfg(target_arch = "aarch64")]
 mod imp {
    use std::{
       ffi::c_void,
@@ -205,6 +205,20 @@ mod imp {
    /// # Safety
    ///
    /// None, the signature matches the 64-bit `apply`.
+   pub unsafe fn apply(_state: *mut c_void) {}
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "arm")))]
+mod imp {
+   use std::ffi::c_void;
+
+   use phoenix_hook::image::Image;
+
+   pub(super) fn start(_image: &'static Image<'static>) {}
+
+   /// # Safety
+   ///
+   /// No-op on targets without a staff pattern yet.
    pub unsafe fn apply(_state: *mut c_void) {}
 }
 

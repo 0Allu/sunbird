@@ -7,27 +7,24 @@ use std::{
    path::PathBuf,
 };
 
-#[cfg(target_os = "android")] use rquickjs::function::Rest;
 use rquickjs::{
    Ctx,
    Exception,
    Function,
    Object,
    Value,
+   function::Rest,
 };
 
 use crate::{
    io_error,
    js::{
+      background::{
+         Settlement,
+         in_background,
+      },
       state,
       throw,
-   },
-};
-#[cfg(target_os = "android")]
-use crate::{
-   js::background::{
-      Settlement,
-      in_background,
    },
    store,
 };
@@ -93,7 +90,6 @@ pub fn storage<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js
 }
 
 /// `phoenix.stores`, read-only SQL over Phoenix's cache.
-#[cfg(target_os = "android")]
 pub fn stores_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
    let stores = Object::new(ctx.clone())?;
    stores.set(

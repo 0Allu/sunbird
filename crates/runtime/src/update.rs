@@ -14,15 +14,6 @@
 
 use std::{
    collections::BTreeMap,
-   fs::{
-      self,
-      File,
-   },
-   io::{
-      BufWriter,
-      Write,
-   },
-   path::Path,
    sync::{
       Mutex,
       PoisonError,
@@ -33,11 +24,24 @@ use std::{
    },
    thread,
 };
+#[cfg(target_os = "android")]
+use std::{
+   fs::{
+      self,
+      File,
+   },
+   io::{
+      BufWriter,
+      Write,
+   },
+   path::Path,
+};
 
-use memchr::memmem;
+#[cfg(target_os = "android")] use memchr::memmem;
 
 /// This build's version, `<UTC commit date>-<short hash>` (`build.rs`).
 pub const VERSION: &str = env!("PHOENIX_VERSION");
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub const SITE: &str = "https://sunbird.tools/";
 pub const ASSETS: &str = "https://assets.sunbird.tools/";
 
@@ -47,8 +51,9 @@ static MARKER: &str = concat!("phoenix-version:", env!("PHOENIX_VERSION"), ";");
 
 /// Where the signed update waits for Android's installer, under the app's
 /// `files` directory, which Discord's `FileProvider` shares.
-const UPDATE_APK: &str = "phoenix-update.apk";
+#[cfg(target_os = "android")] const UPDATE_APK: &str = "phoenix-update.apk";
 
+#[cfg(target_os = "android")]
 const LOADER_ASSET: &str = if cfg!(target_arch = "x86_64") {
    "plugins/libphoenix-x86_64.so"
 } else if cfg!(target_arch = "arm") {
@@ -75,6 +80,7 @@ pub struct Update {
 }
 
 /// A plugin the site offers, as `plugins/index.json` lists it.
+#[cfg(target_os = "android")]
 #[derive(Clone, serde::Deserialize)]
 pub struct Listed {
    pub name:        String,
@@ -84,6 +90,7 @@ pub struct Listed {
 }
 
 /// The site's plugin list, fetched when the install page first opens.
+#[cfg(target_os = "android")]
 #[derive(Clone)]
 pub enum Catalog {
    Unfetched,
@@ -92,7 +99,7 @@ pub enum Catalog {
    Failed(String),
 }
 
-static CATALOG: Mutex<Catalog> = Mutex::new(Catalog::Unfetched);
+#[cfg(target_os = "android")] static CATALOG: Mutex<Catalog> = Mutex::new(Catalog::Unfetched);
 static FOUND: Mutex<Option<Update>> = Mutex::new(None);
 static STATUS: Mutex<Option<String>> = Mutex::new(None);
 static BUSY: AtomicBool = AtomicBool::new(false);
@@ -117,9 +124,10 @@ pub fn busy() -> bool {
 
 fn set_status(message: Option<String>) {
    *STATUS.lock().unwrap_or_else(PoisonError::into_inner) = message;
-   crate::settings::refresh();
+   crate::refresh_settings();
 }
 
+#[cfg(target_os = "android")]
 pub fn catalog() -> Catalog {
    CATALOG
       .lock()
@@ -129,6 +137,7 @@ pub fn catalog() -> Catalog {
 
 /// Fetches the site's plugin list in the background, unless it is loaded or
 /// on its way. A failed fetch is retried on the next call.
+#[cfg(target_os = "android")]
 pub fn fetch_catalog() {
    {
       let mut catalog = CATALOG.lock().unwrap_or_else(PoisonError::into_inner);
@@ -150,12 +159,13 @@ pub fn fetch_catalog() {
             Catalog::Failed(err)
          },
       };
-      crate::settings::refresh();
+      crate::refresh_settings();
    });
 }
 
 /// Installs a plugin the site lists. Site plugins can call API an older
 /// loader lacks, so they wait until the loader is current, like updates do.
+#[cfg(target_os = "android")]
 pub fn install_listed(name: &str) -> Result<String, crate::Error> {
    if let Some(version) = found().and_then(|update| update.loader) {
       return Err(crate::Error::LoaderOutdated { version });
@@ -204,7 +214,7 @@ pub fn check() {
       if update.loader.is_none() && update.plugins.is_empty() {
          log::info!("up to date ({VERSION})");
          *FOUND.lock().unwrap_or_else(PoisonError::into_inner) = None;
-         crate::settings::refresh();
+         crate::refresh_settings();
          return;
       }
       log::info!(
@@ -222,7 +232,8 @@ pub fn check() {
          },
       };
       *FOUND.lock().unwrap_or_else(PoisonError::into_inner) = Some(update);
-      crate::settings::refresh();
+      crate::refresh_settings();
+      #[cfg(target_os = "android")]
       crate::patches::banners::show_banner(
          "Phoenix Unlock update available".to_owned(),
          Some(body),
@@ -231,6 +242,8 @@ pub fn check() {
          8000,
          crate::patches::banners::BannerAction::ApplyUpdate,
       );
+      #[cfg(not(target_os = "android"))]
+      phoenix_ui_desktop::notify("Sunbird update available", Some(&body));
    });
 }
 
@@ -245,7 +258,7 @@ pub fn apply() {
    };
    if BUSY.swap(true, Ordering::AcqRel) {
       log::info!("update apply: already running");
-      let _ = crate::picker::toast("Update already in progress...");
+      crate::toast_user("Update already in progress...");
       return;
    }
    thread::spawn(move || {
@@ -289,11 +302,12 @@ pub fn apply() {
             let msg = format!("Plugin update failed: {}", failed.join("; "));
             set_status(Some(msg.clone()));
             BUSY.store(false, Ordering::Release);
-            let _ = crate::picker::toast(&msg);
+            crate::toast_user(&msg);
             return;
          }
       }
 
+      #[cfg(target_os = "android")]
       if update.loader.is_some() {
          run_loader_self_update();
          return;
@@ -302,7 +316,8 @@ pub fn apply() {
       // Plugin-only OTA update completed cleanly.
       set_status(None);
       BUSY.store(false, Ordering::Release);
-      crate::settings::refresh();
+      crate::refresh_settings();
+      #[cfg(target_os = "android")]
       crate::patches::banners::show_banner(
          "Plugins updated".to_owned(),
          Some(format!("Reloaded: {}", updated_plugins.join(", "))),
@@ -311,11 +326,17 @@ pub fn apply() {
          4500,
          crate::patches::banners::BannerAction::None,
       );
+      #[cfg(not(target_os = "android"))]
+      phoenix_ui_desktop::notify(
+         "Plugins updated",
+         Some(&format!("Reloaded: {}", updated_plugins.join(", "))),
+      );
    });
 }
 
 /// Runs the in-app loader self-update directly against the site's current
 /// `libphoenix-*.so` (also exposed to the gated localhost debug shell).
+#[cfg(target_os = "android")]
 pub fn self_update_from_site() {
    if BUSY.swap(true, Ordering::AcqRel) {
       log::info!("self-update: already running");
@@ -339,6 +360,7 @@ fn update_plugin(name: &str, expected_crc: Option<u32>) -> Result<(), String> {
    crate::save_source(name, source).map_err(|err| err.to_string())
 }
 
+#[cfg(target_os = "android")]
 fn run_loader_self_update() {
    set_status(Some("Downloading loader...".to_owned()));
    let _ = crate::picker::toast("Downloading Phoenix Unlock update...");
@@ -397,6 +419,7 @@ fn run_loader_self_update() {
 }
 
 /// Whether the app runs from split APKs, which sit next to `base`.
+#[cfg(target_os = "android")]
 fn installed_from_splits(base: &str) -> bool {
    Path::new(base)
       .parent()
@@ -414,6 +437,7 @@ fn installed_from_splits(base: &str) -> bool {
 }
 
 /// Writes `base` with `loader` swapped in and signed to `path`.
+#[cfg(target_os = "android")]
 fn write_update(base: &str, loader: &patcher::Library, path: &Path) -> Result<(), String> {
    let map = crate::host::Map::open(base).map_err(|err| format!("{base}: {err}"))?;
    let apk = patcher::swap_loader(map.bytes(), loader).map_err(|err| err.to_string())?;
@@ -427,10 +451,12 @@ fn write_update(base: &str, loader: &patcher::Library, path: &Path) -> Result<()
 
 /// Deletes an update Android's installer has had its chance at, since it is as
 /// big as the app.
+#[cfg(target_os = "android")]
 pub fn forget_update(files: &Path) {
    let _ = fs::remove_file(files.join(UPDATE_APK));
 }
 
+#[cfg(target_os = "android")]
 fn fail_self_update(message: &str) {
    log::error!("self-update: {message}");
    set_status(Some(message.to_owned()));

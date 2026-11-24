@@ -6,8 +6,10 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+crc32fast    = { workspace = true }
 flub         = { workspace = true }
 log          = { workspace = true }
+memchr       = { workspace = true }
 phoenix-hook = { workspace = true }
 phoenix-sigs = { workspace = true }
 rquickjs     = { workspace = true }
@@ -19,16 +21,15 @@ serde_json   = { workspace = true }
 rquickjs = { features = [ "bindgen" ], workspace = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
-crc32fast         = { workspace = true }
 jni-sys           = { workspace = true }
 libc              = { workspace = true }
-memchr            = { workspace = true }
 patcher           = { workspace = true }
 phoenix-ui-mobile = { workspace = true }
 phoenix-wire      = { workspace = true }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 phoenix-ui-desktop = { workspace = true }
+rusqlite           = { workspace = true }
 
 [lints]
 workspace = true

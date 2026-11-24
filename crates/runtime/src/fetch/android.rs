@@ -13,6 +13,13 @@ use jni_sys::{
    jvalue,
 };
 
+use super::{
+   FetchError,
+   LIMIT,
+   Request,
+   Response,
+   TIMEOUT_MS,
+};
 use crate::jvm::{
    Class,
    STRING,
@@ -32,53 +39,7 @@ const URL_CONNECTION: Class = class!(java::net::URLConnection);
 const INPUT_STREAM: Class = class!(java::io::InputStream);
 const OUTPUT_STREAM: Class = class!(java::io::OutputStream);
 
-/// Plugin bundles are a few hundred KiB, so anything far larger is a wrong URL.
-const LIMIT: usize = 8 << 20;
-const TIMEOUT_MS: i32 = 15_000;
 const CHUNK: i32 = 64 << 10;
-
-#[derive(Debug, flub::Error)]
-pub enum FetchError {
-   #[error("{url}: HTTP {status}")]
-   Status { url: String, status: i32 },
-   #[error("{url}: {message}")]
-   Java { url: String, message: String },
-   #[error("{url}: larger than {LIMIT} bytes")]
-   TooLarge { url: String },
-   #[error("{url}: not an HTTP URL")]
-   NotHttp { url: String },
-   #[error("no Java VM is running in this process")]
-   NoVm,
-}
-
-pub struct Request {
-   pub url:     String,
-   pub method:  String,
-   pub headers: Vec<(String, String)>,
-   pub body:    Option<Vec<u8>>,
-}
-
-pub struct Response {
-   pub status: i32,
-   pub body:   Vec<u8>,
-}
-
-/// The body of a 2xx answer to a GET.
-pub fn get(url: &str) -> Result<Vec<u8>, FetchError> {
-   let response = send(&Request {
-      url:     url.to_owned(),
-      method:  "GET".to_owned(),
-      headers: Vec::new(),
-      body:    None,
-   })?;
-   if !(200..300).contains(&response.status) {
-      return Err(FetchError::Status {
-         url:    url.to_owned(),
-         status: response.status,
-      });
-   }
-   Ok(response.body)
-}
 
 /// Runs on a worker thread. The local frame frees every reference this
 /// creates, since the thread never returns to Java to free them.
@@ -341,7 +302,7 @@ unsafe fn send_body(
 unsafe fn java_error(env: *mut JNIEnv, url: &str) -> FetchError {
    // SAFETY: forwarded from the caller.
    let message = unsafe { take_exception(env) };
-   FetchError::Java {
+   FetchError::Platform {
       url:     url.to_owned(),
       message: message.unwrap_or_else(|| "a Java call failed".to_owned()),
    }

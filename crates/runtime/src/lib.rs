@@ -30,8 +30,8 @@ use phoenix_sigs::{
 
 #[cfg(target_os = "android")] mod bridge;
 pub mod console;
-#[cfg(target_os = "android")] mod discord;
-#[cfg(target_os = "android")] mod fetch;
+mod discord;
+mod fetch;
 mod gateway;
 #[cfg(target_os = "android")] mod highlight;
 #[cfg(target_os = "android")] mod host;
@@ -41,12 +41,12 @@ mod js;
 mod local;
 #[cfg(target_os = "android")] mod patches;
 #[cfg(target_os = "android")] mod picker;
-#[cfg(target_os = "android")] mod remote;
+mod remote;
 #[cfg(target_os = "android")] mod settings;
 #[cfg(target_os = "android")] mod socket;
 mod staff;
-#[cfg(target_os = "android")] mod store;
-#[cfg(target_os = "android")] mod update;
+mod store;
+mod update;
 
 #[derive(Debug, flub::Error)]
 pub enum Error {
@@ -80,7 +80,6 @@ pub enum Error {
    PluginFile { name: String },
    #[error("{url}: the download is not UTF-8 text")]
    NotUtf8 { url: String },
-   #[cfg(target_os = "android")]
    #[error(transparent)]
    Fetch(#[from] fetch::FetchError),
    #[error("update Phoenix Unlock to {version} first, the site's plugins need it")]
@@ -205,7 +204,7 @@ fn engine() -> Option<std::sync::MutexGuard<'static, js::Engine>> {
 
 /// Runs matching `phoenix.discord.onRequest` hooks on an outgoing Discord API
 /// request.
-#[cfg(target_os = "android")]
+#[allow(dead_code)]
 pub(crate) fn intercept_request(
    matched: &[u64],
    method: &str,
@@ -219,7 +218,7 @@ pub(crate) fn intercept_request(
 
 /// Runs matching `phoenix.discord.onResponse` hooks (sync or async) on an
 /// incoming Discord API reply and delivers the final body through `done`.
-#[cfg(target_os = "android")]
+#[allow(dead_code)]
 pub(crate) fn intercept_response(
    matched: Vec<u64>,
    method: String,
@@ -233,6 +232,20 @@ pub(crate) fn intercept_response(
    } else {
       let _ = done.send(body);
    }
+}
+
+pub(crate) fn refresh_settings() {
+   #[cfg(target_os = "android")]
+   settings::refresh();
+}
+
+pub(crate) fn toast_user(message: &str) {
+   #[cfg(target_os = "android")]
+   {
+      let _ = picker::toast(message);
+   }
+   #[cfg(not(target_os = "android"))]
+   phoenix_ui_desktop::toast(message);
 }
 
 /// Every plugin found at start, enabled or not.
@@ -256,19 +269,16 @@ pub fn set_staff_enabled(enabled: bool) {
 }
 
 /// Whether the localhost debug shell (`127.0.0.1:4242`) is enabled.
-#[cfg(target_os = "android")]
 #[must_use]
 pub fn remote_shell_enabled() -> bool {
    remote::enabled()
 }
 
-#[cfg(target_os = "android")]
 pub(crate) fn set_remote_shell_flag(enabled: bool) {
    remote::set_flag(enabled);
 }
 
 /// Turns the localhost debug shell on or off and remembers the choice.
-#[cfg(target_os = "android")]
 pub fn set_remote_shell_enabled(enabled: bool) {
    remote::set_enabled(enabled);
    if let Some(engine) = engine() {
@@ -334,7 +344,6 @@ pub fn evaluate(code: &str) {
 
 /// Downloads a plugin bundle into `home/plugins` and loads it, replacing a
 /// plugin of the same name. Returns the plugin's name.
-#[cfg(target_os = "android")]
 pub fn install(url: &str) -> Result<String, Error> {
    let bad_url = || {
       Error::PluginUrl {
@@ -360,7 +369,6 @@ pub fn install(url: &str) -> Result<String, Error> {
 }
 
 /// The plugin name a file name like `plugin.js` gives.
-#[cfg(target_os = "android")]
 fn plugin_name(file: &str) -> Option<&str> {
    file.strip_suffix(".js").filter(|name| {
       !name.is_empty()
@@ -372,7 +380,6 @@ fn plugin_name(file: &str) -> Option<&str> {
 
 /// Installs a bundle the user picked from the device, named by its file name.
 /// Returns the plugin's name.
-#[cfg(target_os = "android")]
 pub fn install_file(file: &str, bytes: Vec<u8>) -> Result<String, Error> {
    let name = plugin_name(file).ok_or_else(|| {
       Error::PluginFile {
@@ -390,7 +397,6 @@ pub fn install_file(file: &str, bytes: Vec<u8>) -> Result<String, Error> {
 
 /// Writes `source` to `home/plugins/<name>.js` and loads it, replacing the
 /// plugin's code, bundled or not.
-#[cfg(target_os = "android")]
 pub fn save_source(name: &str, source: String) -> Result<(), Error> {
    let state = STATE.get().ok_or(Error::NotStarted)?;
    let file = state.plugins_dir().join(format!("{name}.js"));
@@ -412,7 +418,6 @@ pub fn source(name: &str) -> Option<String> {
 }
 
 /// Deletes a plugin installed into `home/plugins` and unloads it.
-#[cfg(target_os = "android")]
 pub fn uninstall(name: &str) -> Result<(), Error> {
    let state = STATE.get().ok_or(Error::NotStarted)?;
    let file = state.plugins_dir().join(format!("{name}.js"));
@@ -463,6 +468,9 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    let state = STATE.get().expect("STATE was set above");
 
    let plugins = js::load_plugins(state, bundled)?;
+   if remote_shell_enabled() {
+      remote::ensure_started();
+   }
    #[cfg(target_os = "android")]
    {
       update::forget_update(&state.files_dir());
@@ -471,13 +479,12 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
             log::error!("host names: {err}");
          }
       });
-      if remote_shell_enabled() {
-         remote::ensure_started();
-      }
       settings::start();
       patches::start();
       bridge::install(Box::new(socket::Socket));
    }
+   #[cfg(not(target_os = "android"))]
+   update::check();
    Ok(Started {
       target: state.image.path.clone(),
       build: state.image.build_id,
@@ -494,9 +501,8 @@ impl State {
       self.home.join("plugins.json")
    }
 
-   /// The app's `files` directory, which holds phoenix's home and Phoenix's
-   /// store.
-   #[cfg(target_os = "android")]
+   /// The app's data directory holding both phoenix's home and Phoenix's
+   /// `store/<account>/cache.sqlite`.
    fn files_dir(&self) -> PathBuf {
       self
          .home
