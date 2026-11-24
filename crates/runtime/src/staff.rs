@@ -140,7 +140,10 @@ mod imp {
 #[cfg(target_arch = "arm")]
 mod imp {
    use std::{
-      ffi::c_void,
+      ffi::{
+         c_int,
+         c_void,
+      },
       ptr::NonNull,
       sync::OnceLock,
    };
@@ -152,7 +155,7 @@ mod imp {
       pattern::Pattern,
    };
 
-   /// The start of Phoenix's staff check, `bool f(&Store, bool force)`, which
+   /// The start of Phoenix's staff check, `bool f(&Store, int force)`, which
    /// answers true when forced, then reads `(flags | flag_override) & 1` off
    /// the store. 19 callers on 356207 gate the Staff Settings section and the
    /// rest of the staff UI. The store offsets are wildcarded.
@@ -187,7 +190,7 @@ mod imp {
       }
    }
 
-   extern "C" fn is_staff(store: *const c_void, force: bool) -> bool {
+   extern "C" fn is_staff(store: *const c_void, force: c_int) -> bool {
       if super::enabled() {
          return true;
       }
@@ -195,17 +198,10 @@ mod imp {
          return false;
       };
       // SAFETY: the trampoline runs the original check, which has this ABI.
-      let original: extern "C" fn(*const c_void, bool) -> bool =
+      let original: extern "C" fn(*const c_void, c_int) -> bool =
          unsafe { std::mem::transmute(hook.original().as_ptr()) };
       original(store, force)
    }
-
-   /// The hook answers every read, so the gateway has nothing to write.
-   ///
-   /// # Safety
-   ///
-   /// None, the signature matches the 64-bit `apply`.
-   pub unsafe fn apply(_state: *mut c_void) {}
 }
 
-pub use imp::apply;
+#[cfg(not(target_arch = "arm"))] pub use imp::apply;
