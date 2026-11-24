@@ -1,5 +1,5 @@
 // @description Sends custom emojis from any server, and animated ones, as image links
-// @version 0.2.0
+// @version 0.2.1
 // @author mantikafasi
 
 const { gateway } = phoenix;
@@ -84,24 +84,13 @@ if (gateway.guildEmojisUpdate) {
   phoenix.on(gateway.guildEmojisUpdate, (update) => addEmojis(update.guild_id, update.emojis));
 }
 
-// The real tier. The API rejects until the app made a request of its own, so
-// this retries on the next gateway events.
-let asked: "no" | "asking" | "done" = "no";
-const me = () => {
-  if (asked !== "no") return;
-  asked = "asking";
+const readTier = () =>
   phoenix.discord
-    .get("/users/@me")
-    .then((res) => {
-      premiumType = res.json<{ premium_type?: number }>().premium_type ?? 0;
-      asked = "done";
-    })
-    .catch(() => (asked = "no"));
-};
-me();
-for (const event of [gateway.initialGuild, gateway.messageCreate]) {
-  if (event) phoenix.on(event, me);
-}
+    .me()
+    .then((user) => (premiumType = user?.premium_type ?? 0))
+    .catch((err) => phoenix.log.warn(`reading the account: ${err}`));
+readTier();
+if (gateway.readySupplemental) phoenix.on(gateway.readySupplemental, readTier);
 
 // What Discord lets a non-Nitro user send: the server's own static emojis.
 // With Nitro, anything (external emoji permission is not checked).

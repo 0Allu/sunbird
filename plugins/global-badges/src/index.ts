@@ -1,5 +1,5 @@
 // @description Badges from other client mods, shown on profiles and in the badge directory
-// @version 0.5.3
+// @version 0.5.4
 // @author iFlex0x, wolfieeeeeeee
 // @warning Downloads the public badge directory from Equibadges (badges.equicord.org)
 
@@ -35,26 +35,6 @@ const providerNames = new Map(Object.entries({
   reviewdb: "ReviewDB", vencord: "Vencord", enmity: "Enmity",
   velocity: "Velocity", aero: "Aero",
 }));
-let selfId: string | null = null;
-
-if (phoenix.gateway.ready) {
-  phoenix.on(phoenix.gateway.ready as Phoenix.Sig<{ user?: { id?: string } }>, (payload) => {
-    if (payload?.user?.id) selfId = payload.user.id;
-  });
-}
-
-async function resolveSelfId(): Promise<string | null> {
-  if (selfId) return selfId;
-  try {
-    const res = await phoenix.discord.get("/users/@me");
-    if (res.ok) {
-      const me = res.json<{ id?: string }>();
-      if (me?.id) selfId = me.id;
-    }
-  } catch {}
-  return selfId;
-}
-
 function toHex(text: string): string {
   let out = "";
   for (let i = 0; i < text.length; i++) {
@@ -84,7 +64,7 @@ function badgeUrl(uri: string, animated = false): string {
 async function userIdFromPath(path: string): Promise<string | null> {
   const m = path.match(/^\/users\/(@me|\d+)\/(?:profile|badges)(?:[?#]|$)/);
   if (!m) return null;
-  return m[1] === "@me" ? resolveSelfId() : m[1];
+  return m[1] === "@me" ? ((await phoenix.discord.me())?.id ?? null) : m[1];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

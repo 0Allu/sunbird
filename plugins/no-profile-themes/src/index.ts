@@ -1,5 +1,5 @@
 // @description Strips profile themes, effects, avatar decorations and display name styles
-// @version 0.1.0
+// @version 0.1.1
 // @author amaanq
 
 const { gateway } = phoenix;
@@ -40,34 +40,31 @@ const strip = (value: unknown) => {
   }
 };
 
-const ready = gateway.ready as Phoenix.Sig<{ user?: { id: string } }> | undefined;
-if (ready) {
-  phoenix.hook(ready, {
-    before(payload) {
-      self = payload.user?.id;
-      strip(payload);
-    },
-  });
-}
+const readSelf = () =>
+  phoenix.discord
+    .me()
+    .then((user) => (self = user?.id))
+    .catch((err) => phoenix.log.warn(`reading the account: ${err}`));
+readSelf();
+if (gateway.readySupplemental) phoenix.on(gateway.readySupplemental, readSelf);
 
 const events = [
-  "readySupplemental",
-  "initialGuild",
-  "guildCreate",
-  "messageCreate",
-  "messageUpdate",
-  "guildMemberAdd",
-  "guildMemberUpdate",
-  "guildMembersChunk",
-  "guildMemberListUpdate",
-  "presenceUpdate",
-  "presencesReplace",
-  "threadMembersUpdate",
-  "channelCreate",
-  "relationshipAdd",
-  "relationshipUpdate",
+  gateway.readySupplemental,
+  gateway.initialGuild,
+  gateway.guildCreate,
+  gateway.messageCreate,
+  gateway.messageUpdate,
+  gateway.guildMemberAdd,
+  gateway.guildMemberUpdate,
+  gateway.guildMembersChunk,
+  gateway.guildMemberListUpdate,
+  gateway.presenceUpdate,
+  gateway.presencesReplace,
+  gateway.threadMembersUpdate,
+  gateway.channelCreate,
+  gateway.relationshipAdd,
+  gateway.relationshipUpdate,
 ];
-for (const event of events) {
-  const sig = gateway[event];
+for (const sig of events) {
   if (sig) phoenix.hook(sig, { before: strip });
 }
