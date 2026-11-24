@@ -7,6 +7,9 @@
 //! - `strings <text>`: where `text` sits, the code that loads it, and the
 //!   function around each load.
 //! - `refs <addr>`: the code and pointers that reference `addr`.
+//! - `check`: runs every locator the runtime uses on this file's platform and
+//!   exits 1 if any misses, so a new Discord build can be vetted before
+//!   shipping against it.
 //! - `dis <addr> [count]`: the bounds of the function holding `addr`, and
 //!   `count` instructions from `addr` to that function's end.
 //!
@@ -28,13 +31,19 @@ use phoenix_hook::{
    x86,
 };
 use phoenix_sigs::{
-   file::BinaryFile,
+   Found,
+   desktop,
+   file::{
+      BinaryFile,
+      Machine,
+   },
    http::DesktopHttpTransport,
+   mobile,
    registry::GatewayRegistry,
 };
 
-const USAGE: &str =
-   "usage: sigscan <library.so | Discord.exe> [strings <text> | refs <addr> | dis <addr> [count]]";
+const USAGE: &str = "usage: sigscan <library.so | Discord.exe> [check | strings <text> | refs \
+                     <addr> | dis <addr> [count]]";
 
 fn main() -> misstep::Result<()> {
    misstep::install_panic_hook();
@@ -53,6 +62,7 @@ fn main() -> misstep::Result<()> {
    let tools = Tools { image, base };
    match args.get(1).map(String::as_str) {
       None => dump(image),
+      Some("check") => check(image, parsed.machine()),
       Some("strings") => tools.strings(args.get(2).context(USAGE)?),
       Some("refs") => {
          tools.refs(addr(2)?);
@@ -68,6 +78,127 @@ fn main() -> misstep::Result<()> {
       },
       Some(_) => Err(misstep::Report::msg(USAGE)),
    }
+}
+
+/// Runs every locator for `machine` and prints what each found.
+#[expect(clippy::too_many_lines, reason = "one report per locator")]
+fn check(image: &Image<'_>, machine: Machine) -> misstep::Result<()> {
+   let mut missed = 0;
+   let mut report = |name: &str, found: Found<String>| {
+      match found {
+         Ok(detail) => println!("ok    {name:<20} {detail}"),
+         Err(why) => {
+            missed += 1;
+            println!("MISS  {name:<20} {why}");
+         },
+      }
+   };
+   let at = |addr: usize| format!("{addr:#x}");
+   let registry = GatewayRegistry::locate(image).map_err(|err| err.to_string());
+   report(
+      "gateway registry",
+      registry
+         .as_ref()
+         .map(|registry| format!("{} events", registry.iter().count()))
+         .map_err(Clone::clone),
+   );
+   match machine {
+      Machine::X86_64 => {
+         report(
+            "http transport",
+            DesktopHttpTransport::locate(image)
+               .ok_or_else(|| "not found".to_owned())
+               .and_then(|http| {
+                  let head = image
+                     .read(http.send_fn, desktop::FRAME_PROLOGUE_LEN)
+                     .unwrap_or_default();
+                  (desktop::FRAME_PROLOGUE.find_in(head).first() == Some(&0))
+                     .then(|| at(http.send_fn))
+                     .ok_or_else(|| "send prologue changed".to_owned())
+               }),
+         );
+         report("access gate", desktop::access_gate(image).map(at));
+         report(
+            "staff flag",
+            desktop::staff(image).map(|field| format!("{field:x?}")),
+         );
+         report("settings label", desktop::settings_label(image).map(at));
+         report(
+            "settings visibility",
+            desktop::settings_visibility(image).map(at),
+         );
+         report(
+            "settings section",
+            desktop::settings_section(image)
+               .map(|section| format!("{} (page +{:#x})", at(section.func), section.page_offset)),
+         );
+         let gpui = desktop::gpui(image);
+         report(
+            "gpui builders",
+            gpui
+               .as_ref()
+               .map(|gpui| at(gpui.div_new))
+               .map_err(Clone::clone),
+         );
+         report(
+            "gpui layouts",
+            gpui
+               .as_ref()
+               .map_err(|_| "needs the builders".to_owned())
+               .and_then(|gpui| desktop::gpui_layouts(image, gpui))
+               .map(|()| "match".to_owned()),
+         );
+         let row = desktop::message_row(image);
+         report(
+            "message row",
+            row.as_ref()
+               .map(|row| format!("{} (id +{:#x})", at(row.func), row.msg_id_offset))
+               .map_err(Clone::clone),
+         );
+         report(
+            "message body",
+            row.as_ref()
+               .map_err(|_| "needs the message row".to_owned())
+               .and_then(|row| desktop::message_body(image, row.func))
+               .map(|body| {
+                  format!(
+                     "{} (id +{:#x}, colors +{:#x})",
+                     at(body.func),
+                     body.msg_id_offset,
+                     body.row_colors_offset
+                  )
+               }),
+         );
+         report(
+            "optimistic delete",
+            registry
+               .as_ref()
+               .map_err(|_| "needs the registry".to_owned())
+               .and_then(|registry| {
+                  let id = registry.id("MESSAGE_DELETE").ok_or("no MESSAGE_DELETE")?;
+                  desktop::optimistic_delete(image, registry.entry(id).handler)
+               })
+               .map(at),
+         );
+      },
+      Machine::Aarch64 => {
+         report(
+            "staff flag",
+            mobile::staff_aarch64(image).map(|field| format!("{field:x?}")),
+         );
+         report("emoji check", mobile::emoji_aarch64(image).map(at));
+      },
+      Machine::Arm => {
+         report("staff check", mobile::staff_arm(image).map(at));
+         report("emoji check", mobile::emoji_arm(image).map(at));
+      },
+   }
+   if missed > 0 {
+      return Err(misstep::Report::msg(format!(
+         "{missed} locators missed this build"
+      )));
+   }
+   Ok(())
 }
 
 fn dump(image: &Image<'_>) -> misstep::Result<()> {

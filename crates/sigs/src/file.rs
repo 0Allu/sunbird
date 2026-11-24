@@ -309,6 +309,14 @@ impl<'a> BinaryFile<'a> {
    }
 
    #[must_use]
+   pub const fn machine(&self) -> Machine {
+      match self {
+         Self::Elf(file) => file.machine,
+         Self::Pe(file) => file.machine,
+      }
+   }
+
+   #[must_use]
    pub const fn image(&self) -> &Image<'a> {
       match self {
          Self::Elf(file) => &file.image,
