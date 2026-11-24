@@ -1,5 +1,5 @@
 // @description Adds a toggle to automatically spoiler everything you send
-// @version 1.2.0
+// @version 1.2.1
 // @author cmdr-chara
 
 const KEY = "enabled";
@@ -8,6 +8,30 @@ const ICON = "res://ic_mana_image_spoiler";
 const TINT_ON = 0xff5865f2;
 
 let on = phoenix.storage.get<boolean>(KEY) ?? false;
+
+const syncButton = () => {
+  button.update({
+    icon: ICON,
+    label: on ? "Spoiler mode (on)" : "Spoiler mode (off)",
+    tint: on ? TINT_ON : null,
+  });
+};
+
+const settings = phoenix.settings.define({
+  enabled: {
+    type: "switch",
+    title: "Spoiler mode",
+    description: "Wrap outgoing messages and attachments in spoilers automatically",
+    default: on,
+    onChange(value) {
+      on = value;
+      phoenix.storage.set(KEY, on);
+      syncButton();
+    },
+  },
+});
+
+on = settings.enabled;
 
 const wrapText = (text: string): string | undefined => {
   if (!text.trim() || text.includes("||")) return;
@@ -25,11 +49,7 @@ const button = phoenix.ui.addComposerButton({
   onPress() {
     on = !on;
     phoenix.storage.set(KEY, on);
-    button.update({
-      icon: ICON,
-      label: on ? "Spoiler mode (on)" : "Spoiler mode (off)",
-      tint: on ? TINT_ON : null,
-    });
+    syncButton();
     phoenix.ui.toast(on ? "Spoiler mode on" : "Spoiler mode off");
   },
 });

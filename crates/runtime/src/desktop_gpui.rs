@@ -892,7 +892,9 @@ const DESKTOP_FULL: &[&str] = &[
    "silent-typing",
    "nsfw-gate-bypass",
    "message-latency",
+   "message-logger",
    "no-profile-themes",
+   "spoiler-mode",
    "dearrow",
    "translate",
    "clear-urls",
@@ -901,8 +903,6 @@ const DESKTOP_FULL: &[&str] = &[
 
 const DESKTOP_PARTIAL: &[&str] = &[
    "global-badges",
-   "message-logger",
-   "spoiler-mode",
    "fakenitro",
 ];
 

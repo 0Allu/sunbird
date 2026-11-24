@@ -1,8 +1,12 @@
 // @description Keeps deleted messages and edit history
-// @version 0.2.0
+// @version 0.2.1
 // @author amaanq
 
 const { gateway } = phoenix;
+
+// Desktop Phoenix doesn't have Android's native message accessory hooks yet, so
+// render edit history and deleted markers inline via Discord markdown there.
+const desktopInline = typeof (phoenix as { bridge?: unknown }).bridge === "undefined";
 
 const settings = phoenix.settings.define({
   keepDeleted: {
@@ -58,6 +62,8 @@ interface Change {
 
 interface Seen {
   content: string;
+  channelId: string;
+  guildId?: string;
   attachments: Phoenix.Attachment[];
   changes: Change[];
   deletedAt?: number;
@@ -80,11 +86,19 @@ const ignored = (message: Phoenix.GatewayMessage) =>
 const remember = (message: Phoenix.GatewayMessage) => {
   let entry = seen.get(message.id);
   if (!entry) {
-    entry = { content: message.content, attachments: [], changes: [] };
+    entry = {
+      content: message.content,
+      channelId: message.channel_id,
+      guildId: message.guild_id,
+      attachments: [],
+      changes: [],
+    };
     seen.set(message.id, entry);
     if (seen.size > limit) seen.delete(seen.keys().next().value!);
   }
   entry.content = message.content;
+  if (message.channel_id) entry.channelId = message.channel_id;
+  if (message.guild_id !== undefined) entry.guildId = message.guild_id;
   entry.attachments = message.attachments ?? entry.attachments;
   return entry;
 };
@@ -93,6 +107,38 @@ const pad = (n: number) => String(n).padStart(2, "0");
 const clock = (at: number) => {
   const date = new Date(at);
   return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
+
+const subtext = (text: string) =>
+  text
+    .split("\n")
+    .map((line) => `-# ${line}`)
+    .join("\n");
+
+const formatInline = (entry: Seen): string => {
+  const parts: string[] = [];
+  if (entry.content) {
+    parts.push(
+      entry.deletedAt === undefined
+        ? entry.content
+        : entry.content
+            .split("\n")
+            .map((line) => (line.trim() ? `~~${line}~~` : line))
+            .join("\n"),
+    );
+  }
+  if (settings.keepEdits && entry.changes.length) {
+    for (const change of entry.changes) {
+      const line = change.removed
+        ? `Removed ${change.text} · ${clock(change.at)}`
+        : `~~${change.text || "(empty)"}~~ · edited ${clock(change.at)}`;
+      parts.push(subtext(line));
+    }
+  }
+  if (entry.deletedAt !== undefined) {
+    parts.push(`-# Deleted · ${clock(entry.deletedAt)}`);
+  }
+  return parts.join("\n");
 };
 
 // Earlier versions under the message, oldest first, in the accessory's muted style.
@@ -119,6 +165,24 @@ const deleted = phoenix.ui.addMessageAccessory({
     return at === undefined ? null : { text: `Deleted · ${clock(at)}`, color: RED, tint: RED };
   },
 });
+
+// Hydrate seen messages from channel history fetches on desktop so edits and
+// deletes of messages sent before startup are also captured.
+if (desktopInline) {
+  phoenix.discord.onResponse(
+    { method: "GET", pathPrefix: "/channels/", pathSuffix: "/messages" },
+    (res) => {
+      if (res.status < 200 || res.status >= 300) return;
+      const list = res.json<unknown>();
+      if (!Array.isArray(list)) return;
+      for (const item of list) {
+        const msg = item as Phoenix.GatewayMessage;
+        if (!msg?.id || typeof msg.content !== "string" || ignored(msg)) continue;
+        if (!seen.has(msg.id)) remember(msg);
+      }
+    },
+  );
+}
 
 phoenix.hook(gateway.messageCreate, {
   before(message) {
@@ -147,34 +211,60 @@ phoenix.hook(gateway.messageUpdate, {
       message.attachments = [...(message.attachments ?? []), ...removed];
       changes.push({ text: removed.map((attachment) => attachment.filename).join(", "), removed: true, at });
     }
-    remember(message).changes = changes;
-    if (old) history.update?.(message.id);
+    const entry = remember(message);
+    entry.changes = changes;
+    if (desktopInline) {
+      if ((settings.keepEdits && entry.changes.length) || entry.deletedAt !== undefined) {
+        message.content = formatInline(entry);
+      }
+    } else if (old) {
+      history.update?.(message.id);
+    }
   },
 });
 
 // Messages from before the app started are unknown, so their deletes pass
 // through. Known ones stay, marked.
-const markDeleted = (id: string) => {
+const markDeleted = (id: string, channelId?: string, guildId?: string) => {
   const entry = seen.get(id);
   if (!entry) return false;
   if (entry.deletedAt === undefined) {
     entry.deletedAt = Date.now();
-    deleted.update?.(id);
-    if (entry.changes.length) history.update?.(id);
+    if (desktopInline) {
+      const targetChannel = channelId || entry.channelId;
+      const targetGuild = guildId ?? entry.guildId;
+      if (targetChannel) {
+        try {
+          phoenix.dispatch(gateway.messageUpdate, {
+            id,
+            channel_id: targetChannel,
+            ...(targetGuild ? { guild_id: targetGuild } : {}),
+            content: formatInline(entry),
+          });
+        } catch (err) {
+          phoenix.log.warn(`markDeleted dispatch ${id}: ${err}`);
+        }
+      }
+    } else {
+      deleted.update?.(id);
+      if (entry.changes.length) history.update?.(id);
+    }
   }
   return true;
 };
 
 phoenix.hook(gateway.messageDelete, {
   before(message) {
-    if (settings.keepDeleted && markDeleted(message.id)) return false;
+    if (settings.keepDeleted && markDeleted(message.id, message.channel_id, message.guild_id)) {
+      return false;
+    }
   },
 });
 
 phoenix.hook(gateway.messageDeleteBulk, {
   before(bulk) {
     if (!settings.keepDeleted) return;
-    bulk.ids = bulk.ids.filter((id) => !markDeleted(id));
+    bulk.ids = bulk.ids.filter((id) => !markDeleted(id, bulk.channel_id, bulk.guild_id));
     if (!bulk.ids.length) return false;
   },
 });
