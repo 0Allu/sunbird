@@ -259,6 +259,10 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
       Machine::Aarch64 if macho => {
          report("guest bridge", ios::bridge(image).map(at));
          report("host table", ios::host_table(image).map(at));
+         report(
+            "access gate",
+            ios::access_gate(image).map(|[a, b]| format!("{a:#x}, {b:#x}")),
+         );
       },
       Machine::Aarch64 => {
          report(

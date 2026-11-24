@@ -15,6 +15,7 @@ mod bytes;
 mod dex;
 pub mod frida;
 mod host;
+pub mod ios;
 mod manifest;
 mod sign;
 mod zip;

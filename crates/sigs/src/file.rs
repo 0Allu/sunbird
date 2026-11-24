@@ -231,6 +231,19 @@ impl<'a> ElfFile<'a> {
 /// for offline tools.
 pub struct MachOFile<'a> {
    pub image: Image<'a>,
+   /// `(vmaddr, file offset, size)` per instruction section, to map a link
+   /// address back to its byte in the file.
+   code:      Vec<(usize, usize, usize)>,
+}
+
+impl MachOFile<'_> {
+   /// File offset of a link address, if it falls in an instruction section.
+   #[must_use]
+   pub fn file_offset(&self, vaddr: usize) -> Option<usize> {
+      self.code.iter().find_map(|&(addr, offset, size)| {
+         (vaddr >= addr && vaddr < addr + size).then(|| offset + (vaddr - addr))
+      })
+   }
 }
 
 impl<'a> MachOFile<'a> {
@@ -274,6 +287,7 @@ impl<'a> MachOFile<'a> {
       let mut by_index = Vec::new();
       let mut text = 0;
       let mut fixups = None;
+      let mut code = Vec::new();
       for command in header.load_commands(endian, data, 0).map_err(parse)? {
          match command.map_err(parse)?.variant().map_err(parse)? {
             LoadCommandVariant::Segment64(segment, sections) => {
@@ -294,13 +308,17 @@ impl<'a> MachOFile<'a> {
                      let length = usize::try_from(section.size(endian)).map_err(address)?;
                      let instructions =
                         macho::S_ATTR_PURE_INSTRUCTIONS.0 | macho::S_ATTR_SOME_INSTRUCTIONS.0;
+                     let addr = usize::try_from(section.addr(endian)).map_err(address)?;
+                     if section.flags(endian).0 & instructions != 0 {
+                        code.push((addr, start, length));
+                     }
                      image.segments.push(Segment {
-                        addr:       usize::try_from(section.addr(endian)).map_err(address)?,
-                        bytes:      Cow::Borrowed(
+                        addr,
+                        bytes: Cow::Borrowed(
                            data.get(start..start + length).ok_or_else(truncated)?,
                         ),
                         executable: section.flags(endian).0 & instructions != 0,
-                        writable:   false,
+                        writable: false,
                      });
                   }
                   continue;
@@ -356,7 +374,7 @@ impl<'a> MachOFile<'a> {
                .copy_from_slice(&value.to_le_bytes());
          }
       }
-      Ok(Self { image })
+      Ok(Self { image, code })
    }
 }
 

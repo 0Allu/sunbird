@@ -61,3 +61,29 @@ pub fn host_table(image: &Image<'_>) -> Found<usize> {
    let low = ((add >> 10) & 0xFFF) as usize;
    Ok((at & !0xFFF).wrapping_add_signed(offset) + low)
 }
+
+/// The two `ClientAccessGate` evaluators the launch gate reads before running
+/// Phoenix. Each starts 8 bytes before this body, which loads the gate and
+/// walks the experiment table. Both must become `mov w0, #1; ret` to open the
+/// gate: patching only one crashes the client, since they share a lock.
+///
+/// Read on 357.0 (build 124398). The experiment-table reference locates one of
+/// them, so the body is the anchor that also catches its twin.
+const ACCESS_GATE: Pattern = Pattern::new(
+   "09 01 40 F9 3F 09 00 F1 C0 00 00 54 08 A9 47 F9 1F 05 00 B1 60 00 00 54 08 B4 50 39 68 00 00 \
+    36",
+);
+
+/// The two access-gate evaluators' entry points, which open the gate when both
+/// return `Some(true)`.
+pub fn access_gate(image: &Image<'_>) -> Found<[usize; 2]> {
+   match image.scan(ACCESS_GATE)[..] {
+      [a, b] => Ok([a - 8, b - 8]),
+      ref hits => {
+         Err(format!(
+            "access gate: expected 2 evaluators, found {}",
+            hits.len()
+         ))
+      },
+   }
+}
