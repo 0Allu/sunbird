@@ -596,6 +596,7 @@ pub unsafe fn swap_words(writes: &[(usize, usize)]) -> Result<Vec<usize>, crate:
    Ok(previous)
 }
 
+#[cfg(any(unix, windows))]
 impl Image<'static> {
    /// Overwrites `bytes.len()` bytes at `addr` in this module, through
    /// [`Self::swap_words`] on the aligned words they cover.
