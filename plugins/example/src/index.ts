@@ -1,6 +1,7 @@
 // @description Shows off plugin settings, UI patch targets and slash commands
-// @version 0.1.0
+// @version 0.1.1
 // @author amaanq
+// @enabled false
 
 const { gateway } = phoenix;
 
@@ -16,10 +17,6 @@ const settings = phoenix.settings.define({
       phoenix.log.info("counter reset");
     },
   },
-});
-
-phoenix.on(gateway.messageCreate, (message) => {
-  phoenix.log.info(`#${message.channel_id} <${message.author.username}> ${message.content}`);
 });
 
 phoenix.hook(gateway.messageCreate, {
