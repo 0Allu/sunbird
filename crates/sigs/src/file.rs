@@ -120,14 +120,9 @@ impl<'a> ElfFile<'a> {
 
          match segment.p_type(endian) {
             elf::PT_LOAD => {
-               let mut owned = bytes.to_vec();
-               owned.resize(
-                  usize::try_from(segment.p_memsz(endian)).map_err(address)?,
-                  0,
-               );
                image.segments.push(Segment {
                   addr:       vaddr,
-                  bytes:      Cow::Owned(owned),
+                  bytes:      mapped(bytes, segment.p_memsz(endian)).map_err(address)?,
                   executable: flags.0 & elf::PF_X.0 != 0,
                   writable:   flags.0 & elf::PF_W.0 != 0,
                });
@@ -192,6 +187,18 @@ impl<'a> ElfFile<'a> {
          .find(|load| (load.vaddr..load.vaddr + load.size).contains(&vaddr))
          .map(|load| vaddr - load.vaddr + load.offset)
    }
+}
+
+/// A segment as loaded. Only segments with `.bss` or relocations get copied,
+/// which keeps the 100 MB host library from doubling in the site's wasm.
+fn mapped(bytes: &[u8], size: u64) -> Result<Cow<'_, [u8]>, TryFromIntError> {
+   let length = usize::try_from(size)?;
+   if length == bytes.len() {
+      return Ok(Cow::Borrowed(bytes));
+   }
+   let mut owned = bytes.to_vec();
+   owned.resize(length, 0);
+   Ok(Cow::Owned(owned))
 }
 
 fn plain_rela(bytes: &[u8], relative: u32) -> Vec<(usize, u64)> {
