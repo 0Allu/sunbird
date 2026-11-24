@@ -187,11 +187,10 @@ try {
    node web/tools/bundle-plugins.mjs
    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-   if (-not $Release -and (Test-Path $soPath)) {
-      $env:PHOENIX_LOADER = $soPath
-   } else {
-      Remove-Item Env:\PHOENIX_LOADER -ErrorAction SilentlyContinue
-   }
+   $loader = if (Test-Path $soPath) { $soPath } else { Join-Path $RepoRoot "web\plugins\libphoenix-arm64.so" }
+   $plugins = (Get-Content (Join-Path $RepoRoot "web\plugins\index.json") -Raw | ConvertFrom-Json) |
+      Where-Object { $_.name -ne "example" } |
+      ForEach-Object { "--plugin"; Join-Path $RepoRoot "web\plugins\$($_.name).js" }
 
    $splits = @(
       (Join-Path $SplitDir "base.apk"),
@@ -199,7 +198,9 @@ try {
       (Join-Path $SplitDir "config.xxhdpi.apk"),
       (Join-Path $SplitDir "config.en.apk")
    ) | Where-Object { Test-Path $_ }
-   node web/tools/node-build.mjs $OutApk @splits
+   & cargo +stable-x86_64-pc-windows-gnu run --release -p patcher -- --merge --out $OutApk `
+      --loader $loader --lib "libshadowhook_nothing.so=$(Join-Path $RepoRoot "web\plugins\libshadowhook_nothing-arm64.so")" `
+      @plugins @splits
    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
    if (-not $NoInstall) {
@@ -212,6 +213,5 @@ try {
       }
    }
 } finally {
-   Remove-Item Env:\PHOENIX_LOADER -ErrorAction SilentlyContinue
    Pop-Location
 }

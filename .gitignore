@@ -65,8 +65,6 @@
 !web/*.html
 !web/*.js
 !web/signing-key.json
-!web/lib/
-!web/lib/*.js
 !web/tools/
 !web/tools/*.mjs
 !web/worker/

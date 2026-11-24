@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const [splitArg, port = 8787] = process.argv.slice(2);
 const splits = resolve(splitArg);
-const types = { '.html': 'text/html', '.js': 'text/javascript', '.apk': 'application/vnd.android.package-archive' };
+const types = { '.html': 'text/html', '.js': 'text/javascript', '.wasm': 'application/wasm', '.apk': 'application/vnd.android.package-archive' };
 
 createServer((req, res) => {
   const url = new URL(req.url, 'http://x');

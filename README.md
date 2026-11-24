@@ -76,9 +76,10 @@ deploys (`web/tools/bundle-plugins.mjs`).
 | `crates/hook`, `crates/sigs`, `crates/sigscan` | Native hooks, the gateway registry walk, a registry dump CLI. |
 | `crates/ui`, `crates/wire` | Codecs for Phoenix's UI ops and bridge frames. |
 | `crates/patcher` | The command-line patcher. |
+| `crates/patcher-web` | The same patcher built to wasm for the site. |
 | `crates/stand-in*` | A fake Phoenix gateway library for testing hooks without Discord. |
 | `plugins/` | The bundled plugins. |
-| `web/` | The browser patcher, a JS port of `crates/patcher` that gives byte-identical results. `web/tools/node-build.mjs` runs it from the command line. |
+| `web/` | The browser patcher's page, which runs `crates/patcher-web` in a worker. |
 | `frida/` | The Frida gadget bootstrap. |
 
 ## Building

@@ -19,8 +19,8 @@ Read this file before changing code. Every fact here cost someone hours to learn
 - Real accounts. Never send account-mutating requests (friend adds, settings PATCHes, guild
   joins) to test something. Test `phoenix.discord` writes against paths that return 404.
   Never inject fake messages into real channels.
-- Signing. Every APK, from `crates/patcher`, the site or `node-build.mjs`, is signed with
-  `crates/patcher/keys/` (the site carries the same key in `web/signing-key.json`). v3 only, with
+- Signing. Every APK, from the patcher CLI, the site or the in-app updater, is signed with
+  `crates/patcher/keys/` (the updater carries the same key in `web/signing-key.json`). v3 only, with
   the rotation proof from the old Valenced test key, so builds install over each other and keep
   the login. Never add the old private key. Read `keys/README.md` before touching signing.
 - Plugin API lives in Rust. UI ops, patch targets, settings pages, stores and HTTP live in the
@@ -30,7 +30,8 @@ Read this file before changing code. Every fact here cost someone hours to learn
   like `"MESSAGE_CREATE"`. Read lists of events, props and handlers live from the binary. Never
   add a hand-maintained list file.
 - No committed build output. `picker.dex` is built by `crates/runtime/build.rs`,
-  `web/plugins/lib*.so` by `scripts/loader.nu`, plugin bundles by `web/tools/bundle-plugins.mjs`.
+  `web/plugins/lib*.so` and `web/pkg/` by `scripts/site.nu`, plugin bundles by
+  `web/tools/bundle-plugins.mjs`.
   The Frida gadgets in `web/plugins/frida-*` are the one exception, kept for x86 WSA debugging.
 - Test on a device before pushing. A clean build proves nothing about the bridge.
 
@@ -52,13 +53,14 @@ Read this file before changing code. Every fact here cost someone hours to learn
 | `crates/wire` | Tagged values and bridge frames (`HostCall`, `DispatchEvent`). |
 | `crates/hook` | Image scanner, `swap_words`, ShadowHook and bytehook (linked, unused). |
 | `crates/sigs`, `crates/sigscan` | The gateway registry walk and handler ABI, and a CLI that dumps the registry of a library. |
-| `crates/patcher` | Patches the split APKs and signs them. |
+| `crates/patcher` | Patches the split APKs and signs them, as a library with a CLI. One APK merged from the splits or each split signed on its own. |
+| `crates/patcher-web` | `crates/patcher` as wasm for the site, run by `web/patcher.js`. |
 | `crates/stand-in*` | A fake gateway library and a demo, to test hooks without Discord. |
 | `plugins/*/src/index.ts` | Bundled plugins. Leading `// @` lines are the bundle banner and metadata, and `// @warning` shows a warning on the site. |
 | `docs/phoenix-356207.*` | Phoenix's schema pulled from the APK by `scripts/extract-schema.py`: 29 view kinds, 855 props, 79 host modules with 433 methods, 109 events, 286 `ic_mana_*` icons and the accessibility ids. Read it before decompiling. |
-| `web/` | Browser patcher (GitHub Pages). A JS port of `crates/patcher` whose output must match it byte for byte, signature aside. |
+| `web/` | Browser patcher (GitHub Pages). The page UI, with all patching in `crates/patcher-web`. |
 | `frida/` | Optional Frida gadget bootstrap, for debugging on x86. |
-| `scripts/*.nu` | `phoenix.nu` builds, patches and installs on a phone. `loader.nu` builds the site's native libs. |
+| `scripts/*.nu` | `phoenix.nu` builds, patches and installs on a phone. `site.nu` builds the site's native libs and wasm. |
 | `scripts/dev.ps1` | The Windows dev loop, described below. |
 
 ## Building
@@ -80,8 +82,8 @@ Read this file before changing code. Every fact here cost someone hours to learn
     a directory with only `dlltool.exe` (from the toolchain's `self-contained`) and `as.exe` with
     its DLLs on `PATH`.
   - `cargo +stable-x86_64-pc-windows-gnu ndk -t arm64-v8a -P 28 --link-builtins build --release -p phoenix-loader`,
-    then `cargo build --release -p patcher`. The patcher calls `apksigner.bat` on Windows.
-- Site. `nu scripts/loader.nu web/plugins`, `node web/tools/bundle-plugins.mjs` (set `ESBUILD`
+    then `cargo build --release -p patcher`.
+- Site. `nu scripts/site.nu web`, `node web/tools/bundle-plugins.mjs` (set `ESBUILD`
   if esbuild is not on `PATH`), then `node web/tools/dev-server.mjs <dir with the splits> [port]`.
   CI does the same on pushes to `main`.
 
@@ -135,8 +137,6 @@ session. Leave it off outside development.
 - Owners deploy to the same phone while you work. When expected logs vanish, check the pid and the
   startup log to see whose build runs before debugging. Ask before installing over theirs.
 - Never enter passwords. Remove test plugins and files you add.
-- Compare the site against the Rust patcher by unzipping both outputs. Every entry but the
-  signature must match.
 - Git Bash on Windows turns `/word` into a path in adb arguments. Set `MSYS_NO_PATHCONV=1` and
   pass local paths through `cygpath -w`.
 

@@ -3,14 +3,13 @@
 
 use std::ops::Range;
 
-use misstep::{
-   OptionExt,
-   ensure,
-   report,
-};
+use memchr::memmem;
 use object::{
    Endianness,
-   elf::FileHeader64,
+   elf::{
+      self,
+      FileHeader64,
+   },
    read::elf::{
       FileHeader,
       SectionHeader,
@@ -19,6 +18,11 @@ use object::{
 use phoenix_sigs::file::{
    ElfFile,
    Machine,
+};
+
+use crate::{
+   Error,
+   bytes::Bytes,
 };
 
 pub const LIBRARY: &str = "liblibdiscord_wasm_host.so";
@@ -38,18 +42,39 @@ pub struct Patched {
    pub access:  usize,
 }
 
-pub fn patch(path: &str, data: &mut [u8]) -> misstep::Result<Patched> {
-   let (machine, needed, access, access_at) = {
-      let file = ElfFile::parse(path, data)?;
-      let needed = needed_name(data)?;
-      let access = access_evaluator(data, &file)?;
+/// `e_machine` of an ELF64 file, without mapping it.
+pub fn machine(path: &str, data: &[u8]) -> Result<Machine, Error> {
+   let bytes = Bytes(data);
+   if bytes.array::<5>(0).ok() != Some(*b"\x7fELF\x02") {
+      return Err(Error::Host(format!("{path}: not an ELF64 file")));
+   }
+   match bytes.u16(18)? {
+      machine if machine == elf::EM_AARCH64.0 => Ok(Machine::Aarch64),
+      machine if machine == elf::EM_X86_64.0 => Ok(Machine::X86_64),
+      other => {
+         Err(Error::Host(format!(
+            "{path}: unsupported e_machine {other}"
+         )))
+      },
+   }
+}
+
+/// Makes the access evaluator return true and, with `needed`, renames the
+/// host's `DT_NEEDED` `liblog.so` to it.
+pub fn patch(path: &str, data: &mut [u8], needed: Option<&str>) -> Result<Patched, Error> {
+   let (machine, name, access, access_at) = {
+      let file = ElfFile::parse(path, data).map_err(Error::Elf)?;
+      let name = needed.map(|_| needed_name(path, data)).transpose()?;
+      let access = access_evaluator(path, data, &file)?;
       let access_at = file
          .file_offset(access)
-         .context("access evaluator has no file backing")?;
-      (file.machine, needed, access, access_at)
+         .ok_or_else(|| Error::Host(format!("{path}: access evaluator has no file backing")))?;
+      (file.machine, name, access, access_at)
    };
 
-   data[needed..needed + INJECTED.len()].copy_from_slice(INJECTED.as_bytes());
+   if let (Some(at), Some(needed)) = (name, needed) {
+      data[at..at + needed.len()].copy_from_slice(needed.as_bytes());
+   }
    // Returns Some(true), an Option<bool> in the low byte of the return
    // register.
    let return_true: &[u8] = match machine {
@@ -60,23 +85,37 @@ pub fn patch(path: &str, data: &mut [u8]) -> misstep::Result<Patched> {
    Ok(Patched { machine, access })
 }
 
+/// Renames a library's `DT_NEEDED` `liblog.so` to `needed`, the same length.
+pub fn rename_needed(path: &str, data: &mut [u8], needed: &str) -> Result<(), Error> {
+   if needed.len() != REPLACED.len() {
+      return Err(Error::Host(format!(
+         "{needed} must be as long as {REPLACED}"
+      )));
+   }
+   let at = needed_name(path, data)?;
+   data[at..at + needed.len()].copy_from_slice(needed.as_bytes());
+   Ok(())
+}
+
 /// File offset of the `liblog.so` string a `DT_NEEDED` entry names.
-fn needed_name(data: &[u8]) -> misstep::Result<usize> {
+fn needed_name(path: &str, data: &[u8]) -> Result<usize, Error> {
    const DT_NEEDED: u64 = 1;
 
-   let header = FileHeader64::<Endianness>::parse(data)?;
-   let endian = header.endian()?;
-   let sections = header.sections(endian, data)?;
-   let range = |name: &[u8]| -> misstep::Result<Range<usize>> {
-      let (_, section) = sections
-         .section_by_name(endian, name)
-         .ok_or_else(|| report!("no {} section", String::from_utf8_lossy(name)))?;
-      let start = usize::try_from(section.sh_offset(endian))?;
-      Ok(start..start + usize::try_from(section.sh_size(endian))?)
+   let parse = |source: object::Error| Error::Host(format!("{path}: {source}"));
+   let header = FileHeader64::<Endianness>::parse(data).map_err(parse)?;
+   let endian = header.endian().map_err(parse)?;
+   let sections = header.sections(endian, data).map_err(parse)?;
+   let range = |name: &[u8]| -> Result<Range<usize>, Error> {
+      let (_, section) = sections.section_by_name(endian, name).ok_or_else(|| {
+         Error::Host(format!(
+            "{path}: no {} section",
+            String::from_utf8_lossy(name)
+         ))
+      })?;
+      let start = usize::try_from(section.sh_offset(endian)).map_err(|_| Error::Truncated)?;
+      Ok(start..start + usize::try_from(section.sh_size(endian)).map_err(|_| Error::Truncated)?)
    };
-   let dynamic = data
-      .get(range(b".dynamic")?)
-      .context(".dynamic outside the file")?;
+   let dynamic = Bytes(data).slice(range(b".dynamic")?)?;
    let strings = range(b".dynstr")?;
 
    let hits = dynamic
@@ -100,27 +139,42 @@ fn needed_name(data: &[u8]) -> misstep::Result<usize> {
    match hits[..] {
       [at] => Ok(at),
       _ => {
-         Err(report!(
-            "expected one DT_NEEDED {REPLACED}, found {}",
+         Err(Error::Host(format!(
+            "{path}: expected one DT_NEEDED {REPLACED}, found {}",
             hits.len()
-         ))
+         )))
       },
    }
 }
 
-fn access_evaluator(data: &[u8], file: &ElfFile<'_>) -> misstep::Result<usize> {
+fn access_evaluator(path: &str, data: &[u8], file: &ElfFile<'_>) -> Result<usize, Error> {
    let image = &file.image;
-   let text = text_range(data)?;
+   let text = text_range(path, data)?;
+   // The host's pointers are 8 bytes whatever this build's usize is, since the
+   // site runs this as wasm32.
+   let read_u64 = |at: usize| Some(u64::from_le_bytes(image.read(at, 8)?.try_into().ok()?));
    let slots = image
       .find_bytes(EXPERIMENT.as_bytes())
       .into_iter()
-      .flat_map(|string| image.pointers_to(string))
-      .filter(|slot| image.read_usize(slot + size_of::<usize>()) == Some(EXPERIMENT.len()))
+      .flat_map(|string| {
+         let target = (string as u64).to_le_bytes();
+         image
+            .segments
+            .iter()
+            .filter(|segment| !segment.executable)
+            .flat_map(|segment| {
+               memmem::find_iter(&segment.bytes, &target)
+                  .map(|at| segment.addr + at)
+                  .collect::<Vec<usize>>()
+            })
+            .collect::<Vec<usize>>()
+      })
+      .filter(|slot| slot % 8 == 0 && read_u64(slot + 8) == Some(EXPERIMENT.len() as u64))
       .collect::<Vec<usize>>();
 
    let code = image
       .read(text.start, text.len())
-      .context(".text outside every segment")?;
+      .ok_or_else(|| Error::Host(format!("{path}: .text outside every segment")))?;
 
    let mut functions = references(file.machine, text.start, code)
       .filter(|(_, target)| slots.contains(target))
@@ -128,22 +182,28 @@ fn access_evaluator(data: &[u8], file: &ElfFile<'_>) -> misstep::Result<usize> {
       .collect::<Vec<usize>>();
    functions.sort_unstable();
    functions.dedup();
-   ensure!(
-      functions.len() == 1,
-      "access evaluator: expected one function referencing {EXPERIMENT}, found {functions:x?}"
-   );
-   Ok(functions[0])
+   match functions[..] {
+      [function] => Ok(function),
+      _ => {
+         Err(Error::Host(format!(
+            "{path}: access evaluator: expected one function referencing {EXPERIMENT}, found \
+             {functions:x?}"
+         )))
+      },
+   }
 }
 
-fn text_range(data: &[u8]) -> misstep::Result<Range<usize>> {
-   let header = FileHeader64::<Endianness>::parse(data)?;
-   let endian = header.endian()?;
+fn text_range(path: &str, data: &[u8]) -> Result<Range<usize>, Error> {
+   let parse = |source: object::Error| Error::Host(format!("{path}: {source}"));
+   let header = FileHeader64::<Endianness>::parse(data).map_err(parse)?;
+   let endian = header.endian().map_err(parse)?;
    let (_, text) = header
-      .sections(endian, data)?
+      .sections(endian, data)
+      .map_err(parse)?
       .section_by_name(endian, b".text")
-      .context("no .text section")?;
-   let start = usize::try_from(text.sh_addr(endian))?;
-   Ok(start..start + usize::try_from(text.sh_size(endian))?)
+      .ok_or_else(|| Error::Host(format!("{path}: no .text section")))?;
+   let start = usize::try_from(text.sh_addr(endian)).map_err(|_| Error::Truncated)?;
+   Ok(start..start + usize::try_from(text.sh_size(endian)).map_err(|_| Error::Truncated)?)
 }
 
 /// `(instruction, target)` for every PC-relative address the code forms. On

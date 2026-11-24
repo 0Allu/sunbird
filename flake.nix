@@ -54,6 +54,7 @@
               latest.rustfmt
               targets.aarch64-linux-android.latest.rust-std
               targets.x86_64-linux-android.latest.rust-std
+              targets.wasm32-unknown-unknown.latest.rust-std
             ];
         in
         {
@@ -67,6 +68,7 @@
               pkgs.nushell
               pkgs.rust-analyzer
               pkgs.typescript
+              pkgs.wasm-bindgen-cli
             ];
 
             ANDROID_SDK_ROOT = android.sdkRoot;

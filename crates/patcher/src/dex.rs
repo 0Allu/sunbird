@@ -2,35 +2,34 @@
 //! Native client is found by its log string, since names are obfuscated per
 //! build, and made to return true.
 
-use misstep::{
-   OptionExt,
-   ensure,
-   report,
+use crate::{
+   Error,
+   bytes::Bytes,
 };
 
 const ANCHOR: &[u8] = b"Phoenix didn't stay up for 3 launches";
 /// `const/4 v0, #1` then `return v0`.
 const RETURN_TRUE: [u8; 4] = [0x12, 0x10, 0x0F, 0x00];
 
-struct Dex<'a>(&'a [u8]);
+struct Dex<'a>(Bytes<'a>);
 
 impl Dex<'_> {
-   fn u16(&self, at: usize) -> misstep::Result<u16> {
-      let bytes = self.0.get(at..at + 2).context("dex truncated")?;
-      Ok(u16::from_le_bytes(bytes.try_into()?))
+   fn u16(&self, at: usize) -> Result<u16, Error> {
+      self.0.u16(at)
    }
 
-   fn u32(&self, at: usize) -> misstep::Result<usize> {
-      let bytes = self.0.get(at..at + 4).context("dex truncated")?;
-      Ok(usize::try_from(u32::from_le_bytes(bytes.try_into()?))?)
+   fn u32(&self, at: usize) -> Result<usize, Error> {
+      Ok(self.0.u32(at)? as usize)
    }
 
-   fn uleb(&self, at: &mut usize) -> misstep::Result<usize> {
+   fn uleb(&self, at: &mut usize) -> Result<usize, Error> {
       let (mut value, mut shift) = (0usize, 0);
       loop {
-         let byte = *self.0.get(*at).context("dex truncated")?;
+         let byte = self.0.u8(*at)?;
          *at += 1;
-         ensure!(shift < 35, "uleb128 overflow");
+         if shift >= 35 {
+            return Err(Error::Dex("uleb128 overflow".into()));
+         }
          value |= usize::from(byte & 0x7F) << shift;
          shift += 7;
          if byte & 0x80 == 0 {
@@ -40,22 +39,25 @@ impl Dex<'_> {
    }
 
    /// MUTF-8 bytes of string `index`, without the terminator.
-   fn string(&self, ids: usize, index: usize) -> misstep::Result<&[u8]> {
+   fn string(&self, ids: usize, index: usize) -> Result<&[u8], Error> {
       let mut at = self.u32(ids + 4 * index)?;
       self.uleb(&mut at)?;
-      let rest = self.0.get(at..).context("dex truncated")?;
+      let rest = self.0.0.get(at..).ok_or(Error::Truncated)?;
       let end = rest
          .iter()
          .position(|&byte| byte == 0)
-         .context("unterminated dex string")?;
+         .ok_or_else(|| Error::Dex("unterminated string".into()))?;
       Ok(&rest[..end])
    }
 }
 
 /// Patches the launcher method in place and returns its code offset, or `None`
 /// when this dex does not hold the anchor string.
-pub fn patch(data: &mut [u8]) -> misstep::Result<Option<usize>> {
-   let dex = Dex(data);
+pub fn patch(data: &mut [u8]) -> Result<Option<usize>, Error> {
+   if data.len() < 0x70 {
+      return Err(Error::Truncated);
+   }
+   let dex = Dex(Bytes(data));
    let header = |field: usize| dex.u32(0x38 + 4 * field);
    let (string_count, strings, proto_ids) = (header(0)?, header(1)?, header(5)?);
    let (method_ids, class_count, class_defs) = (header(9)?, header(10)?, header(11)?);
@@ -115,19 +117,23 @@ pub fn patch(data: &mut [u8]) -> misstep::Result<Option<usize>> {
    hits.sort_unstable();
    hits.dedup();
    let [(method, registers, insns)] = hits[..] else {
-      return Err(report!(
+      return Err(Error::Dex(format!(
          "launcher anchor: expected one method, found {}",
          hits.len()
-      ));
+      )));
    };
 
    let proto = usize::from(dex.u16(method_ids + 8 * method + 2)?);
    let shorty = dex.string(strings, dex.u32(proto_ids + 12 * proto)?)?;
-   ensure!(
-      shorty.starts_with(b"Z") && registers >= 1,
-      "launcher method has shorty {}, {registers} registers",
-      String::from_utf8_lossy(shorty)
-   );
+   if !shorty.starts_with(b"Z") || registers < 1 {
+      return Err(Error::Dex(format!(
+         "launcher method has shorty {}, {registers} registers",
+         String::from_utf8_lossy(shorty)
+      )));
+   }
+   if data.len() < insns + RETURN_TRUE.len() {
+      return Err(Error::Truncated);
+   }
 
    data[insns..insns + RETURN_TRUE.len()].copy_from_slice(&RETURN_TRUE);
    let signature = sha1_smol::Sha1::from(&data[32..]).digest().bytes();

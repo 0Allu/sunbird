@@ -1,14 +1,14 @@
 import { PROXY as DEFAULT_PROXY, VERIFIED } from './config.js';
-import { ABIS, abiOf, buildPatchedApk } from './lib/apk.js';
-import { BOOTSTRAP_URL, bundleScripts, GADGET_URLS, gunzip } from './lib/frida.js';
-import { keysFrom } from './lib/sign.js';
-import { readZip } from './lib/zip.js';
 
 const TRACKER = 'https://tracker.vendetta.rocks';
 const PROXY = (new URLSearchParams(location.search).get('proxy') ?? DEFAULT_PROXY).replace(/\/$/, '');
 const DENSITIES = [['ldpi', 120], ['mdpi', 160], ['hdpi', 240], ['xhdpi', 320], ['xxhdpi', 480], ['xxxhdpi', 640]];
 const LANGS = ['en', 'ar', 'bg', 'cs', 'da', 'de', 'el', 'es', 'fi', 'fr', 'hi', 'hr', 'hu', 'id', 'it', 'ja', 'ko', 'lt', 'nl', 'no', 'pl', 'pt', 'ro', 'ru', 'sv', 'th', 'tr', 'uk', 'vi', 'zh'];
-const ABI = 'arm64-v8a'; // the only ABI with a loader build (web/plugins)
+// The only ABI with a loader build (scripts/site.nu): its split and the libraries the plugin runtime adds,
+// the loader first under its name in the APK.
+const ABI = { split: 'config.arm64_v8a', libs: { 'libplm.so': 'plugins/libphoenix-arm64.so', 'libshadowhook_nothing.so': 'plugins/libshadowhook_nothing-arm64.so' } };
+const GADGET_URL = 'plugins/frida-gadget-17.27.4-android-arm64.so.gz';
+const BOOTSTRAP_URL = 'plugins/frida-bootstrap.js';
 const $ = (id) => document.getElementById(id);
 
 // --- setup ------------------------------------------------------------------------------
@@ -25,7 +25,6 @@ function setVersions(latest) {
 setVersions();
 fetch(`${TRACKER}/tracker/index`).then((r) => r.json()).then((j) => setVersions(j.latest?.alpha)).catch(() => {});
 
-// --- fixed keys for every build (the patcher's, see lib/sign.js), so each patched APK installs as an update ---
 async function fetchOk(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
@@ -73,19 +72,32 @@ async function download(vc, split, optional) {
 
 function splitNames() {
   const lang = $('lang').value;
-  return { abi: ABIS[ABI].split, density: `config.${$('dpi').value}`, lang: lang === 'none' ? null : `config.${lang}` };
+  return { abi: ABI.split, density: `config.${$('dpi').value}`, lang: lang === 'none' ? null : `config.${lang}` };
 }
 
-async function patchAndOffer(vc, base, abi, configs) {
+// Splits of any kind, told apart by the patcher. Their buffers move to the worker.
+function patch(apks, libraries, plugins, frida, packageName, label) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker('patcher.js', { type: 'module' });
+    worker.onmessage = ({ data }) => {
+      if (data.log) return log(data.log);
+      worker.terminate();
+      data.error ? reject(new Error(data.error)) : resolve(data.apk);
+    };
+    worker.onerror = (e) => { worker.terminate(); reject(new Error(e.message)); };
+    const buffers = [...apks, ...libraries.map((l) => l.bytes), ...(frida ? [frida.gadget] : [])].map((b) => b.buffer);
+    worker.postMessage({ apks, libraries, plugins, frida, packageName, label }, buffers);
+  });
+}
+
+async function patchAndOffer(vc, apks) {
   const plugins = await pluginInput();
   const frida = $('frida-on').checked ? await fridaInput() : null;
   const s = step('Patch and sign');
   s.progress(0.5, 'working…');
   const packageName = chosenPackage(), side = packageName !== 'com.discord';
-  const libraries = !plugins ? [] : await Promise.all(Object.entries(ABIS[ABI].libs).map(async ([name, url]) => ({ name, bytes: await fetchBytes(url) })));
-  const keys = keysFrom(await (await fetchOk('signing-key.json')).json());
-  const parts = await buildPatchedApk({ base, abi, configs, keys, libraries, plugins, frida, packageName, label: side ? 'Discord Phoenix' : null, log });
-  const blob = new Blob(parts, { type: 'application/vnd.android.package-archive' });
+  const libraries = !plugins ? [] : await Promise.all(Object.entries(ABI.libs).map(async ([name, url]) => ({ name, bytes: await fetchBytes(url) })));
+  const blob = await patch(apks, libraries, plugins, frida, packageName, side ? 'Discord Phoenix' : undefined);
   s.done(mb(blob.size));
   $('note-side').hidden = !side; $('note-replace').hidden = side;
   const a = $('dl');
@@ -145,21 +157,25 @@ async function pluginInput() {
   return plugins;
 }
 
-// Frida: Frida scripts from picked files and the editor (prefilled with the example), bundled into one script
+// Frida: Frida scripts from picked files and the editor (prefilled with the example), run by the bootstrap
 ($('frida-on').onchange = () => { $('frida').hidden = !$('frida-on').checked; })();
 fetch('plugins/frida-example.js').then((r) => r.text()).then((t) => { if (!$('frida-code').value) $('frida-code').value = t; }).catch(() => {});
 async function fridaInput() {
   const scripts = await Promise.all([...$('frida-files').files].map(async (f) => ({ name: f.name, code: await f.text() })));
   const code = $('frida-code').value.trim();
   if (code) scripts.push({ name: 'editor.js', code });
-  const script = bundleScripts(scripts, await (await fetchOk(BOOTSTRAP_URL)).text());
+  // a typo fails the build here instead of showing up only in the app's console
+  for (const { name, code } of scripts) {
+    try { new Function(code); } catch (e) { throw new Error(`${name}: ${e.message}`); }
+  }
+  const bootstrap = await (await fetchOk(BOOTSTRAP_URL)).text();
   const s = step('Download frida-gadget');
-  const res = await fetch(GADGET_URLS[ABI]);
+  const res = await fetch(GADGET_URL);
   if (!res.ok) { s.fail(`HTTP ${res.status}`); throw new Error(`frida-gadget: HTTP ${res.status}`); }
-  const gadget = await gunzip(new Uint8Array(await res.arrayBuffer()));
+  const gadget = new Uint8Array(await res.arrayBuffer());
   s.done(mb(gadget.length));
   log(`Frida: ${scripts.map((x) => x.name).join(', ')}`);
-  return { gadget, script };
+  return { gadget, bootstrap, scripts };
 }
 
 // --- package name: "Replace" keeps com.discord, "Next to" uses the editable name ---------
@@ -189,7 +205,7 @@ $('go').onclick = async () => {
     const base = await download(vc, 'base');
     const abi = await download(vc, n.abi);
     const configs = [await downloadDensity(vc), n.lang && (await download(vc, n.lang, true))].filter(Boolean);
-    await patchAndOffer(vc, base, abi, configs);
+    await patchAndOffer(vc, [base, abi, ...configs]);
     $('go').disabled = false;
   } catch (e) {
     if (e instanceof TypeError) { log(`download blocked (${e.message}); switching to manual mode`); return showManual(vc); }
@@ -197,7 +213,7 @@ $('go').onclick = async () => {
   }
 };
 
-// --- manual mode: user downloads the splits, we tell them apart by content ---------------
+// --- manual mode: user downloads the splits, the patcher tells them apart by content -----
 function showManual(vc) {
   const n = splitNames();
   $('links').innerHTML = ['base', n.abi, n.density, n.lang].filter(Boolean)
@@ -205,17 +221,8 @@ function showManual(vc) {
   $('manual').hidden = false;
   $('files').onchange = async (ev) => {
     try {
-      const found = { configs: [] };
-      for (const f of ev.target.files) {
-        const u8 = new Uint8Array(await f.arrayBuffer());
-        const entries = readZip(u8), names = entries.map((e) => e.name), abi = abiOf(entries);
-        if (names.includes('classes.dex')) found.base = u8;
-        else if (abi) found.abi = u8;
-        else if (names.includes('resources.arsc')) found.configs.push(u8);
-        log(`${f.name}: ${names.includes('classes.dex') ? 'base' : abi ? `native libs (${abi})` : names.some((x) => x.startsWith('lib/')) ? 'native libs (unsupported CPU, ignored)' : 'config split'}`);
-      }
-      if (!found.base || !found.abi) throw new Error('need at least base and config.arm64_v8a');
-      await patchAndOffer(vc, found.base, found.abi, found.configs);
+      const apks = await Promise.all([...ev.target.files].map(async (f) => new Uint8Array(await f.arrayBuffer())));
+      await patchAndOffer(vc, apks);
       $('go').disabled = false;
     } catch (e) { fail(e); }
   };

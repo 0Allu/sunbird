@@ -3,6 +3,7 @@ members  = [
   "crates/hook",
   "crates/loader",
   "crates/patcher",
+  "crates/patcher-web",
   "crates/runtime",
   "crates/sigs",
   "crates/sigscan",
@@ -63,3 +64,8 @@ codegen-units = 16
 lto           = false
 opt-level     = 1
 strip         = "debuginfo"
+
+# wasm-bindgen reads the target_features section that strip removes.
+[profile.wasm]
+inherits = "release"
+strip    = false
