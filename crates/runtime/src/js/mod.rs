@@ -6,6 +6,7 @@ mod http;
 mod intercept;
 mod messages;
 #[cfg(target_os = "android")] mod mount;
+#[cfg(all(windows, target_arch = "x86_64"))] pub mod native;
 #[cfg(target_os = "android")] mod page;
 mod settings;
 mod storage;
@@ -524,7 +525,10 @@ impl Engine {
       let result = self.context.with(|ctx| {
          let run = || -> rquickjs::Result<String> {
             if !ctx.globals().contains_key("phoenix")? {
-               ctx.globals().set("phoenix", api(&ctx, "console")?)?;
+               let phoenix = api(&ctx, "console")?;
+               #[cfg(all(windows, target_arch = "x86_64"))]
+               phoenix.set("native", native::object(&ctx)?)?;
+               ctx.globals().set("phoenix", phoenix)?;
             }
             let result = ctx.eval::<Value<'_>, _>(code)?;
             if let Some(text) = result.as_string() {

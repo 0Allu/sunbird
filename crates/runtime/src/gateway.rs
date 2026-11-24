@@ -305,6 +305,10 @@ unsafe extern "C" fn detour(
       log::error!("gateway event without a registry entry, dropped");
       return HandlerResult::OK;
    };
+   crate::remote::record(&crate::remote::Trace::Gateway {
+      event: name,
+      bytes: data.map_or(0, str::len),
+   });
    let original = gateway.originals[id.index()];
    // SAFETY: forwarded to the registry's own handler unchanged or with
    // replaced data.

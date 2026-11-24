@@ -24,7 +24,6 @@ use std::{
    thread,
    time::Duration,
 };
-#[cfg(target_os = "android")]
 use std::{
    collections::VecDeque,
    sync::{
@@ -44,7 +43,7 @@ use serde::{
    Deserialize,
    Serialize,
 };
-#[cfg(target_os = "android")] use serde_json::value::RawValue;
+use serde_json::value::RawValue;
 
 use crate::{
    Chosen,
@@ -62,7 +61,7 @@ use crate::{
 pub const ADDR: &str = "127.0.0.1:4242";
 const MAX_BODY: usize = 4 << 20;
 #[cfg(target_os = "android")] const MAX_OPS_LOG: usize = 64;
-#[cfg(target_os = "android")] const MAX_EVENTS_LOG: usize = 128;
+const MAX_EVENTS_LOG: usize = 256;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static RUNNING: AtomicBool = AtomicBool::new(false);
@@ -70,23 +69,38 @@ static BOUND_ADDR: OnceLock<String> = OnceLock::new();
 #[cfg(target_os = "android")]
 static OPS_LOG: LazyLock<Mutex<VecDeque<Box<RawValue>>>> =
    LazyLock::new(|| Mutex::new(VecDeque::with_capacity(MAX_OPS_LOG)));
-#[cfg(target_os = "android")]
 static EVENTS_LOG: LazyLock<Mutex<VecDeque<Box<RawValue>>>> =
    LazyLock::new(|| Mutex::new(VecDeque::with_capacity(MAX_EVENTS_LOG)));
 
-/// A view or host event for the debug ring buffer. Never put HTTP headers or
-/// credentials in one.
-#[cfg(target_os = "android")]
+/// An event for the debug ring buffer. Never put HTTP headers, bodies,
+/// message content or credentials in one.
 #[derive(Serialize)]
 #[serde(tag = "source", rename_all = "camelCase")]
 pub enum Trace<'a> {
+   /// A gateway event, by name and payload size.
+   Gateway {
+      event: &'a str,
+      bytes: usize,
+   },
+   /// One of Discord's own API requests.
+   Http {
+      method: &'a str,
+      path:   &'a str,
+      bytes:  usize,
+   },
+   /// A call into a function `phoenix.native.hook` observes.
+   #[cfg(all(windows, target_arch = "x86_64"))]
+   Native(Box<crate::js::native::Hit>),
+   #[cfg(target_os = "android")]
    HostCall {
       module: u16,
       method: u16,
    },
+   #[cfg(target_os = "android")]
    HostEvent {
       event: u16,
    },
+   #[cfg(target_os = "android")]
    View {
       node:    i32,
       event:   Prop,
@@ -117,14 +131,12 @@ pub fn record_ops(ops: &[Op]) {
 
 /// Records `trace` into the debug ring buffer when the remote debug shell is
 /// enabled.
-#[cfg(target_os = "android")]
 pub fn record(trace: &Trace<'_>) {
    if enabled() {
       push(&EVENTS_LOG, MAX_EVENTS_LOG, trace);
    }
 }
 
-#[cfg(target_os = "android")]
 fn push(log: &Mutex<VecDeque<Box<RawValue>>>, max: usize, entry: &impl Serialize) {
    let entry = match serde_json::value::to_raw_value(entry) {
       Ok(entry) => entry,
@@ -382,7 +394,6 @@ fn percent_decode(raw: &str) -> String {
 
 /// The percent-decoded value of `key`, as `encodeURIComponent` or a form wrote
 /// it.
-#[cfg(target_os = "android")]
 fn query_param(query: &str, key: &str) -> Option<String> {
    let (_, raw) = query
       .split('&')
@@ -394,10 +405,8 @@ fn query_param(query: &str, key: &str) -> Option<String> {
 fn dispatch(req: &HttpRequest) -> (&'static str, &'static str, Vec<u8>) {
    let method = req.method.as_str();
    let path = req.path.as_str();
-   #[cfg(target_os = "android")]
    let query = req.query.as_str();
    let body = req.body.as_slice();
-   let _ = &req.query;
 
    match (method, path) {
       #[cfg(not(target_os = "android"))]
@@ -463,10 +472,9 @@ fn dispatch(req: &HttpRequest) -> (&'static str, &'static str, Vec<u8>) {
       },
       #[cfg(target_os = "android")]
       ("GET", "/ops") => recent(&OPS_LOG, query, 20),
-      #[cfg(target_os = "android")]
       ("GET", "/events") => recent(&EVENTS_LOG, query, 50),
-      #[cfg(target_os = "android")]
       ("POST", "/clear") => {
+         #[cfg(target_os = "android")]
          OPS_LOG
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -641,7 +649,6 @@ impl<'a> From<&'a PluginInfo> for PluginJson<'a> {
 #[derive(Serialize)]
 #[serde(rename_all = "lowercase")]
 enum Done<'a> {
-   #[cfg(target_os = "android")]
    Cleared,
    Started,
    Staff(bool),
@@ -656,7 +663,6 @@ enum Done<'a> {
 
 /// The newest entries of `log`, filtered by the `match` and `limit` query
 /// parameters.
-#[cfg(target_os = "android")]
 fn recent(
    log: &Mutex<VecDeque<Box<RawValue>>>,
    query: &str,

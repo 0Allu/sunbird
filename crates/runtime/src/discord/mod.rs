@@ -201,6 +201,12 @@ pub(super) fn observe_request(
    let Some(path) = api_path(url) else {
       return RequestAction::Pass;
    };
+   // The query can hold search terms, so the trace keeps the path only.
+   crate::remote::record(&crate::remote::Trace::Http {
+      method,
+      path: path.split('?').next().unwrap_or(path),
+      bytes: body.len(),
+   });
    let matched = matching_request_hooks(method, path);
    if matched.is_empty() {
       return RequestAction::Pass;
