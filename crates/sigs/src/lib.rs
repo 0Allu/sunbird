@@ -50,13 +50,22 @@ pub struct GatewayEvent {
    pub rest: [u64; REST_WORDS],
 }
 
-/// The Rust `Result` a handler returns through a hidden pointer, 32 bytes on
-/// the 64-bit targets and 16 on armeabi-v7a, where the error half is pointer
-/// sized. The `Ok` niche is `u64::MAX` in the first word on every target.
-#[cfg(not(target_arch = "arm"))]
+/// The Rust `Result` a handler returns through a hidden pointer:
+/// - 96 bytes (12 words) on Windows Desktop (`Discord.exe`), with `Ok` niche
+///   `u64::MAX - 1` (`0xffff_ffff_ffff_fffe`)
+/// - 32 bytes (4 words) on 64-bit Unix / Android, with `Ok` niche `u64::MAX`
+/// - 16 bytes (2 words) on armeabi-v7a, with `Ok` niche `u64::MAX`
+#[cfg(target_os = "windows")]
+pub const RESULT_WORDS: usize = 12;
+#[cfg(all(not(target_os = "windows"), not(target_arch = "arm")))]
 pub const RESULT_WORDS: usize = 4;
 #[cfg(target_arch = "arm")]
 pub const RESULT_WORDS: usize = 2;
+
+#[cfg(target_os = "windows")]
+const OK_TAG: u64 = u64::MAX - 1;
+#[cfg(not(target_os = "windows"))]
+const OK_TAG: u64 = u64::MAX;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -65,16 +74,39 @@ pub struct HandlerResult(pub [u64; RESULT_WORDS]);
 impl HandlerResult {
    pub const OK: Self = {
       let mut words = [0; RESULT_WORDS];
-      words[0] = u64::MAX;
+      words[0] = OK_TAG;
       Self(words)
    };
 
    #[must_use]
    pub const fn is_ok(&self) -> bool {
-      self.0[0] == u64::MAX
+      self.0[0] == OK_TAG
    }
 }
 
 /// A gateway registry handler, `handler(store, event, ctx)`.
 pub type GatewayHandler =
    unsafe extern "C" fn(*mut c_void, *const GatewayEvent, *mut c_void) -> HandlerResult;
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[test]
+   fn handler_result_abi_matches_target() {
+      assert!(HandlerResult::OK.is_ok());
+      let mut err = HandlerResult::OK;
+      err.0[0] = 0;
+      assert!(!err.is_ok());
+      #[cfg(target_os = "windows")]
+      {
+         assert_eq!(size_of::<HandlerResult>(), 96);
+         assert_eq!(HandlerResult::OK.0[0], 0xffff_ffff_ffff_fffe);
+      }
+      #[cfg(all(not(target_os = "windows"), not(target_arch = "arm")))]
+      {
+         assert_eq!(size_of::<HandlerResult>(), 32);
+         assert_eq!(HandlerResult::OK.0[0], u64::MAX);
+      }
+   }
+}
