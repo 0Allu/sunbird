@@ -54,7 +54,8 @@ static MARKER: &str = concat!("phoenix-version:", env!("PHOENIX_VERSION"), ";");
 
 /// Where the signed update waits for Android's installer, under the app's
 /// `files` directory, which Discord's `FileProvider` shares.
-#[cfg(target_os = "android")] const UPDATE_APK: &str = "phoenix-update.apk";
+#[cfg(target_os = "android")]
+const UPDATE_APK: &str = "phoenix-update.apk";
 
 #[cfg(target_os = "android")]
 const LOADER_ASSET: &str = if cfg!(target_arch = "x86_64") {
@@ -173,47 +174,52 @@ pub fn install_listed(name: &str) -> Result<String, crate::Error> {
    crate::install(&format!("{ASSETS}plugins/{name}.js"))
 }
 
+/// Asks the site what this install lacks, and remembers it for [`found`].
+/// `None` means up to date.
+fn query() -> Result<Option<Update>, String> {
+   let body = crate::fetch::get(&format!("{ASSETS}version.json")).map_err(|err| err.to_string())?;
+   let site =
+      serde_json::from_slice::<Site>(&body).map_err(|err| format!("version.json: {err}"))?;
+   let loader = (site.loader.as_str() > VERSION).then_some(site.loader);
+   // Plugins come along with a loader update, so one tap brings both.
+   let mut plugins = Vec::new();
+   let mut plugin_crcs = BTreeMap::new();
+   for plugin in crate::plugins() {
+      if let Some(&crc) = site.plugins.get(&plugin.name)
+         && crate::source(&plugin.name)
+            .is_some_and(|source| crc32fast::hash(source.as_bytes()) != crc)
+      {
+         plugin_crcs.insert(plugin.name.clone(), crc);
+         plugins.push(plugin.name);
+      }
+   }
+   let update = (loader.is_some() || !plugins.is_empty()).then_some(Update {
+      loader,
+      plugins,
+      plugin_crcs,
+   });
+   FOUND
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .clone_from(&update);
+   crate::refresh_settings();
+   Ok(update)
+}
+
 /// Asks the site in the background. Failures (offline) are only logged.
 pub fn check() {
    thread::spawn(|| {
-      let site = match crate::fetch::get(&format!("{ASSETS}version.json")) {
-         Ok(body) => serde_json::from_slice::<Site>(&body),
+      let update = match query() {
+         Ok(Some(update)) => update,
+         Ok(None) => {
+            log::info!("up to date ({VERSION})");
+            return;
+         },
          Err(err) => {
             log::info!("update check: {err}");
             return;
          },
       };
-      let site = match site {
-         Ok(site) => site,
-         Err(err) => {
-            log::info!("update check: version.json: {err}");
-            return;
-         },
-      };
-      let loader = (site.loader.as_str() > VERSION).then_some(site.loader);
-      // Plugins come along with a loader update, so one tap brings both.
-      let mut plugins = Vec::new();
-      let mut plugin_crcs = BTreeMap::new();
-      for plugin in crate::plugins() {
-         if let Some(&crc) = site.plugins.get(&plugin.name)
-            && crate::source(&plugin.name)
-               .is_some_and(|source| crc32fast::hash(source.as_bytes()) != crc)
-         {
-            plugin_crcs.insert(plugin.name.clone(), crc);
-            plugins.push(plugin.name);
-         }
-      }
-      let update = Update {
-         loader,
-         plugins,
-         plugin_crcs,
-      };
-      if update.loader.is_none() && update.plugins.is_empty() {
-         log::info!("up to date ({VERSION})");
-         *FOUND.lock().unwrap_or_else(PoisonError::into_inner) = None;
-         crate::refresh_settings();
-         return;
-      }
       log::info!(
          "update available: loader {:?}, plugins {:?}",
          update.loader,
@@ -241,8 +247,6 @@ pub fn check() {
             }
          },
       };
-      *FOUND.lock().unwrap_or_else(PoisonError::into_inner) = Some(update);
-      crate::refresh_settings();
       #[cfg(target_os = "android")]
       crate::patches::banners::show_banner(
          "Phoenix Unlock update available".to_owned(),
@@ -257,21 +261,29 @@ pub fn check() {
    });
 }
 
-/// Applies the pending update found by [`check`].
+/// Checks the site again and applies what this install lacks.
 ///
 /// Updates changed plugins over-the-air first (hot-reloading them live), then
 /// runs the in-app APK self-updater if a newer loader is available.
 pub fn apply() {
-   let Some(update) = found() else {
-      log::info!("update apply: no pending update");
-      return;
-   };
    if BUSY.swap(true, Ordering::AcqRel) {
       log::info!("update apply: already running");
       crate::toast_user("Update already in progress...");
       return;
    }
-   thread::spawn(move || {
+   thread::spawn(|| {
+      // The last check ran when Discord started, and the site may have shipped
+      // since, so what it found can be out of date by the time this runs.
+      let update = query().unwrap_or_else(|err| {
+         log::info!("update apply: {err}, using the last check");
+         found()
+      });
+      let Some(update) = update else {
+         log::info!("update apply: up to date ({VERSION})");
+         BUSY.store(false, Ordering::Release);
+         crate::toast_user("Phoenix Unlock is up to date");
+         return;
+      };
       // The site's plugins are built against its loader and can call API this
       // one lacks, so with a loader update they wait in `plugins.next/` for it.
       #[cfg(target_os = "android")]
@@ -382,8 +394,10 @@ fn download_plugin(name: &str, expected_crc: Option<u32>) -> Result<String, Stri
 
 /// Where plugins for a loader not installed yet wait, with that loader's
 /// version in [`STAGED_FOR`].
-#[cfg(target_os = "android")] const STAGED: &str = "plugins.next";
-#[cfg(target_os = "android")] const STAGED_FOR: &str = "loader";
+#[cfg(target_os = "android")]
+const STAGED: &str = "plugins.next";
+#[cfg(target_os = "android")]
+const STAGED_FOR: &str = "loader";
 
 /// Downloads `update`'s plugins into [`STAGED`] for loader `version`. One that
 /// fails stays as it is, and the next check offers it again.
@@ -399,8 +413,8 @@ fn stage_plugins(version: &str, update: &Update) {
       return;
    }
    for name in &update.plugins {
-      let staged = download_plugin(name, update.plugin_crcs.get(name).copied())
-         .and_then(|source| {
+      let staged =
+         download_plugin(name, update.plugin_crcs.get(name).copied()).and_then(|source| {
             fs::write(dir.join(format!("{name}.js")), source).map_err(|err| err.to_string())
          });
       match staged {
