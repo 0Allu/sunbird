@@ -495,6 +495,7 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    }
    #[cfg(not(target_os = "android"))]
    {
+      discord::install(&state.image);
       if remote_shell_enabled() {
          phoenix_ui_desktop::start_tray(&format!("http://{}/ui", remote::ADDR));
       }

@@ -27,6 +27,7 @@ pub use android::{
    last_profile,
    wants,
 };
+#[cfg(not(target_os = "android"))] pub use desktop::install;
 
 use crate::fetch::Response;
 
