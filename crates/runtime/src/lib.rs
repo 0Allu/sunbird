@@ -30,6 +30,7 @@ use phoenix_sigs::{
 
 #[cfg(target_os = "android")] mod bridge;
 pub mod console;
+#[cfg(windows)] mod desktop_gpui;
 #[cfg(windows)] mod desktop_settings;
 mod discord;
 mod fetch;
@@ -573,6 +574,8 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    let state = STATE.get().expect("STATE was set above");
 
    let first_run = !state.choices_path().exists();
+   #[cfg(target_os = "android")]
+   update::adopt_staged(&state.home, &state.plugins_dir());
    let plugins = js::load_plugins(state, bundled)?;
    #[cfg(not(target_os = "android"))]
    {

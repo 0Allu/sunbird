@@ -1,18 +1,19 @@
-//! Injects a **Sunbird** tab directly into Desktop Phoenix's native GPUI User
-//! Settings sidebar and synchronizes an embedded WebView2 pane when selected.
+//! Injects a native GPUI **Sunbird** tab directly into Desktop Phoenix's User
+//! Settings sidebar and renders native Mana GPUI settings controls when selected.
 //!
-//! All three patches are build-independent signature/anchor lookups run from
-//! [`crate::prepare`] inside `DllMain` before Discord initializes:
+//! All patches are build-independent anchor lookups run from [`crate::prepare`]
+//! inside `DllMain` before Discord initializes:
 //! 1. Relabel settings page `24` (`Other -> Phoenix`, right above `Log Out`) to
 //!    `Sunbird` by replacing the unique 22-byte `.rdata` string
 //!    `PhoenixDESKTOP_PHOENIX` in-place with `SunbirdDESKTOP_SUNBIRD`.
 //! 2. Unconditionally show page `24` in `is_page_visible` by tightening the
 //!    `cmp r8d, 0xf` range guard (`pages 9..=24`) to `0x0e` (`pages 9..=23`),
 //!    so page `24` falls through to `return true`.
-//! 3. Inline-hook `host::section` (located via the unique `account-loading`
-//!    string xref and `.pdata` function bounds) to read the active
-//!    `SettingsPage` discriminant (`u8`) and show/hide the embedded Sunbird
-//!    WebView2 pane inside Discord's User Settings content column.
+//! 3. Resolve Discord's native GPUI/Mana widget builders ([`crate::desktop_gpui`])
+//!    and inline-hook `host::section` (located via the unique `account-loading`
+//!    string xref and `.pdata` function bounds) so when active page `== 24`, it
+//!    builds and returns a native GPUI `AnyElement` directly into Discord's
+//!    User Settings scroll viewport.
 
 use std::{
    ffi::c_void,
@@ -28,6 +29,11 @@ use std::{
 use phoenix_hook::{
    image::Image,
    pattern::Pattern,
+};
+
+use crate::desktop_gpui::{
+   self,
+   RawAnyElement,
 };
 
 const SUNBIRD_PAGE: u8 = 24;
@@ -50,23 +56,25 @@ const SECTION_PROLOGUE_LEN: usize = 19;
 const ACTIVE_PAGE_LOAD: Pattern = Pattern::new("41 8A 9F ?? ?? ?? ??");
 
 type SectionFn = unsafe extern "C" fn(
-   sret: *mut c_void,
+   sret: *mut RawAnyElement,
    host_state: *mut c_void,
    window: *mut c_void,
    cx: *mut c_void,
    arg5: u64,
    arg6: u64,
-) -> *mut c_void;
+) -> *mut RawAnyElement;
 
 static ORIG_SECTION: OnceLock<SectionFn> = OnceLock::new();
 static PAGE_OFFSET: AtomicUsize = AtomicUsize::new(DEFAULT_PAGE_OFFSET);
 
-/// Installs the Desktop User Settings sidebar label, visibility patch, and
-/// active-page observer hook.
+/// Installs the Desktop User Settings sidebar label, visibility patch, native
+/// GPUI builder bindings, and `host::section` render hook.
 pub fn install(image: &Image<'static>) {
    patch_sidebar_label(image);
    patch_page_visibility(image);
-   hook_section_render(image);
+   if desktop_gpui::locate(image) {
+      hook_section_render(image);
+   }
 }
 
 fn patch_sidebar_label(image: &Image<'static>) {
@@ -108,8 +116,6 @@ fn patch_page_visibility(image: &Image<'static>) {
    }
 }
 
-/// Finds every RIP-relative `lea reg, [rip + disp32]` in executable segments
-/// whose target equals `target`.
 fn find_lea_xrefs(image: &Image<'_>, target: usize) -> Vec<usize> {
    let mut hits = Vec::new();
    for seg in image.segments.iter().filter(|s| s.executable) {
@@ -204,20 +210,24 @@ fn hook_section_render(image: &Image<'static>) {
 }
 
 unsafe extern "C" fn section_detour(
-   sret: *mut c_void,
+   sret: *mut RawAnyElement,
    host_state: *mut c_void,
    window: *mut c_void,
    cx: *mut c_void,
    arg5: u64,
    arg6: u64,
-) -> *mut c_void {
-   if !host_state.is_null() {
-      let _ = std::panic::catch_unwind(|| {
-         let offset = PAGE_OFFSET.load(Ordering::Acquire);
-         // SAFETY: `host_state` is Discord's live `&mut HostState` for this render call.
-         let page = unsafe { *host_state.cast::<u8>().add(offset) };
-         phoenix_ui_desktop::set_embedded_settings_visible(page == SUNBIRD_PAGE);
-      });
+) -> *mut RawAnyElement {
+   if !host_state.is_null() && !sret.is_null() {
+      let offset = PAGE_OFFSET.load(Ordering::Acquire);
+      // SAFETY: `host_state` is Discord's live `&mut HostState` for this render call.
+      let page = unsafe { *host_state.cast::<u8>().add(offset) };
+      if page == SUNBIRD_PAGE {
+         let rendered = std::panic::catch_unwind(|| desktop_gpui::render_sunbird_page(sret))
+            .unwrap_or(false);
+         if rendered {
+            return sret;
+         }
+      }
    }
    let Some(orig) = ORIG_SECTION.get().copied() else {
       return sret;
