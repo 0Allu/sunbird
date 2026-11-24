@@ -134,6 +134,16 @@ pub fn database(files: &Path) -> Result<PathBuf, StoreError> {
       .ok_or(StoreError::Missing { dir })
 }
 
+/// The JSON in row `key` of Phoenix's `meta` table, like `me` or `selected`.
+pub fn meta(database: &Path, key: &str) -> Result<Option<String>, StoreError> {
+   let rows = query(
+      database,
+      "SELECT v FROM meta WHERE k = ?",
+      &[key.to_owned()],
+   )?;
+   Ok(rows.first("v").and_then(Cell::text).map(str::to_owned))
+}
+
 /// Runs `sql` with `args` bound to its `?`s.
 pub fn query(database: &Path, sql: &str, args: &[String]) -> Result<Rows, StoreError> {
    let env = env().ok_or(StoreError::NoVm)?;

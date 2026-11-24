@@ -19,6 +19,18 @@ declare namespace Phoenix {
     public_flags?: number;
   }
 
+  /// The signed-in user as Phoenix cached it, resources/user#user-object with the private fields.
+  interface CurrentUser extends User {
+    email?: string | null;
+    verified?: boolean;
+    mfa_enabled?: boolean;
+    premium_type?: number;
+    flags?: number;
+    locale?: string;
+    nsfw_allowed?: boolean | null;
+    age_verification_status?: number;
+  }
+
   /// `expires_at` is a Unix timestamp, not ISO.
   interface AvatarDecorationData {
     asset: string;
@@ -1057,6 +1069,8 @@ declare namespace Phoenix {
       filter: RequestFilter,
       handler: (res: InterceptedResponse) => ResponseHookResult | Promise<ResponseHookResult>
     ): Remover;
+    /// The signed-in user from the app's cache, or null before the first login has synced.
+    me(): Promise<CurrentUser | null>;
     request(path: string, init?: FetchInit): Promise<FetchResponse>;
     get(path: string, init?: FetchInit): Promise<FetchResponse>;
     delete(path: string, init?: FetchInit): Promise<FetchResponse>;

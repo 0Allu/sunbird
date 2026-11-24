@@ -399,13 +399,19 @@ pub fn press_context(place: &Place) -> UiContext {
    if let Place::User(id) = place {
       context.user_id.clone_from(id);
    }
-   let meta = |key: &str| rows("SELECT v FROM meta WHERE k = ?", &[key.to_owned()]);
+   let meta = |key: &str| {
+      let database = database.as_ref()?;
+      store::meta(database, key)
+         .inspect_err(|err| log::warn!("patches: meta {key}: {err}"))
+         .ok()
+         .flatten()
+   };
    context.current_user_id = meta("me")
-      .and_then(|me| serde_json::from_str::<Me>(me.first("v")?.text()?).ok())
+      .and_then(|me| serde_json::from_str::<Me>(&me).ok())
       .map(|me| me.id.into());
    if context.channel_id.is_none() {
       context.channel_id = meta("selected")
-         .and_then(|selected| serde_json::from_str::<Selected>(selected.first("v")?.text()?).ok())
+         .and_then(|selected| serde_json::from_str::<Selected>(&selected).ok())
          .map(|selected| selected.channel_id.into());
    }
    if context.channel_id.is_none() {
