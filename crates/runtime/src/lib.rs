@@ -462,6 +462,8 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    STATE.set(state).map_err(|_| Error::AlreadyStarted)?;
    let state = STATE.get().expect("STATE was set above");
 
+   #[cfg(target_os = "android")]
+   update::adopt_staged(&state.home, &state.plugins_dir());
    let plugins = js::load_plugins(state, bundled)?;
    #[cfg(target_os = "android")]
    {
