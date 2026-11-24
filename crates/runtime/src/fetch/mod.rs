@@ -21,6 +21,9 @@ pub enum FetchError {
    #[cfg(target_os = "android")]
    #[error("no Java VM is running in this process")]
    NoVm,
+   #[cfg(target_os = "android")]
+   #[error(transparent)]
+   Jni(crate::jvm::Missing),
    #[cfg(not(any(target_os = "android", windows)))]
    #[error("{url}: HTTP fetch is not implemented on this platform")]
    Unsupported { url: String },

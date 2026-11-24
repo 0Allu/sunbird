@@ -10,6 +10,9 @@ use std::{
 
 use jni_sys::{
    JNIEnv,
+   jclass,
+   jint,
+   jmethodID,
    jobject,
    jvalue,
 };
@@ -18,6 +21,7 @@ use crate::{
    bridge,
    jvm::{
       self,
+      CLASS,
       Class,
       STRING,
       class,
@@ -34,6 +38,7 @@ const INTENT: Class = class!(android::content::Intent);
 const URI: Class = class!(android::net::Uri);
 const FILE: Class = class!(java::io::File);
 const FILE_PROVIDER: Class = class!(androidx::core::content::FileProvider);
+const METHOD: Class = class!(java::lang::reflect::Method);
 
 const FLAG_GRANT_READ_URI_PERMISSION: i32 = 0x0000_0001;
 const FLAG_ACTIVITY_NEW_TASK: i32 = 0x1000_0000;
@@ -65,14 +70,13 @@ pub fn open(apk: &Path) -> Result<(), String> {
 unsafe fn application(env: *mut JNIEnv) -> Result<jobject, String> {
    // SAFETY: forwarded from `open`.
    unsafe {
-      let thread = ACTIVITY_THREAD.find(env);
-      let current = jni!(
+      let thread = ACTIVITY_THREAD.find(env)?;
+      let current = jvm::static_method(
          env,
-         GetStaticMethodID,
          thread,
-         c"currentApplication".as_ptr(),
-         signature!(() -> APPLICATION).as_ptr()
-      );
+         c"currentApplication",
+         signature!(() -> APPLICATION),
+      )?;
       checked(
          env,
          jni!(env, CallStaticObjectMethodA, thread, current, ptr::null()),
@@ -91,7 +95,7 @@ unsafe fn content_uri(env: *mut JNIEnv, app: jobject, apk: &CString) -> Result<j
    // its result is used.
    unsafe {
       let app_class = jni!(env, GetObjectClass, app);
-      let package_name = method(env, app_class, c"getPackageName", signature!(() -> STRING));
+      let package_name = method(env, app_class, c"getPackageName", signature!(() -> STRING))?;
       let package = checked(
          env,
          jni!(env, CallObjectMethodA, app, package_name, ptr::null()),
@@ -101,8 +105,8 @@ unsafe fn content_uri(env: *mut JNIEnv, app: jobject, apk: &CString) -> Result<j
       let authority =
          CString::new(format!("{package}.file-provider")).map_err(|err| err.to_string())?;
 
-      let file_class = FILE.find(env);
-      let file_init = method(env, file_class, c"<init>", signature!((STRING) -> void));
+      let file_class = FILE.find(env)?;
+      let file_init = method(env, file_class, c"<init>", signature!((STRING) -> void))?;
       let file = checked(
          env,
          jni!(
@@ -120,13 +124,7 @@ unsafe fn content_uri(env: *mut JNIEnv, app: jobject, apk: &CString) -> Result<j
 
       let provider =
          bridge::app_class(env, FILE_PROVIDER).ok_or("Discord has no androidx FileProvider")?;
-      let uri_for_file = jni!(
-         env,
-         GetStaticMethodID,
-         provider,
-         c"getUriForFile".as_ptr(),
-         signature!((CONTEXT, STRING, FILE) -> URI).as_ptr()
-      );
+      let uri_for_file = method_by_types(env, provider, &[CONTEXT, STRING, FILE], URI)?;
       checked(
          env,
          jni!(
@@ -148,6 +146,80 @@ unsafe fn content_uri(env: *mut JNIEnv, app: jobject, apk: &CString) -> Result<j
    }
 }
 
+/// The static method of `class` that takes `params` and returns `returns`.
+/// Discord's build renames `FileProvider.getUriForFile`, so it is found by
+/// its types.
+///
+/// # Safety
+///
+/// As [`content_uri`], with `class` a live class reference.
+unsafe fn method_by_types(
+   env: *mut JNIEnv,
+   class: jclass,
+   params: &[Class],
+   returns: Class,
+) -> Result<jmethodID, String> {
+   const STATIC: jint = 0x0008;
+
+   // SAFETY: forwarded from `open`. Every reflective call is on a `Method` the
+   // class just listed, with no arguments or one it accepts.
+   unsafe {
+      let declared = method(
+         env,
+         CLASS.find(env)?,
+         c"getDeclaredMethods",
+         signature!(() -> [METHOD]),
+      )?;
+      let methods = checked(
+         env,
+         jni!(env, CallObjectMethodA, class, declared, ptr::null()),
+         "could not list the FileProvider's methods",
+      )?;
+      let method_class = METHOD.find(env)?;
+      let modifiers = method(env, method_class, c"getModifiers", signature!(() -> int))?;
+      let return_type = method(env, method_class, c"getReturnType", signature!(() -> CLASS))?;
+      let param_types = method(
+         env,
+         method_class,
+         c"getParameterTypes",
+         signature!(() -> [CLASS]),
+      )?;
+      let wanted = params
+         .iter()
+         .map(|param| param.find(env))
+         .collect::<Result<Vec<_>, _>>()?;
+      let returns = returns.find(env)?;
+
+      for index in 0..jni!(env, GetArrayLength, methods) {
+         let candidate = jni!(env, GetObjectArrayElement, methods, index);
+         let is_static = jni!(env, CallIntMethodA, candidate, modifiers, ptr::null()) & STATIC != 0;
+         let returned = jni!(env, CallObjectMethodA, candidate, return_type, ptr::null());
+         let types = jni!(env, CallObjectMethodA, candidate, param_types, ptr::null());
+         if jni!(env, ExceptionCheck) {
+            return Err(failure(env, "could not read a FileProvider method"));
+         }
+         let matches = is_static
+            && jni!(env, IsSameObject, returned, returns)
+            && usize::try_from(jni!(env, GetArrayLength, types)) == Ok(wanted.len())
+            && wanted.iter().zip(0..).all(|(&param, at)| {
+               jni!(
+                  env,
+                  IsSameObject,
+                  jni!(env, GetObjectArrayElement, types, at),
+                  param
+               )
+            });
+         if matches {
+            return Ok(jni!(env, FromReflectedMethod, candidate));
+         }
+         for local in [candidate, returned, types] {
+            jni!(env, DeleteLocalRef, local);
+         }
+      }
+      Err("Discord's FileProvider has no getUriForFile".to_owned())
+   }
+}
+
 /// Starts the installer's activity on `uri`.
 ///
 /// # Safety
@@ -156,8 +228,8 @@ unsafe fn content_uri(env: *mut JNIEnv, app: jobject, apk: &CString) -> Result<j
 unsafe fn start_view(env: *mut JNIEnv, app: jobject, uri: jobject) -> Result<(), String> {
    // SAFETY: forwarded from `open`.
    unsafe {
-      let intent_class = INTENT.find(env);
-      let intent_init = method(env, intent_class, c"<init>", signature!((STRING) -> void));
+      let intent_class = INTENT.find(env)?;
+      let intent_init = method(env, intent_class, c"<init>", signature!((STRING) -> void))?;
       let intent = checked(
          env,
          jni!(
@@ -177,7 +249,7 @@ unsafe fn start_view(env: *mut JNIEnv, app: jobject, uri: jobject) -> Result<(),
          intent_class,
          c"setDataAndType",
          signature!((URI, STRING) -> INTENT),
-      );
+      )?;
       let kind = jni!(
          env,
          NewStringUTF,
@@ -190,7 +262,7 @@ unsafe fn start_view(env: *mut JNIEnv, app: jobject, uri: jobject) -> Result<(),
          set_data,
          [jvalue { l: uri }, jvalue { l: kind }].as_ptr()
       );
-      let add_flags = method(env, intent_class, c"addFlags", signature!((int) -> INTENT));
+      let add_flags = method(env, intent_class, c"addFlags", signature!((int) -> INTENT))?;
       jni!(
          env,
          CallObjectMethodA,
@@ -206,7 +278,7 @@ unsafe fn start_view(env: *mut JNIEnv, app: jobject, uri: jobject) -> Result<(),
          jni!(env, GetObjectClass, app),
          c"startActivity",
          signature!((INTENT) -> void),
-      );
+      )?;
       jni!(
          env,
          CallVoidMethodA,

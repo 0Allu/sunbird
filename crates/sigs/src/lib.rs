@@ -32,17 +32,16 @@ pub struct RawStr {
    pub len: usize,
 }
 
-/// Phoenix's gateway event, `name` and `data` are borrowed UTF-8 with `data`
-/// holding the raw dispatch JSON. `rest` is opaque and copied through
-/// unchanged.
 /// Host fields after `name` and `data` that a handler reads and a synthetic
-/// event must carry. The arm32 handler reads only `name` and `data`, so there
-/// are none there.
+/// event must carry. The arm32 handler reads only `name` and `data`.
 #[cfg(not(target_arch = "arm"))]
 pub const REST_WORDS: usize = 4;
 #[cfg(target_arch = "arm")]
 pub const REST_WORDS: usize = 0;
 
+/// Phoenix's gateway event, `name` and `data` are borrowed UTF-8 with `data`
+/// holding the raw dispatch JSON. `rest` is opaque and copied through
+/// unchanged.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct GatewayEvent {

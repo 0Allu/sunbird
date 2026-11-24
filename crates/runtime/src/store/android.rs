@@ -23,6 +23,7 @@ use super::{
 };
 use crate::jvm::{
    Class,
+   Missing,
    STRING,
    class,
    clear_exception,
@@ -32,6 +33,7 @@ use crate::jvm::{
    read_bytes,
    read_string,
    signature,
+   static_method,
    take_exception,
 };
 
@@ -46,6 +48,12 @@ const FIELD_INTEGER: jint = 1;
 const FIELD_FLOAT: jint = 2;
 const FIELD_STRING: jint = 3;
 const FIELD_BLOB: jint = 4;
+
+impl From<Missing> for StoreError {
+   fn from(missing: Missing) -> Self {
+      Self::Jni(missing)
+   }
+}
 
 /// Runs `sql` with `args` bound to its `?`s.
 pub fn query(database: &Path, sql: &str, args: &[String]) -> Result<Rows, StoreError> {
@@ -77,19 +85,15 @@ unsafe fn run(
          let text = CString::new(text).map_err(|_| StoreError::Nul)?;
          Ok(jni!(env, NewStringUTF, text.as_ptr()))
       };
-      let db_class = SQLITE_DATABASE.find(env);
-      let string_class = STRING.find(env);
-      if db_class.is_null() || string_class.is_null() {
-         return Err(sql_error(env));
-      }
+      let db_class = SQLITE_DATABASE.find(env)?;
+      let string_class = STRING.find(env)?;
 
-      let open = jni!(
+      let open = static_method(
          env,
-         GetStaticMethodID,
          db_class,
-         c"openDatabase".as_ptr(),
-         signature!((STRING, CURSOR_FACTORY, int) -> SQLITE_DATABASE).as_ptr()
-      );
+         c"openDatabase",
+         signature!((STRING, CURSOR_FACTORY, int) -> SQLITE_DATABASE),
+      )?;
       let path = string(&database.to_string_lossy())?;
       let db = jni!(
          env,
@@ -115,7 +119,7 @@ unsafe fn run(
          db_class,
          c"rawQuery",
          signature!((STRING, [STRING]) -> CURSOR),
-      );
+      )?;
       let cursor = jni!(
          env,
          CallObjectMethodA,
@@ -129,7 +133,7 @@ unsafe fn run(
          rows(env, cursor)
       };
 
-      let close = method(env, db_class, c"close", signature!(() -> void));
+      let close = method(env, db_class, c"close", signature!(() -> void))?;
       jni!(env, CallVoidMethodA, db, close, ptr::null());
       clear_exception(env);
       rows
@@ -145,15 +149,15 @@ unsafe fn rows(env: *mut JNIEnv, cursor: jobject) -> Result<Rows, StoreError> {
    // deleted after it is read, so a long result does not fill the frame.
    unsafe {
       let class = jni!(env, GetObjectClass, cursor);
-      let column_count = method(env, class, c"getColumnCount", signature!(() -> int));
-      let column_name = method(env, class, c"getColumnName", signature!((int) -> STRING));
-      let move_next = method(env, class, c"moveToNext", signature!(() -> boolean));
-      let kind = method(env, class, c"getType", signature!((int) -> int));
-      let get_long = method(env, class, c"getLong", signature!((int) -> long));
-      let get_double = method(env, class, c"getDouble", signature!((int) -> double));
-      let get_string = method(env, class, c"getString", signature!((int) -> STRING));
-      let get_blob = method(env, class, c"getBlob", signature!((int) -> [byte]));
-      let close = method(env, class, c"close", signature!(() -> void));
+      let column_count = method(env, class, c"getColumnCount", signature!(() -> int))?;
+      let column_name = method(env, class, c"getColumnName", signature!((int) -> STRING))?;
+      let move_next = method(env, class, c"moveToNext", signature!(() -> boolean))?;
+      let kind = method(env, class, c"getType", signature!((int) -> int))?;
+      let get_long = method(env, class, c"getLong", signature!((int) -> long))?;
+      let get_double = method(env, class, c"getDouble", signature!((int) -> double))?;
+      let get_string = method(env, class, c"getString", signature!((int) -> STRING))?;
+      let get_blob = method(env, class, c"getBlob", signature!((int) -> [byte]))?;
+      let close = method(env, class, c"close", signature!(() -> void))?;
 
       let count = jni!(env, CallIntMethodA, cursor, column_count, ptr::null());
       let columns = (0..count)

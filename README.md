@@ -1,5 +1,7 @@
 # Phoenix Unlock
 
+[![discord][discord]](https://discord.gg/jEmw3bC2m7)
+
 Patches Phoenix, the native Rust client in Discord's Android alpha builds (356.7, versionCode
 356207), so it opens without the access gate. It also adds a plugin runtime: TypeScript plugins
 that hook gateway events, add buttons, rows and slash commands to Discord's own UI, and get their
@@ -31,7 +33,8 @@ settings, install more from a URL or a file, edit their code and use the JS cons
   (`crates/loader`). It starts the runtime as soon as Phoenix's library loads.
 - **Hooks**: gateway events are hooked by swapping handler pointers in Phoenix's event registry,
   which is found from the event names. The UI is driven through Phoenix's own UI-op bridge
-  between Rust and Java. ShadowHook (arm64) and bytehook are linked in for native hooks.
+  between Rust and Java. ShadowHook, through the [sunhook](https://github.com/sunbird-tools/sunhook)
+  fork, and bytehook are linked in for native hooks on arm64 and armv7.
 - **Signing**: every build is signed with the key in `crates/patcher/keys/`, using APK Signature
   Scheme v3 with a proof of rotation from the key older builds used. The key is public; it only
   lets builds update each other.
@@ -92,6 +95,7 @@ nix develop
 nu scripts/phoenix.nu base.apk config.arm64_v8a.apk config.xxhdpi.apk config.en.apk
 ```
 
+Pass `config.armeabi_v7a.apk` in place of the arm64 split for a 32-bit phone.
 This builds the loader and the patcher, bundles the plugins, patches the splits and installs them
 with adb. [AGENTS.md](AGENTS.md) covers building on Windows, the web patcher and testing.
 
@@ -103,3 +107,5 @@ The page itself lives in [sunbird-tools/site](https://github.com/sunbird-tools/s
 - [Amaan Qureshi](https://github.com/amaanq)
 
 Not affiliated with Discord.
+
+[discord]: https://img.shields.io/discord/917308687423533086?logo=discord&label=discord

@@ -22,6 +22,7 @@ use super::{
 };
 use crate::jvm::{
    Class,
+   Missing,
    STRING,
    class,
    env,
@@ -40,6 +41,12 @@ const INPUT_STREAM: Class = class!(java::io::InputStream);
 const OUTPUT_STREAM: Class = class!(java::io::OutputStream);
 
 const CHUNK: i32 = 64 << 10;
+
+impl From<Missing> for FetchError {
+   fn from(missing: Missing) -> Self {
+      Self::Jni(missing)
+   }
+}
 
 /// Runs on a worker thread. The local frame frees every reference this
 /// creates, since the thread never returns to Java to free them.
@@ -65,7 +72,7 @@ unsafe fn exchange(env: *mut JNIEnv, request: &Request) -> Result<Response, Fetc
    // SAFETY: forwarded from the caller.
    unsafe {
       let (connection, http_class) = connect(env, request)?;
-      let code = method(env, http_class, c"getResponseCode", signature!(() -> int));
+      let code = method(env, http_class, c"getResponseCode", signature!(() -> int))?;
       let status = jni!(env, CallIntMethodA, connection, code, ptr::null());
       if jni!(env, ExceptionCheck) {
          return Err(java_error(env, url));
@@ -78,7 +85,7 @@ unsafe fn exchange(env: *mut JNIEnv, request: &Request) -> Result<Response, Fetc
       } else {
          c"getInputStream"
       };
-      let input = method(env, http_class, name, signature!(() -> INPUT_STREAM));
+      let input = method(env, http_class, name, signature!(() -> INPUT_STREAM))?;
       let stream = jni!(env, CallObjectMethodA, connection, input, ptr::null());
       if jni!(env, ExceptionCheck) {
          return Err(java_error(env, url));
@@ -89,7 +96,7 @@ unsafe fn exchange(env: *mut JNIEnv, request: &Request) -> Result<Response, Fetc
          read_all(env, stream, url)
       };
 
-      let disconnect = method(env, http_class, c"disconnect", signature!(() -> void));
+      let disconnect = method(env, http_class, c"disconnect", signature!(() -> void))?;
       jni!(env, CallVoidMethodA, connection, disconnect, ptr::null());
       jni!(env, ExceptionClear);
       Ok(Response {
@@ -107,7 +114,7 @@ unsafe fn read_all(env: *mut JNIEnv, stream: jobject, url: &str) -> Result<Vec<u
    // SAFETY: forwarded from the caller.
    unsafe {
       let stream_class = jni!(env, GetObjectClass, stream);
-      let read = method(env, stream_class, c"read", signature!(([byte]) -> int));
+      let read = method(env, stream_class, c"read", signature!(([byte]) -> int))?;
       let buffer = jni!(env, NewByteArray, CHUNK);
       let mut body = Vec::new();
       let outcome = loop {
@@ -131,7 +138,7 @@ unsafe fn read_all(env: *mut JNIEnv, stream: jobject, url: &str) -> Result<Vec<u
             });
          }
       };
-      let close = method(env, stream_class, c"close", signature!(() -> void));
+      let close = method(env, stream_class, c"close", signature!(() -> void))?;
       jni!(env, CallVoidMethodA, stream, close, ptr::null());
       jni!(env, ExceptionClear);
       outcome.map(|()| body)
@@ -157,13 +164,10 @@ unsafe fn connect(env: *mut JNIEnv, request: &Request) -> Result<(jobject, jclas
          let text = CString::new(text).map_err(|_| not_http())?;
          Ok(jni!(env, NewStringUTF, text.as_ptr()))
       };
-      let url_class = URL.find(env);
-      let http_class = HTTP_URL_CONNECTION.find(env);
-      if url_class.is_null() || http_class.is_null() {
-         return Err(java_error(env, url));
-      }
+      let url_class = URL.find(env)?;
+      let http_class = HTTP_URL_CONNECTION.find(env)?;
 
-      let init = method(env, url_class, c"<init>", signature!((STRING) -> void));
+      let init = method(env, url_class, c"<init>", signature!((STRING) -> void))?;
       let url_object = jni!(
          env,
          NewObjectA,
@@ -179,7 +183,7 @@ unsafe fn connect(env: *mut JNIEnv, request: &Request) -> Result<(jobject, jclas
          url_class,
          c"openConnection",
          signature!(() -> URL_CONNECTION),
-      );
+      )?;
       let connection = jni!(env, CallObjectMethodA, url_object, open, ptr::null());
       if connection.is_null() {
          return Err(java_error(env, url));
@@ -189,7 +193,7 @@ unsafe fn connect(env: *mut JNIEnv, request: &Request) -> Result<(jobject, jclas
       }
 
       for name in [c"setConnectTimeout", c"setReadTimeout"] {
-         let set = method(env, http_class, name, signature!((int) -> void));
+         let set = method(env, http_class, name, signature!((int) -> void))?;
          jni!(
             env,
             CallVoidMethodA,
@@ -203,7 +207,7 @@ unsafe fn connect(env: *mut JNIEnv, request: &Request) -> Result<(jobject, jclas
          http_class,
          c"setRequestMethod",
          signature!((STRING) -> void),
-      );
+      )?;
       let verb = string(&request.method)?;
       jni!(
          env,
@@ -217,7 +221,7 @@ unsafe fn connect(env: *mut JNIEnv, request: &Request) -> Result<(jobject, jclas
          http_class,
          c"setRequestProperty",
          signature!((STRING, STRING) -> void),
-      );
+      )?;
       for (name, value) in &request.headers {
          let args = [jvalue { l: string(name)? }, jvalue { l: string(value)? }];
          jni!(env, CallVoidMethodA, connection, set_header, args.as_ptr());
@@ -253,7 +257,7 @@ unsafe fn send_body(
          http_class,
          c"setDoOutput",
          signature!((boolean) -> void),
-      );
+      )?;
       jni!(
          env,
          CallVoidMethodA,
@@ -266,7 +270,7 @@ unsafe fn send_body(
          http_class,
          c"getOutputStream",
          signature!(() -> OUTPUT_STREAM),
-      );
+      )?;
       let stream = jni!(env, CallObjectMethodA, connection, output, ptr::null());
       if stream.is_null() {
          return Err(java_error(env, url));
@@ -277,8 +281,8 @@ unsafe fn send_body(
          });
       };
       let stream_class = jni!(env, GetObjectClass, stream);
-      let write = method(env, stream_class, c"write", signature!(([byte]) -> void));
-      let close = method(env, stream_class, c"close", signature!(() -> void));
+      let write = method(env, stream_class, c"write", signature!(([byte]) -> void))?;
+      let close = method(env, stream_class, c"close", signature!(() -> void))?;
       jni!(
          env,
          CallVoidMethodA,

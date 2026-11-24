@@ -101,6 +101,9 @@ pub enum StoreError {
    #[cfg(target_os = "android")]
    #[error("no Java VM is running in this process")]
    NoVm,
+   #[cfg(target_os = "android")]
+   #[error(transparent)]
+   Jni(crate::jvm::Missing),
 }
 
 /// The cache of the account Phoenix wrote to last.

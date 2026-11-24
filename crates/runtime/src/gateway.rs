@@ -71,9 +71,9 @@ thread_local! {
 /// hook can feed Phoenix another event on the same store thread.
 #[derive(Clone, Copy)]
 struct Handling {
+   rest:  [u64; REST_WORDS],
    store: *mut c_void,
    ctx:   *mut c_void,
-   rest:  [u64; REST_WORDS],
 }
 
 /// Points every registry entry at [`detour`]. Phoenix looks handlers up in the
@@ -261,7 +261,10 @@ unsafe extern "C" fn detour(
    // SAFETY: the host passes a live event for the duration of the call.
    let event = unsafe { &*event };
    // SAFETY: every registry handler takes the store state first.
-   unsafe { crate::staff::apply(store) };
+   #[cfg(not(target_arch = "arm"))]
+   unsafe {
+      crate::staff::apply(store);
+   }
    if QUEUED.swap(false, Ordering::AcqRel) {
       flush(gateway, store, ctx, event.rest);
    }
