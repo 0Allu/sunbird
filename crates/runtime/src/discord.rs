@@ -481,7 +481,7 @@ pub fn filter(bytes: &[u8]) -> Action {
          let id = args.field(ID).and_then(Value::as_i32)?;
          if id < FIRST_ID {
             let frame = &bytes[item.offset..item.offset + item.len];
-            if let Some(new) = authorized(id, frame, &body) {
+            if let Some(new) = authorized(id, frame, body) {
                return Some((item.offset, Some(new)));
             }
             let in_flight = IN_FLIGHT
@@ -494,7 +494,10 @@ pub fn filter(bytes: &[u8]) -> Action {
                   .and_then(Value::as_i32)
                   .unwrap_or_default();
                let owned_frame = frame.to_vec();
-               std::thread::spawn(move || run_response_hooks(in_flight, status, owned_frame, body));
+               let owned_body = body.to_vec();
+               std::thread::spawn(move || {
+                  run_response_hooks(in_flight, status, owned_frame, owned_body);
+               });
                return Some((item.offset, None));
             }
             return None;
@@ -510,8 +513,8 @@ pub fn filter(bytes: &[u8]) -> Action {
                   .field(STATUS)
                   .and_then(Value::as_i32)
                   .unwrap_or_default(),
-               error: args.field(ERROR).and_then(Value::as_str).map(str::to_owned),
-               body,
+               error:  args.field(ERROR).and_then(Value::as_str).map(str::to_owned),
+               body:   body.to_vec(),
             });
          }
          Some((item.offset, None))
