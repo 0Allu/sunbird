@@ -17,7 +17,7 @@ Fast build, patch, install, hot-reload, and live debug CLI for Phoenix Unlock.
 .\scripts\dev.ps1 -Desktop -Logs      # Any debug-shell command above, against Desktop Phoenix (no adb)
 .\scripts\dev.ps1 -Desktop -Events MESSAGE  # Gateway events, Discord's API requests and native hook hits on desktop
 .\scripts\dev.ps1 -Desktop -Eval "phoenix.native.strings('MESSAGE_CREATE')"
-.\scripts\dev.ps1 -Sigscan strings "some text"   # Offline Discord.exe lookups: strings, refs, dis
+.\scripts\dev.ps1 -Sigscan strings "some text"   # Offline Discord.exe lookups: check, strings, refs, dis
 #>
 [CmdletBinding()]
 param(

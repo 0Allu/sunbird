@@ -55,7 +55,7 @@ Read this file before changing code. Every fact here cost someone hours to learn
 | `crates/ui-desktop` | Desktop UI host primitives (clipboard, URLs, notifications, GPUI surface hooks). |
 | `crates/wire` | Tagged values and bridge frames (`HostCall`, `DispatchEvent`). |
 | `crates/hook` | Image scanner, `swap_words`, ShadowHook and bytehook (linked, unused). |
-| `crates/sigs`, `crates/sigscan` | The gateway registry walk and handler ABI, and a CLI that dumps the registry of a library and looks up strings, references, functions and disassembly in `Discord.exe`. |
+| `crates/sigs`, `crates/sigscan` | The gateway registry walk and handler ABI, and every other locator the runtime patches from (`desktop.rs`, `mobile.rs`). `sigscan` dumps a library's registry, runs `check` (every locator for that platform, exit 1 on a miss) and looks up strings, references and disassembly in `Discord.exe`. |
 | `crates/patcher` | Patches the split APKs and signs them, as a library with a CLI. One APK merged from the splits or each split signed on its own. |
 | `crates/patcher-web` | `crates/patcher` as wasm for the site. |
 | `crates/stand-in*` | A fake gateway library and a demo, to test hooks without Discord. |
@@ -110,7 +110,7 @@ Read this file before changing code. Every fact here cost someone hours to learn
 5. Desktop Phoenix. `.\scripts\dev.ps1 -Desktop` builds the DLL, copies the plugins and restarts
    Discord through the injector. Every debug-shell switch above takes `-Desktop` and skips adb.
    Desktop has no UI-op stream, so `-Ops` and `-Tree` stay Android-only. Reverse it with:
-   - `.\scripts\dev.ps1 -Sigscan strings|refs|dis ...` on the `Discord.exe` file. A panic
+   - `.\scripts\dev.ps1 -Sigscan check|strings|refs|dis ...` on the `Discord.exe` file. A panic
      message or event name usually leads to the function that uses it.
    - `phoenix.native` in `-Eval` (the console only, never plugins): `strings`, `refs`, `fn`, `dis`,
      `scan`, `read`, `readU64`, `readStr`, and `hook(addr, limit)` / `unhook(id)` / `hooks()`.
@@ -130,6 +130,9 @@ session. Leave it off outside development.
 - Errors use `flub` in libraries and `misstep` in binaries. Untrusted input, including anything
   read from Phoenix, returns an error and never panics. A panic inside Discord's process kills the
   app.
+- Code that finds something in Discord's binaries lives in `crates/sigs` and returns `Found`, so
+  `sigscan check` and the `check` workflow cover it on every new build. Never fall back to an
+  offset seen on one build: when it does not decode, leave that feature off.
 - Return named enums over nested `Option`s. Use serde structs over raw `serde_json::Value`.
 - Comments say why, and only when the reason is not in the code: a host quirk, a measured number,
   a version. No comments that restate the code or narrate history.
