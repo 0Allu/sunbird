@@ -570,6 +570,34 @@ pub unsafe fn swap_words(writes: &[(usize, usize)]) -> Result<Vec<usize>, crate:
    Ok(previous)
 }
 
+impl Image<'static> {
+   /// Overwrites `bytes.len()` bytes at `addr` in this module, through
+   /// [`Self::swap_words`] on the aligned words they cover.
+   ///
+   /// # Safety
+   ///
+   /// No thread runs or reads the bytes while they are written, which spans
+   /// more than one atomic write when they cross a word boundary.
+   pub unsafe fn write_code(&self, addr: usize, bytes: &[u8]) -> Result<(), crate::Error> {
+      let span = addr..addr + bytes.len();
+      let mut writes = Vec::new();
+      for word in (span.start & !7..span.end).step_by(8) {
+         let mut current: [u8; 8] = self
+            .read(word, 8)
+            .and_then(|current| current.try_into().ok())
+            .ok_or(crate::Error::Unmapped { addr: word })?;
+         for (at, byte) in (word..).zip(&mut current) {
+            if span.contains(&at) {
+               *byte = bytes[at - span.start];
+            }
+         }
+         writes.push((word, usize::from_le_bytes(current)));
+      }
+      // SAFETY: aligned words in this module, under the caller's guarantee.
+      unsafe { self.swap_words(&writes) }.map(drop)
+   }
+}
+
 impl Image<'_> {
    #[must_use]
    pub fn file_name(&self) -> &str {
