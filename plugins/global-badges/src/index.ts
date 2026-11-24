@@ -1,7 +1,7 @@
-// @description Badges from other client mods, shown on profiles and in the badge directory
+// @description Shows user badges from other Discord client mods on profiles
 // @version 0.5.4
 // @author iFlex0x, wolfieeeeeeee
-// @warning Downloads the public badge directory from Equibadges (badges.equicord.org)
+// @warning Fetches badges from Equibadges (badges.equicord.org)
 
 const API = "https://badges.equicord.org/users";
 const TTL = 60 * 60 * 1000;

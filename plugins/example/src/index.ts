@@ -1,4 +1,4 @@
-// @description Shows off plugin settings, UI patch targets and slash commands
+// @description Demo plugin covering settings, UI patches, and slash commands
 // @version 0.1.1
 // @author amaanq
 // @enabled false

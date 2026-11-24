@@ -1,4 +1,4 @@
-// @description Translates messages in chosen channels with Kagi or Google
+// @description Translates messages in selected channels using Kagi or Google
 // @version 0.1.0
 // @author amaanq
 

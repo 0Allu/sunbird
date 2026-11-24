@@ -1,4 +1,4 @@
-// @description Sends custom emojis from any server, and animated ones, as image links
+// @description Sends custom and animated emojis from any server as image links
 // @version 0.2.1
 // @author mantikafasi
 

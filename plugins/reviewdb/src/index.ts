@@ -1,4 +1,4 @@
-// @description Read, write, vote on and report ReviewDB reviews in a tab on user profiles
+// @description Adds a ReviewDB tab to user profiles
 // @version 0.2.1
 // @author mantikafasi
 

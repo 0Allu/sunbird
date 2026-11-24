@@ -1,4 +1,4 @@
-// @description Composer toggle: while on, everything you send (text and media) is spoilered
+// @description Adds a toggle to automatically spoiler everything you send
 // @version 1.2.0
 // @author cmdr-chara
 

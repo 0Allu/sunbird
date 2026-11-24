@@ -1,4 +1,4 @@
-// @description Lets the app open NSFW channels without age verification
+// @description Opens NSFW channels without age verification
 // @version 0.1.1
 // @author amaanq
 
