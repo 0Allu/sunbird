@@ -1,6 +1,6 @@
 //! Tells the user when the site ships a newer Phoenix Unlock: a newer loader,
 //! or plugin bundles that differ from the installed ones. The site publishes
-//! both in `version.json` (`web/tools/bundle-plugins.mjs`).
+//! both in `version.json` (`web/tools/bundle-plugins.ts`).
 //!
 //! Applying an update works in-app:
 //! - Plugin-only updates download each changed `plugins/<name>.js`, verify its
@@ -31,7 +31,7 @@ use memchr::memmem;
 pub const VERSION: &str = env!("PHOENIX_VERSION");
 pub const SITE: &str = "https://sunbird.tools/";
 
-/// Where `bundle-plugins.mjs` reads the version from the loader the site ships.
+/// Where `bundle-plugins.ts` reads the version from the loader the site ships.
 #[used]
 static MARKER: &str = concat!("phoenix-version:", env!("PHOENIX_VERSION"), ";");
 

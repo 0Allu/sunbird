@@ -31,7 +31,7 @@ Read this file before changing code. Every fact here cost someone hours to learn
   add a hand-maintained list file.
 - No committed build output. `picker.dex` is built by `crates/runtime/build.rs`,
   `web/plugins/lib*.so` and `web/pkg/` by `scripts/site.nu`, plugin bundles by
-  `web/tools/bundle-plugins.mjs`.
+  `web/tools/bundle-plugins.ts`.
   The Frida gadgets in `web/plugins/frida-*` are the one exception, kept for x86 WSA debugging.
 - Test on a device before pushing. A clean build proves nothing about the bridge.
 
@@ -83,7 +83,7 @@ Read this file before changing code. Every fact here cost someone hours to learn
     its DLLs on `PATH`.
   - `cargo +stable-x86_64-pc-windows-gnu ndk -t arm64-v8a -P 28 --link-builtins build --release -p phoenix-loader`,
     then `cargo build --release -p patcher`.
-- Site. `nu scripts/site.nu web` and `node web/tools/bundle-plugins.mjs` (set `ESBUILD`
+- Site. `nu scripts/site.nu web` and `node web/tools/bundle-plugins.ts` (set `ESBUILD`
   if esbuild is not on `PATH`), then `nu scripts/fetch.nu <this checkout>` in sunbird-tools/site.
   CI publishes the same files as the `site` release on pushes to `main`, and the site picks it up within 10 minutes.
 

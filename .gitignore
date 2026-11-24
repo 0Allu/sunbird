@@ -64,7 +64,7 @@
 !web/
 !web/signing-key.json
 !web/tools/
-!web/tools/*.mjs
+!web/tools/*.ts
 !web/plugins/
 !web/plugins/frida-*.js
 !web/plugins/frida-gadget-*.so.gz

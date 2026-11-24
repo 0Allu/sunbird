@@ -184,7 +184,7 @@ try {
    }
 
    $env:ESBUILD = Find-Esbuild
-   node web/tools/bundle-plugins.mjs
+   node web/tools/bundle-plugins.ts
    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
    $loader = if (Test-Path $soPath) { $soPath } else { Join-Path $RepoRoot "web\plugins\libphoenix-arm64.so" }

@@ -1,6 +1,6 @@
 // Bundles plugins/*/src/index.ts into web/plugins/<name>.js the way scripts/phoenix.nu does (esbuild IIFE,
 // es2023, the leading `// @` lines kept as a banner) and lists them in web/plugins/index.json for the site.
-// usage: node web/tools/bundle-plugins.mjs   (esbuild on PATH, or ESBUILD=path/to/esbuild)
+// usage: node web/tools/bundle-plugins.ts   (esbuild on PATH, or ESBUILD=path/to/esbuild)
 // The bundles are not committed: CI runs this for the `site` release that sunbird-tools/site deploys.
 // It also writes web/version.json, what the site ships, for the runtime's update check (crates/runtime/src/update.rs):
 // the loader's baked version and each plugin bundle's CRC-32.
@@ -14,7 +14,13 @@ import { crc32 } from 'node:zlib';
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const out = fileURLToPath(new URL('../plugins/', import.meta.url));
 const esbuild = process.env.ESBUILD ?? 'esbuild';
-const index = [];
+interface Listed {
+  name: string;
+  description: string;
+  warning?: string;
+}
+
+const index: Listed[] = [];
 for (const name of readdirSync(`${root}plugins`).sort()) {
   const entry = `${root}plugins/${name}/src/index.ts`;
   if (!existsSync(entry)) continue;
