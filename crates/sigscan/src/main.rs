@@ -256,7 +256,10 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
          );
          report("media fetch", desktop::media_fetch(image).map(at));
       },
-      Machine::Aarch64 if macho => report("guest bridge", ios::bridge(image).map(at)),
+      Machine::Aarch64 if macho => {
+         report("guest bridge", ios::bridge(image).map(at));
+         report("host table", ios::host_table(image).map(at));
+      },
       Machine::Aarch64 => {
          report(
             "staff flag",

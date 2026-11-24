@@ -728,6 +728,7 @@ dependencies = [
  "phoenix-hook",
  "phoenix-runtime",
  "phoenix-sigs",
+ "phoenix-wire",
  "rquickjs",
  "serde",
 ]

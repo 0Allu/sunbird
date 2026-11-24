@@ -33,3 +33,31 @@ pub const DISPATCH: usize = 0x20;
 pub fn bridge(image: &Image<'_>) -> Found<usize> {
    one("guest bridge", &image.scan(BRIDGE))
 }
+
+/// The guest's call into the host: `mov x2, x1; mov x1, x0; mov x19, x8;
+/// adrp x0, TLV; add x0, x0, TLV; ldr x8, [x0]; blr x8` gets this thread's
+/// host table, then `ldr x8, [x0]; cbz x8; ldr x0, [x0, #0x10]` calls its
+/// first entry with its third.
+const HOST_CALL: Pattern = Pattern::new(
+   "E2 03 01 AA E1 03 00 AA ?? 03 08 AA ?? ?? ?? ?? ?? ?? ?? ?? 08 00 40 F9 00 01 3F D6 08 00 40 \
+    F9 ?? ?? ?? B4 00 08 40 F9",
+);
+
+/// The thread-local descriptor `{thunk, key, offset}` of the guest's host
+/// table `{call, log, context}`, which the host fills on each guest thread.
+pub fn host_table(image: &Image<'_>) -> Found<usize> {
+   let at = one("host call", &image.scan(HOST_CALL))? + 12;
+   let words = image
+      .read(at, 8)
+      .ok_or("host call: the table load is unmapped")?;
+   let adrp = u32::from_le_bytes([words[0], words[1], words[2], words[3]]);
+   let add = u32::from_le_bytes([words[4], words[5], words[6], words[7]]);
+   // `adrp x0` and an unshifted `add x0, x0`.
+   if adrp & 0x9F00_001F != 0x9000_0000 || add & 0xFFC0_03FF != 0x9100_0000 {
+      return Err(format!("host call at {at:#x}: no adrp and add into x0"));
+   }
+   let pages = ((((adrp >> 5) & 0x7_FFFF) << 2) | ((adrp >> 29) & 3)).cast_signed() << 11 >> 11;
+   let offset = isize::try_from(i64::from(pages) << 12).map_err(|err| err.to_string())?;
+   let low = ((add >> 10) & 0xFFF) as usize;
+   Ok((at & !0xFFF).wrapping_add_signed(offset) + low)
+}
