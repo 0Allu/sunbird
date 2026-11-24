@@ -695,7 +695,9 @@ impl Image<'_> {
          return self.exidx_containing(base, len / 8, addr);
       }
       if let Some((image_base, base, len)) = self.pdata {
-         return self.pdata_containing(image_base, base, len / 12, addr);
+         return self
+            .pdata_bounds(image_base, base, len / 12, addr)
+            .map(|(start, _)| start);
       }
 
       const UDATA4: u8 = 0x03;
@@ -755,15 +757,23 @@ impl Image<'_> {
       start(low.checked_sub(1)?)
    }
 
+   /// Exact `[start, end)` bounds of the function containing `addr` when the
+   /// image carries a PE64 `.pdata` exception directory.
+   #[must_use]
+   pub fn function_bounds(&self, addr: usize) -> Option<(usize, usize)> {
+      let (image_base, base, len) = self.pdata?;
+      self.pdata_bounds(image_base, base, len / 12, addr)
+   }
+
    /// Binary search over PE64 `.pdata`, whose `count` `RUNTIME_FUNCTION` entries
    /// are 12 bytes (`begin_rva`, `end_rva`, `unwind_rva`), sorted by `begin_rva`.
-   fn pdata_containing(
+   fn pdata_bounds(
       &self,
       image_base: usize,
       base: usize,
       count: usize,
       addr: usize,
-   ) -> Option<usize> {
+   ) -> Option<(usize, usize)> {
       let rva = u32::try_from(addr.checked_sub(image_base)?).ok()?;
       let begin = |index: usize| self.read_u32(base + index * 12);
       let (mut low, mut high) = (0, count);
@@ -778,6 +788,6 @@ impl Image<'_> {
       let index = low.checked_sub(1)?;
       let start = begin(index)?;
       let end = self.read_u32(base + index * 12 + 4)?;
-      (rva < end).then(|| image_base + start as usize)
+      (rva < end).then(|| (image_base + start as usize, image_base + end as usize))
    }
 }

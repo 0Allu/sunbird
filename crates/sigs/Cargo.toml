@@ -11,6 +11,7 @@ file = [ "dep:object" ]
 
 [dependencies]
 flub         = { workspace = true }
+memchr       = { workspace = true }
 object       = { optional = true, workspace = true }
 phoenix-hook = { workspace = true }
 

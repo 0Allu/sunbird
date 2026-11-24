@@ -8,6 +8,7 @@
 use std::ffi::c_void;
 
 #[cfg(feature = "file")] pub mod file;
+pub mod http;
 pub mod registry;
 
 /// Libraries that carry the gateway registry, Phoenix's and the stand-in's.

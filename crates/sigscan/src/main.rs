@@ -15,6 +15,7 @@ use misstep::{
 };
 use phoenix_sigs::{
    file::BinaryFile,
+   http::DesktopHttpTransport,
    registry::GatewayRegistry,
 };
 
@@ -55,6 +56,20 @@ fn main() -> misstep::Result<()> {
       };
 
       println!("   {:<40} {:#010x}{note}", entry.name, entry.handler);
+   }
+   if let Some(http) = DesktopHttpTransport::locate(&image) {
+      let fmt_opt = |addr: Option<usize>| {
+         addr.map_or_else(|| "none".to_owned(), |addr| format!("{addr:#010x}"))
+      };
+      println!(
+         "http:     send={:#010x} ({} slots), poll={:#010x} ({} slots), alloc={}, dealloc={}",
+         http.send_fn,
+         http.send_slots.len(),
+         http.poll_fn,
+         http.poll_slots.len(),
+         fmt_opt(http.host_alloc),
+         fmt_opt(http.host_dealloc),
+      );
    }
    Ok(())
 }
