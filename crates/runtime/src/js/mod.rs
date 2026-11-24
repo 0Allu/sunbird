@@ -173,6 +173,9 @@ struct Registry<'js> {
    response_hooks: RefCell<HashMap<u64, (String, Function<'js>)>>,
    /// `phoenix.messages.onSend` interceptors in registration order, by id.
    interceptors:   RefCell<Vec<(u64, String, Function<'js>)>>,
+   /// Native Desktop GPUI `phoenix.ui.addMessageAccessory` callbacks.
+   #[cfg(windows)]
+   desktop_accessories: RefCell<Vec<desktop_ui::DesktopAccessory<'js>>>,
    #[cfg(target_os = "android")]
    ui:             RefCell<HashMap<ContributionId, Callbacks<'js>>>,
    /// Slash commands by lowercase name, with the plugin that registered each.
@@ -341,6 +344,17 @@ impl Engine {
             interceptors.retain(|(_, plugin, _)| plugin != name);
             #[cfg(target_os = "android")]
             patches::set_interceptors(interceptors.len());
+         }
+         #[cfg(windows)]
+         {
+            let mut accessories = registry.desktop_accessories.borrow_mut();
+            let before = accessories.len();
+            accessories.retain(|entry| entry.plugin != name);
+            if accessories.len() != before {
+               crate::desktop_accessories::set_active_count(accessories.len());
+               crate::desktop_accessories::clear_cache();
+               crate::desktop_accessories::invalidate_discord_windows();
+            }
          }
          #[cfg(target_os = "android")]
          {
@@ -577,6 +591,8 @@ fn registry<'js>(ctx: &Ctx<'js>, events: &GatewayRegistry) -> rquickjs::Result<R
       request_hooks: RefCell::default(),
       response_hooks: RefCell::default(),
       interceptors: RefCell::default(),
+      #[cfg(windows)]
+      desktop_accessories: RefCell::default(),
       #[cfg(target_os = "android")]
       ui: RefCell::default(),
       #[cfg(target_os = "android")]

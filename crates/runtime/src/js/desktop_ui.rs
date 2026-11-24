@@ -1,9 +1,15 @@
-//! Desktop `phoenix.ui` bindings backed by [`phoenix_ui_desktop`].
+//! Desktop `phoenix.ui` bindings backed by [`phoenix_ui_desktop`] and native
+//! GPUI message accessories ([`crate::desktop_accessories`]).
 //!
-//! Native clipboard, toasts, and notifications run through `phoenix-ui-desktop`.
-//! Mobile-only UI-op slot hooks (`addComposerButton`, `addMessageAccessory`,
-//! etc.) return a harmless no-op remover so cross-platform plugins load cleanly
-//! on desktop without throwing.
+//! Native clipboard, toasts, notifications, and `addMessageAccessory` run live
+//! on Desktop Phoenix. Remaining mobile-only UI-op slot hooks return harmless
+//! no-op removers so cross-platform plugins load cleanly without throwing.
+
+#[cfg(windows)]
+use std::sync::atomic::{
+   AtomicU64,
+   Ordering,
+};
 
 use rquickjs::{
    Ctx,
@@ -13,11 +19,242 @@ use rquickjs::{
    Value,
    function::Opt,
 };
+#[cfg(windows)]
+use rquickjs::CatchResultExt;
+
+#[cfg(windows)]
+use crate::{
+   desktop_accessories::{
+      self,
+      RenderedAccessory,
+   },
+   js::{
+      Engine,
+      Registry,
+      drain,
+   },
+};
+
+#[cfg(windows)]
+#[derive(Clone)]
+pub struct DesktopAccessory<'js> {
+   pub id:       u64,
+   pub plugin:   String,
+   pub priority: i32,
+   pub render:   Function<'js>,
+}
 
 fn noop_handle<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> {
    let remove = Function::new(ctx.clone(), || {})?;
    remove.set("update", Function::new(ctx.clone(), || {})?)?;
    remove.set("close", Function::new(ctx.clone(), || {})?)?;
+   Ok(remove)
+}
+
+#[cfg(windows)]
+fn parse_rendered(value: &Value<'_>, priority: i32) -> Option<RenderedAccessory> {
+   if value.is_null() || value.is_undefined() || value.as_bool() == Some(false) {
+      return None;
+   }
+   if let Some(s) = value.as_string() {
+      let text = s.to_string().ok()?;
+      if text.is_empty() {
+         return None;
+      }
+      return Some(RenderedAccessory {
+         priority,
+         text,
+         color: None,
+         tint: None,
+      });
+   }
+   if let Some(obj) = value.as_object() {
+      let text = obj
+         .get::<_, Option<String>>("text")
+         .ok()
+         .flatten()
+         .unwrap_or_default();
+      let color = obj
+         .get::<_, Option<f64>>("color")
+         .ok()
+         .flatten()
+         .map(|n| n as i64 as u32);
+      let tint = obj
+         .get::<_, Option<f64>>("tint")
+         .ok()
+         .flatten()
+         .map(|n| n as i64 as u32);
+      if text.is_empty() && tint.is_none() {
+         return None;
+      }
+      return Some(RenderedAccessory {
+         priority,
+         text,
+         color,
+         tint,
+      });
+   }
+   None
+}
+
+#[cfg(windows)]
+fn evaluate_accessories_in_ctx<'js>(
+   ctx: &Ctx<'js>,
+   message_id: u64,
+) -> Vec<RenderedAccessory> {
+   let Some(registry) = ctx.userdata::<Registry<'js>>() else {
+      return Vec::new();
+   };
+   let snapshot: Vec<DesktopAccessory<'js>> = registry.desktop_accessories.borrow().clone();
+   drop(registry);
+   if snapshot.is_empty() {
+      return Vec::new();
+   }
+
+   let id_str = message_id.to_string();
+   let Ok(arg) = Object::new(ctx.clone()) else {
+      return Vec::new();
+   };
+   let _ = arg.set("messageId", id_str.as_str());
+   let _ = arg.set("channelId", Value::new_null(ctx.clone()));
+   let _ = arg.set("currentUserId", Value::new_null(ctx.clone()));
+   if let Ok(reply) = Function::new(ctx.clone(), || String::new()) {
+      let _ = arg.set("reply", reply);
+   }
+
+   let mut out = Vec::new();
+   for acc in snapshot {
+      match acc.render.call::<_, Value<'_>>((arg.clone(),)).catch(ctx) {
+         Ok(val) if val.is_promise() => {
+            if let Some(promise) = val.as_object()
+               && let Ok(then) = promise.get::<_, Function<'_>>("then")
+            {
+               let mid = message_id;
+               let prio = acc.priority;
+               if let Ok(on_resolve) = Function::new(
+                  ctx.clone(),
+                  move |ctx: Ctx<'js>, resolved: Value<'js>| {
+                     if let Some(item) = parse_rendered(&resolved, prio) {
+                        let mut all = evaluate_sync_only(&ctx, mid, Some((prio, item)));
+                        all.sort_by_key(|a| a.priority);
+                        desktop_accessories::set_rendered(mid, all);
+                     }
+                  },
+               ) {
+                  let _ = then.call::<_, Value<'_>>((on_resolve,));
+               }
+            }
+         },
+         Ok(val) => {
+            if let Some(rendered) = parse_rendered(&val, acc.priority) {
+               out.push(rendered);
+            }
+         },
+         Err(err) => {
+            log::error!("[{}] addMessageAccessory render: {err}", acc.plugin);
+         },
+      }
+   }
+   out
+}
+
+#[cfg(windows)]
+fn evaluate_sync_only<'js>(
+   ctx: &Ctx<'js>,
+   message_id: u64,
+   extra: Option<(i32, RenderedAccessory)>,
+) -> Vec<RenderedAccessory> {
+   let mut out = Vec::new();
+   if let Some((_, item)) = extra {
+      out.push(item);
+   }
+   let Some(registry) = ctx.userdata::<Registry<'js>>() else {
+      return out;
+   };
+   let snapshot: Vec<DesktopAccessory<'js>> = registry.desktop_accessories.borrow().clone();
+   drop(registry);
+
+   let id_str = message_id.to_string();
+   let Ok(arg) = Object::new(ctx.clone()) else {
+      return out;
+   };
+   let _ = arg.set("messageId", id_str.as_str());
+   let _ = arg.set("channelId", Value::new_null(ctx.clone()));
+   let _ = arg.set("currentUserId", Value::new_null(ctx.clone()));
+
+   for acc in snapshot {
+      if let Ok(val) = acc.render.call::<_, Value<'_>>((arg.clone(),)).catch(ctx)
+         && !val.is_promise()
+         && let Some(rendered) = parse_rendered(&val, acc.priority)
+         && !out.contains(&rendered)
+      {
+         out.push(rendered);
+      }
+   }
+   out
+}
+
+#[cfg(windows)]
+impl Engine {
+   /// Evaluates every registered desktop `addMessageAccessory` for `message_id`.
+   pub fn render_desktop_accessories(&self, message_id: u64) -> Vec<RenderedAccessory> {
+      let items = self
+         .context
+         .with(|ctx| evaluate_accessories_in_ctx(&ctx, message_id));
+      drain(&self.runtime);
+      items
+   }
+}
+
+#[cfg(windows)]
+fn add_message_accessory<'js>(
+   ctx: &Ctx<'js>,
+   plugin: &str,
+   options: Object<'js>,
+) -> rquickjs::Result<Function<'js>> {
+   static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+   let render = options.get::<_, Function<'js>>("render")?;
+   let priority = options.get::<_, Option<i32>>("priority")?.unwrap_or(0);
+   let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+
+   let count = {
+      let registry = ctx
+         .userdata::<Registry<'js>>()
+         .ok_or_else(|| Exception::throw_internal(ctx, "no registry"))?;
+      let mut list = registry.desktop_accessories.borrow_mut();
+      list.push(DesktopAccessory {
+         id,
+         plugin: plugin.to_owned(),
+         priority,
+         render,
+      });
+      list.len()
+   };
+   desktop_accessories::set_active_count(count);
+   desktop_accessories::clear_cache();
+
+   let remove = Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
+      if let Some(registry) = ctx.userdata::<Registry<'js>>() {
+         let mut list = registry.desktop_accessories.borrow_mut();
+         list.retain(|entry| entry.id != id);
+         desktop_accessories::set_active_count(list.len());
+         desktop_accessories::clear_cache();
+         desktop_accessories::invalidate_discord_windows();
+      }
+   })?;
+   remove.set(
+      "update",
+      Function::new(ctx.clone(), |ctx: Ctx<'js>, message_id: Opt<String>| {
+         if let Some(mid) = message_id.0.and_then(|s| s.parse::<u64>().ok()) {
+            let items = evaluate_accessories_in_ctx(&ctx, mid);
+            desktop_accessories::set_rendered(mid, items);
+         } else {
+            desktop_accessories::clear_cache();
+            desktop_accessories::invalidate_discord_windows();
+         }
+      })?,
+   )?;
    Ok(remove)
 }
 
@@ -59,10 +296,10 @@ pub fn desktop_patch_api<'js>(
       Function::new(ctx.clone(), |ctx: Ctx<'js>| rquickjs::Array::new(ctx))?,
    )?;
    api.set("commands", commands)?;
-   api.set("ui", desktop_ui_object(ctx)?)
+   api.set("ui", desktop_ui_object(ctx, plugin)?)
 }
 
-pub fn desktop_ui_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+pub fn desktop_ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
    let ui = Object::new(ctx.clone())?;
    ui.set(
       "toast",
@@ -89,12 +326,30 @@ pub fn desktop_ui_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
       })?,
    )?;
 
-   // Graceful no-op shims for mobile UI-op surfaces so cross-platform plugins
-   // (e.g. spoiler-mode, message-logger) load without throwing on desktop.
+   #[cfg(windows)]
+   {
+      let owner = plugin.to_owned();
+      ui.set(
+         "addMessageAccessory",
+         Function::new(ctx.clone(), move |ctx: Ctx<'js>, options: Object<'js>| {
+            add_message_accessory(&ctx, &owner, options)
+         })?,
+      )?;
+   }
+   #[cfg(not(windows))]
+   {
+      let _ = plugin;
+      ui.set(
+         "addMessageAccessory",
+         Function::new(ctx.clone(), |ctx: Ctx<'js>| noop_handle(&ctx))?,
+      )?;
+   }
+
+   // Graceful no-op shims for remaining mobile UI-op surfaces so cross-platform
+   // plugins load without throwing on desktop.
    for slot_fn in [
       "addHeaderButton",
       "addComposerButton",
-      "addMessageAccessory",
       "addMessageAction",
       "addProfileSection",
       "addProfileTab",

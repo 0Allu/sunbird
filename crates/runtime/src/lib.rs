@@ -30,6 +30,7 @@ use phoenix_sigs::{
 
 #[cfg(target_os = "android")] mod bridge;
 pub mod console;
+#[cfg(windows)] mod desktop_accessories;
 #[cfg(windows)] mod desktop_gpui;
 #[cfg(windows)] mod desktop_settings;
 mod discord;
@@ -226,6 +227,15 @@ pub(crate) fn intercept_send_body(channel_id: &str, body: &[u8]) -> discord::Req
    engine().map_or(discord::RequestAction::Pass, |engine| {
       engine.intercept_send_body(channel_id, body)
    })
+}
+
+/// Evaluates all registered desktop `phoenix.ui.addMessageAccessory` callbacks
+/// for `message_id`.
+#[cfg(windows)]
+pub(crate) fn render_desktop_accessories(
+   message_id: u64,
+) -> Vec<desktop_accessories::RenderedAccessory> {
+   engine().map_or_default(|engine| engine.render_desktop_accessories(message_id))
 }
 
 /// Runs matching `phoenix.discord.onResponse` hooks (sync or async) on an
@@ -532,6 +542,7 @@ pub fn prepare() -> Result<(), Error> {
    open_access_gate(&image);
    staff::prepare(&image);
    desktop_settings::install(&image);
+   desktop_accessories::install(&image);
    let registry = hook(&image)?;
    *PREPARED
       .lock()

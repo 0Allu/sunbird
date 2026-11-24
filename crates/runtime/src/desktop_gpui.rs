@@ -153,6 +153,9 @@ type DivStyleMutFn = unsafe extern "C" fn(*mut RawDiv) -> *mut u8;
 type DivChildDivFn = unsafe extern "C" fn(*mut RawDiv, *mut RawDiv, *mut RawDiv) -> *mut RawDiv;
 type DivChildBtnFn = unsafe extern "C" fn(*mut RawDiv, *mut RawDiv, *mut RawButton) -> *mut RawDiv;
 type DivIntoAnyFn = unsafe extern "C" fn(*mut RawAnyElement, *mut RawDiv) -> *mut RawAnyElement;
+type DivPushAnyFn = unsafe extern "C" fn(*mut c_void, *mut RawAnyElement);
+type StrIntoAnyFn =
+   unsafe extern "C" fn(*mut RawAnyElement, *mut SharedString) -> *mut RawAnyElement;
 type TextBlockFn =
    unsafe extern "C" fn(*mut RawDiv, *const SharedString, *const SharedString) -> *mut RawDiv;
 type SwitchNewFn = unsafe extern "C" fn(*mut RawSwitch, *const u8, usize, u8) -> *mut RawSwitch;
@@ -177,6 +180,8 @@ struct GpuiSymbols {
    div_child_div:    DivChildDivFn,
    div_child_button: DivChildBtnFn,
    div_into_any:     DivIntoAnyFn,
+   div_push_any:     Option<DivPushAnyFn>,
+   str_into_any:     Option<StrIntoAnyFn>,
    text_block:       TextBlockFn,
    switch_new:       SwitchNewFn,
    switch_into_div:  SwitchIntoDivFn,
@@ -586,6 +591,35 @@ pub fn locate(image: &Image<'static>) -> bool {
    let div_child_button = ar_calls[14].1;
    let div_child_div = ar_calls.last().expect("checked len >= 16").1;
 
+   // Resolve `SmallVec::<[AnyElement; 2]>::push` from inside `div_child_div`
+   // (`lea rcx, [rax + 0x40]; ...; call push`).
+   let div_push_any = {
+      let cdd_calls = calls_in(image, div_child_div, 0x60);
+      if cdd_calls.len() >= 2
+         && image
+            .read(div_child_div, 0x50)
+            .is_some_and(|b| b.windows(4).any(|w| w == [0x48, 0x8D, 0x48, 0x40]))
+      {
+         Some(cdd_calls[1].1)
+      } else {
+         None
+      }
+   };
+
+   // Resolve `SharedString::into_any_element` from sibling `Div::child::<SharedString>`
+   // right next to `div_child_div`, verified by its `cmp cl, 0xff; ...; cmp cl, 0x19`
+   // (`SharedString` tag) check.
+   let str_into_any = calls_in(image, div_child_div, 0x400)
+      .into_iter()
+      .map(|(_, target)| target)
+      .find(|&target| {
+         image.read(target, 0x100).is_some_and(|body| {
+            body
+               .windows(8)
+               .any(|w| w[0..3] == [0x80, 0xF9, 0xFF] && w[5..8] == [0x80, 0xF9, 0x19])
+         })
+      });
+
    // SAFETY: every resolved address was verified via `is_function` / cross-check
    // and matches the exact Rust-ABI signatures verified in Discord.exe.
    let symbols = unsafe {
@@ -598,6 +632,10 @@ pub fn locate(image: &Image<'static>) -> bool {
          div_child_div:    std::mem::transmute::<usize, DivChildDivFn>(div_child_div),
          div_child_button: std::mem::transmute::<usize, DivChildBtnFn>(div_child_button),
          div_into_any:     std::mem::transmute::<usize, DivIntoAnyFn>(div_into_any),
+         div_push_any:     div_push_any
+            .map(|addr| std::mem::transmute::<usize, DivPushAnyFn>(addr)),
+         str_into_any:     str_into_any
+            .map(|addr| std::mem::transmute::<usize, StrIntoAnyFn>(addr)),
          text_block:       std::mem::transmute::<usize, TextBlockFn>(text_block),
          switch_new:       std::mem::transmute::<usize, SwitchNewFn>(switch_new),
          switch_into_div:  std::mem::transmute::<usize, SwitchIntoDivFn>(switch_into_div),
@@ -609,7 +647,8 @@ pub fn locate(image: &Image<'static>) -> bool {
    let _ = SYMBOLS.set(symbols);
    log::info!(
       "desktop gpui: resolved native Mana builders (div={div_new:#x}, style={div_style_mut:#x}, \
-       switch={switch_new:#x}, button={button_new:#x}, row={action_row:#x})"
+       switch={switch_new:#x}, button={button_new:#x}, row={action_row:#x}, \
+       push_any={div_push_any:#x?}, str_any={str_into_any:#x?})"
    );
    true
 }
@@ -882,6 +921,145 @@ impl Builder {
          (self.sym.div_into_any)(sret, &raw mut div);
       }
    }
+
+   fn push_any(&self, parent: &mut RawDiv, child: &mut RawAnyElement) -> bool {
+      let Some(push) = self.sym.div_push_any else {
+         return false;
+      };
+      // SAFETY: `RawDiv + 0x40` is `SmallVec<[AnyElement; 2]>` (verified inside `div_child_div`).
+      unsafe {
+         let children = parent.0.as_mut_ptr().add(0x40).cast::<c_void>();
+         push(children, child);
+      }
+      true
+   }
+
+   fn text_line(&self, text: &str, color_hsla: [f32; 4], font_px: f32) -> Option<RawDiv> {
+      let str_into_any = self.sym.str_into_any?;
+      let mut line_div = self.raw_div();
+      // SAFETY: verified StyleRefinement offsets:
+      // +0x58 = text.font_size (AbsoluteLength::Pixels),
+      // +0x88 = text.color (Option<Hsla>: u32 tag=1, [f32; 4] at +0x8c).
+      self.style_div(&mut line_div, |s| unsafe {
+         s.add(0x58).cast::<u64>().write(gpui_px(font_px));
+         s.add(0x88).cast::<u32>().write(1);
+         s.add(0x8c).cast::<[f32; 4]>().write(color_hsla);
+      });
+      let mut ss = SharedString::from_str(text);
+      // SAFETY: converts static `SharedString` into a 32-byte `AnyElement` and pushes it.
+      let mut any = unsafe {
+         let mut out = MaybeUninit::<RawAnyElement>::uninit();
+         str_into_any(out.as_mut_ptr(), &raw mut ss);
+         out.assume_init()
+      };
+      if !self.push_any(&mut line_div, &mut any) {
+         return None;
+      }
+      Some(line_div)
+   }
+}
+
+/// Converts 32-bit ARGB (`0xAARRGGBB`) into GPUI's `[h, s, l, a]` (`0.0..=1.0`).
+fn argb_to_hsla(argb: u32) -> [f32; 4] {
+   let raw_a = ((argb >> 24) & 0xFF) as f32 / 255.0;
+   let a = if raw_a == 0.0 && argb != 0 { 1.0 } else { raw_a };
+   let r = ((argb >> 16) & 0xFF) as f32 / 255.0;
+   let g = ((argb >> 8) & 0xFF) as f32 / 255.0;
+   let b = (argb & 0xFF) as f32 / 255.0;
+
+   let max = r.max(g).max(b);
+   let min = r.min(g).min(b);
+   let delta = max - min;
+   let l = f32::midpoint(max, min);
+
+   let (h, s) = if delta == 0.0 {
+      (0.0, 0.0)
+   } else {
+      let s = delta / (1.0 - (2.0 * l - 1.0).abs());
+      let mut h = if (max - r).abs() < f32::EPSILON {
+         ((g - b) / delta) % 6.0
+      } else if (max - g).abs() < f32::EPSILON {
+         (b - r) / delta + 2.0
+      } else {
+         (r - g) / delta + 4.0
+      };
+      h /= 6.0;
+      if h < 0.0 {
+         h += 1.0;
+      }
+      (h, s)
+   };
+   [h, s, l, a]
+}
+
+/// Whether `div_push_any` and `str_into_any` resolved for native message accessories.
+#[must_use]
+pub fn supports_accessories() -> bool {
+   SYMBOLS
+      .get()
+      .is_some_and(|s| s.div_push_any.is_some() && s.str_into_any.is_some())
+}
+
+/// Wraps a rendered message row `RawAnyElement` in place with native GPUI
+/// accessory lines underneath and an optional tinted left accent bar.
+pub fn wrap_with_accessories(
+   sret: *mut RawAnyElement,
+   lines: &[(String, Option<u32>)],
+   tint: Option<u32>,
+) -> bool {
+   let Some(sym) = SYMBOLS.get() else {
+      return false;
+   };
+   if sym.div_push_any.is_none() || sym.str_into_any.is_none() {
+      return false;
+   }
+   let b = Builder { sym };
+
+   // SAFETY: takes ownership of the original rendered `AnyElement` out of `sret`;
+   // we write the replacement `AnyElement` back into `sret` before returning.
+   let mut orig = unsafe { ptr::read(sret) };
+
+   let mut outer = b.v_stack(2.0);
+   if let Some(argb) = tint {
+      let hsla = argb_to_hsla(argb);
+      // SAFETY: verified StyleRefinement offsets: +0x128 = border_left, +0x250 = border_color.
+      b.style_div(&mut outer, |s| unsafe {
+         s.add(0x128).cast::<u64>().write(gpui_px(3.0));
+         s.add(0x250).cast::<u32>().write(1);
+         s.add(0x254).cast::<[f32; 4]>().write(hsla);
+      });
+   }
+   if !b.push_any(&mut outer, &mut orig) {
+      // SAFETY: restore original element if push failed.
+      unsafe { ptr::write(sret, orig) };
+      return false;
+   }
+
+   if !lines.is_empty() {
+      let mut acc_box = b.v_stack(2.0);
+      // SAFETY: indent accessories under the message text column (left=72px, bottom=4px, right=16px).
+      b.style_div(&mut acc_box, |s| unsafe {
+         s.add(0x1a0).cast::<u64>().write(gpui_px(16.0)); // padding_right
+         s.add(0x1a8).cast::<u64>().write(gpui_px(4.0)); // padding_bottom
+         s.add(0x1b0).cast::<u64>().write(gpui_px(72.0)); // padding_left
+      });
+      const MUTED: [f32; 4] = [0.60, 0.08, 0.62, 0.85];
+      for (text, color) in lines {
+         let hsla = color.map_or(MUTED, argb_to_hsla);
+         for subline in text.lines() {
+            if subline.is_empty() {
+               continue;
+            }
+            if let Some(line_div) = b.text_line(subline, hsla, 12.0) {
+               acc_box = b.push_div(acc_box, line_div);
+            }
+         }
+      }
+      outer = b.push_div(outer, acc_box);
+   }
+
+   b.into_any(outer, sret);
+   true
 }
 
 // ---------------------------------------------------------------------------
