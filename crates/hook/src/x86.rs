@@ -39,6 +39,12 @@ pub struct Line {
    pub target: Option<usize>,
 }
 
+/// A decoded address. Only built for 64-bit hosts, where it always fits.
+#[expect(clippy::cast_possible_truncation, reason = "x86_64 hosts only")]
+const fn addr(value: u64) -> usize {
+   value as usize
+}
+
 /// Up to `count` instructions decoded from `code`, which starts at `ip`. Stops
 /// early at bytes that do not decode.
 #[must_use]
@@ -71,6 +77,98 @@ pub fn disasm(code: &[u8], ip: usize, count: usize) -> Vec<Line> {
       offset += instruction.len();
    }
    lines
+}
+
+/// The `(offset, size)` stores a function makes through its hidden return
+/// pointer, `rcx` on entry.
+///
+/// Decoding stops at the first `ret`, and a `memcpy` into the pointer counts
+/// as one store of the copied length. It shows how large the returned
+/// struct is and which fields the constructor sets, so a layout baked into a
+/// caller can be checked against a new build. Control flow is followed
+/// linearly, which suits the straight-line constructors it is for.
+#[must_use]
+pub fn sret_stores(code: &[u8], ip: usize) -> Vec<(usize, usize)> {
+   use iced_x86::{
+      Code,
+      InstructionInfoFactory,
+      Mnemonic,
+      OpAccess,
+      OpKind,
+      Register,
+   };
+
+   const VOLATILE: [Register; 7] = [
+      Register::RAX,
+      Register::RCX,
+      Register::RDX,
+      Register::R8,
+      Register::R9,
+      Register::R10,
+      Register::R11,
+   ];
+   let writes = |access: OpAccess| {
+      matches!(
+         access,
+         OpAccess::Write | OpAccess::CondWrite | OpAccess::ReadWrite | OpAccess::ReadCondWrite
+      )
+   };
+
+   let mut decoder = Decoder::with_ip(64, code, ip as u64, DecoderOptions::NONE);
+   let mut factory = InstructionInfoFactory::new();
+   let mut holders = vec![Register::RCX];
+   let mut r8_imm = None;
+   let mut stores = Vec::new();
+   while decoder.can_decode() {
+      let instruction = decoder.decode();
+      if instruction.is_invalid() || instruction.mnemonic() == Mnemonic::Ret {
+         break;
+      }
+      if instruction.mnemonic() == Mnemonic::Call {
+         if holders.contains(&Register::RCX)
+            && let Some(len) = r8_imm
+         {
+            stores.push((0, len));
+         }
+         holders.retain(|register| !VOLATILE.contains(register));
+         r8_imm = None;
+         continue;
+      }
+      let info = factory.info(&instruction);
+      for memory in info.used_memory() {
+         if writes(memory.access())
+            && holders.contains(&memory.base())
+            && memory.index() == Register::None
+         {
+            stores.push((addr(memory.displacement()), memory.memory_size().size()));
+         }
+      }
+      let copied = matches!(instruction.code(), Code::Mov_r64_rm64 | Code::Mov_rm64_r64)
+         && instruction.op0_kind() == OpKind::Register
+         && instruction.op1_kind() == OpKind::Register
+         && holders.contains(&instruction.op1_register());
+      let written = info
+         .used_registers()
+         .iter()
+         .filter(|used| writes(used.access()))
+         .map(|used| used.register().full_register())
+         .collect::<Vec<_>>();
+      for register in written {
+         holders.retain(|&held| held != register);
+         if copied && register == instruction.op0_register() {
+            holders.push(register);
+         }
+         if register == Register::R8 {
+            r8_imm = (instruction.mnemonic() == Mnemonic::Mov
+               && matches!(
+                  instruction.op1_kind(),
+                  OpKind::Immediate32 | OpKind::Immediate32to64
+               ))
+            .then(|| instruction.immediate32() as usize);
+         }
+      }
+   }
+   stores
 }
 
 /// An instruction that points at an address, and the function holding it.
@@ -358,12 +456,36 @@ fn stub(observer: Observer, ctx: usize, trampoline: usize) -> Vec<u8> {
    code
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
    use super::*;
 
+   #[test]
+   fn sret_stores_follow_the_return_pointer() {
+      let code = [
+         0x48, 0x89, 0xC8, // mov rax, rcx
+         0x88, 0x90, 0x23, 0x03, 0x00, 0x00, // mov [rax+0x323], dl
+         0x48, 0x83, 0xA0, 0x80, 0x00, 0x00, 0x00, 0x00, // and qword ptr [rax+0x80], 0
+         0x48, 0x89, 0x51, 0x08, // mov [rcx+8], rdx
+         0x48, 0x89, 0xC1, // mov rcx, rax
+         0x41, 0xB8, 0x40, 0x00, 0x00, 0x00, // mov r8d, 0x40
+         0xE8, 0x00, 0x00, 0x00, 0x00, // call memcpy
+         0x48, 0x89, 0x48, 0x10, // mov [rax+0x10], rcx: rax no longer holds it
+         0xC3, // ret
+         0x48, 0x89, 0x01, // mov [rcx], rax: past the ret
+      ];
+      assert_eq!(sret_stores(&code, 0x1000), [
+         (0x323, 1),
+         (0x80, 8),
+         (8, 8),
+         (0, 0x40)
+      ]);
+   }
+
+   #[cfg(windows)]
    extern "C" fn ignore(_: usize, _: &Regs) {}
 
+   #[cfg(windows)]
    #[test]
    fn stub_decodes_as_written() {
       let stub = stub(ignore, 7, 0x1000);
