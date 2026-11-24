@@ -63,7 +63,6 @@
 !scripts/*.py
 
 !web/
-!web/signing-key.json
 !web/tools/
 !web/tools/*.ts
 !web/plugins/

@@ -6,10 +6,35 @@
 use std::{
    fs::File,
    os::fd::AsRawFd,
-   sync::OnceLock,
+   sync::{
+      Mutex,
+      OnceLock,
+      PoisonError,
+      atomic::{
+         AtomicI32,
+         Ordering,
+      },
+      mpsc::{
+         self,
+         Sender,
+      },
+   },
+   time::Duration,
 };
 
-use phoenix_wire::Key;
+use phoenix_wire::{
+   DispatchEvent,
+   HostCall,
+   Key,
+   Value,
+   decode_dispatch,
+   edit_frames,
+};
+
+use crate::bridge::{
+   self,
+   Action,
+};
 
 /// A host module's method, named `Module.method`.
 #[derive(Clone, Copy)]
@@ -210,6 +235,146 @@ pub fn base_apk() -> Result<String, LoadError> {
       .find(|path| path.ends_with("/base.apk"))
       .map(str::to_owned)
       .ok_or(LoadError::NoApk)
+}
+
+#[derive(Debug, flub::Error)]
+pub enum CallError {
+   #[error("Phoenix's host names are not read yet")]
+   NotLoaded,
+   #[error("this Discord build has no {0}")]
+   Missing(&'static str),
+   #[error("Phoenix's bridge is not up yet")]
+   NoBridge,
+   #[error("{0} did not answer")]
+   NoAnswer(&'static str),
+}
+
+/// Calls `method` with `args` and `body`, as Phoenix's guest would.
+pub fn send(method: Method, args: &[(Field, Value)], body: Vec<u8>) -> Result<(), CallError> {
+   let host = table().ok_or(CallError::NotLoaded)?;
+   let (module, number) = host
+      .call(method)
+      .ok_or_else(|| CallError::Missing(method.name()))?;
+   let args = args
+      .iter()
+      .map(|(field, value)| {
+         let key = host
+            .key(*field)
+            .ok_or_else(|| CallError::Missing(field.name()))?;
+         Ok((key, value.clone()))
+      })
+      .collect::<Result<Vec<_>, CallError>>()?;
+   let call = HostCall {
+      module,
+      method: number,
+      args: Value::Obj(args),
+      body,
+   };
+   if bridge::invoke(&call.encode()) {
+      Ok(())
+   } else {
+      Err(CallError::NoBridge)
+   }
+}
+
+/// `wanted` of a call's or event's arguments.
+pub fn field(args: &Value, wanted: Field) -> Option<&Value> {
+   args.field(table()?.key(wanted)?)
+}
+
+/// An event's arguments and body.
+pub struct Reply {
+   pub args: Value,
+   pub body: Vec<u8>,
+}
+
+/// Far above the ids Phoenix's guest numbers its own calls with.
+const FIRST_ID: i32 = 0x6000_0000;
+
+static NEXT_ID: AtomicI32 = AtomicI32::new(FIRST_ID);
+/// Who waits for which event with which id.
+static WAITING: Mutex<Vec<(u16, i32, Sender<Reply>)>> = Mutex::new(Vec::new());
+
+/// Calls `method` with an `id` field and waits up to `timeout` for the
+/// `event` that answers it.
+pub fn ask(
+   method: Method,
+   args: &[(Field, Value)],
+   event: Event,
+   timeout: Duration,
+) -> Result<Reply, CallError> {
+   let number = table()
+      .ok_or(CallError::NotLoaded)?
+      .event(event)
+      .ok_or_else(|| CallError::Missing(event.name()))?;
+   let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+   let (sender, receiver) = mpsc::channel();
+   WAITING
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .push((number, id, sender));
+   let forget = || {
+      WAITING
+         .lock()
+         .unwrap_or_else(PoisonError::into_inner)
+         .retain(|(_, waiting, _)| *waiting != id);
+   };
+   let mut with_id = vec![(Field::Id, Value::I32(id))];
+   with_id.extend_from_slice(args);
+   if let Err(err) = send(method, &with_id, Vec::new()) {
+      forget();
+      return Err(err);
+   }
+   let reply = receiver.recv_timeout(timeout);
+   forget();
+   reply.map_err(|_| CallError::NoAnswer(method.name()))
+}
+
+/// Takes the events answering [`ask`] out of a `nativeDispatch` call, since
+/// Phoenix's guest knows nothing of their ids.
+pub fn filter(bytes: &[u8]) -> Action {
+   if WAITING
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .is_empty()
+   {
+      return Action::Pass;
+   }
+   let Some(id_key) = table().and_then(|host| host.key(Field::Id)) else {
+      return Action::Pass;
+   };
+   let Ok(items) = decode_dispatch(bytes) else {
+      return Action::Pass;
+   };
+   let count = items.len();
+   let mut taken = Vec::new();
+   for item in items {
+      let DispatchEvent::Host { event, args, body } = item.event else {
+         continue;
+      };
+      let Some(id) = args.field(id_key).and_then(Value::as_i32) else {
+         continue;
+      };
+      let mut waiting = WAITING.lock().unwrap_or_else(PoisonError::into_inner);
+      let Some(at) = waiting
+         .iter()
+         .position(|(number, waiting_id, _)| *number == event && *waiting_id == id)
+      else {
+         continue;
+      };
+      let (_, _, sender) = waiting.swap_remove(at);
+      drop(waiting);
+      let _ = sender.send(Reply {
+         args,
+         body: body.to_vec(),
+      });
+      taken.push((item.offset, None));
+   }
+   match taken.len() {
+      0 => Action::Pass,
+      len if len == count => Action::Drop,
+      _ => Action::Replace(edit_frames(bytes, &taken)),
+   }
 }
 
 /// A read-only mapping of a whole file.

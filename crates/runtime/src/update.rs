@@ -6,14 +6,23 @@
 //! - Plugin-only updates download each changed `plugins/<name>.js`, verify its
 //!   CRC-32 against `version.json`, write it to `files/phoenix/plugins/`, and
 //!   hot-reload it live with zero APK reinstall.
-//! - Loader updates download `plugins/libphoenix-arm64.so`, stream-repack the
-//!   currently installed APK swapping only `lib/<abi>/libplm.so` (16 KiB
-//!   aligned, zero re-compression), sign with APK Signature Scheme v3, and open
-//!   Android's native `PackageInstaller` update prompt.
+//! - Loader updates download `plugins/libphoenix-arm64.so`, swap it into the
+//!   installed APK with [`patcher::swap_loader`], which signs it again, and
+//!   open Android's installer on it through Discord's own `FileProvider`. An
+//!   install from separate splits cannot update from one APK, so it opens the
+//!   site instead.
 
 use std::{
    collections::BTreeMap,
-   str::FromStr,
+   fs::{
+      self,
+      File,
+   },
+   io::{
+      BufWriter,
+      Write,
+   },
+   path::Path,
    sync::{
       Mutex,
       PoisonError,
@@ -36,9 +45,9 @@ pub const ASSETS: &str = "https://assets.sunbird.tools/";
 #[used]
 static MARKER: &str = concat!("phoenix-version:", env!("PHOENIX_VERSION"), ";");
 
-/// Public signing key used by the web patcher and local CLI so in-app updates
-/// preserve the signing identity (and Discord login).
-const SIGNING_KEY_JSON: &str = include_str!("../../../web/signing-key.json");
+/// Where the signed update waits for Android's installer, under the app's
+/// `files` directory, which Discord's `FileProvider` shares.
+const UPDATE_APK: &str = "phoenix-update.apk";
 
 const LOADER_ASSET: &str = if cfg!(target_arch = "x86_64") {
    "plugins/libphoenix-x86_64.so"
@@ -50,19 +59,6 @@ const LOADER_ASSET: &str = if cfg!(target_arch = "x86_64") {
 struct Site {
    loader:  String,
    plugins: BTreeMap<String, u32>,
-}
-
-#[derive(serde::Deserialize)]
-struct SigningKeyPair {
-   pkcs8: String,
-   spki:  String,
-   cert:  String,
-}
-
-#[derive(serde::Deserialize)]
-struct SigningKey {
-   new:     SigningKeyPair,
-   lineage: String,
 }
 
 /// What the site has that this install lacks.
@@ -358,25 +354,79 @@ fn run_loader_self_update() {
       return;
    }
 
-   let keys: SigningKey = match serde_json::from_str(SIGNING_KEY_JSON) {
-      Ok(keys) => keys,
+   let loader = match patcher::Library::new(patcher::LOADER, bytes) {
+      Ok(loader) => loader,
       Err(err) => {
-         fail_self_update(&format!("Signing key config invalid: {err}"));
+         fail_self_update(&format!("Downloaded loader is invalid: {err}"));
          return;
       },
    };
-
-   set_status(Some("Repacking & signing APK...".to_owned()));
-   if let Err(err) = crate::picker::self_update(
-      &bytes,
-      &keys.new.pkcs8,
-      &keys.new.spki,
-      &keys.new.cert,
-      &keys.lineage,
-      SITE,
-   ) {
-      fail_self_update(&format!("Self-update failed: {err}"));
+   let base = match crate::host::base_apk() {
+      Ok(base) => base,
+      Err(err) => {
+         fail_self_update(&format!("Self-update failed: {err}"));
+         return;
+      },
+   };
+   if installed_from_splits(&base) {
+      fail_self_update("Split APK install, update from the site");
+      let _ = crate::picker::open(SITE);
+      return;
    }
+
+   set_status(Some("Signing the update...".to_owned()));
+   let Some(state) = crate::STATE.get() else {
+      fail_self_update("Self-update failed: phoenix has not started");
+      return;
+   };
+   let path = state.files_dir().join(UPDATE_APK);
+   if let Err(err) = write_update(&base, &loader, &path) {
+      fail_self_update(&format!("Self-update failed: {err}"));
+      return;
+   }
+   set_status(Some("Opening Android's installer...".to_owned()));
+   match crate::install::open(&path) {
+      Ok(()) => {
+         set_status(None);
+         BUSY.store(false, Ordering::Release);
+      },
+      Err(err) => fail_self_update(&format!("Self-update failed: {err}")),
+   }
+}
+
+/// Whether the app runs from split APKs, which sit next to `base`.
+fn installed_from_splits(base: &str) -> bool {
+   Path::new(base)
+      .parent()
+      .and_then(|dir| fs::read_dir(dir).ok())
+      .is_some_and(|entries| {
+         entries.flatten().any(|entry| {
+            entry.file_name().to_str().is_some_and(|name| {
+               name.starts_with("split_")
+                  && Path::new(name)
+                     .extension()
+                     .is_some_and(|extension| extension.eq_ignore_ascii_case("apk"))
+            })
+         })
+      })
+}
+
+/// Writes `base` with `loader` swapped in and signed to `path`.
+fn write_update(base: &str, loader: &patcher::Library, path: &Path) -> Result<(), String> {
+   let map = crate::host::Map::open(base).map_err(|err| format!("{base}: {err}"))?;
+   let apk = patcher::swap_loader(map.bytes(), loader).map_err(|err| err.to_string())?;
+   let mut file =
+      BufWriter::new(File::create(path).map_err(|err| format!("{}: {err}", path.display()))?);
+   for part in apk.parts() {
+      file.write_all(part).map_err(|err| err.to_string())?;
+   }
+   file.flush().map_err(|err| err.to_string())
+}
+
+/// Deletes an update Android's installer has had its chance at, since it is as
+/// big as the app.
+pub fn forget_update(files: &Path) {
+   let _ = fs::remove_file(files.join(UPDATE_APK));
 }
 
 fn fail_self_update(message: &str) {
@@ -384,66 +434,4 @@ fn fail_self_update(message: &str) {
    set_status(Some(message.to_owned()));
    BUSY.store(false, Ordering::Release);
    let _ = crate::picker::toast(message);
-}
-
-/// A state `phx.Updater` reports through `onUpdateStatus`.
-#[derive(Clone, Copy, Debug)]
-pub enum UpdaterState {
-   Repacking,
-   Installing,
-   Done,
-   Permission,
-   Fallback,
-   Cancelled,
-   Error,
-}
-
-#[derive(Debug, flub::Error)]
-#[error("phx.Updater reported an unknown state {0:?}")]
-pub struct UnknownUpdaterState(String);
-
-impl FromStr for UpdaterState {
-   type Err = UnknownUpdaterState;
-
-   fn from_str(state: &str) -> Result<Self, Self::Err> {
-      Ok(match state {
-         "repacking" => Self::Repacking,
-         "installing" => Self::Installing,
-         "done" => Self::Done,
-         "permission" => Self::Permission,
-         "fallback" => Self::Fallback,
-         "cancelled" => Self::Cancelled,
-         "error" => Self::Error,
-         _ => return Err(UnknownUpdaterState(state.to_owned())),
-      })
-   }
-}
-
-/// Callback invoked from `phx.Updater.onUpdateStatus(state, message)`.
-pub fn on_native_status(state: UpdaterState, message: &str) {
-   log::info!("self-update [{state:?}]: {message}");
-   match state {
-      UpdaterState::Done => {
-         *FOUND.lock().unwrap_or_else(PoisonError::into_inner) = None;
-         set_status(None);
-         BUSY.store(false, Ordering::Release);
-         crate::patches::banners::show_banner(
-            "Phoenix Unlock updated".to_owned(),
-            Some(message.to_owned()),
-            Some("res://ic_mana_checkmark_large".to_owned()),
-            Some(0xFF23_A55A),
-            4000,
-            crate::patches::banners::BannerAction::None,
-         );
-      },
-      UpdaterState::Permission
-      | UpdaterState::Fallback
-      | UpdaterState::Cancelled
-      | UpdaterState::Error => {
-         set_status(Some(message.to_owned()));
-         BUSY.store(false, Ordering::Release);
-         let _ = crate::picker::toast(message);
-      },
-      UpdaterState::Repacking | UpdaterState::Installing => set_status(Some(message.to_owned())),
-   }
 }

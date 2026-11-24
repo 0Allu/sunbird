@@ -570,6 +570,11 @@ unsafe extern "system" fn native_dispatch(
          Action::Pass => stripped_wake.then_some(payload.clone()),
          Action::Replace(rest) => Some(rest),
       };
+      match crate::host::filter(replaced.as_deref().unwrap_or(&payload)) {
+         Action::Drop => return JNI_TRUE,
+         Action::Pass => {},
+         Action::Replace(rest) => replaced = Some(rest),
+      }
       if WATCHING.load(Ordering::Acquire) {
          match consult(replaced.as_deref().unwrap_or(&payload), |sink, frame| {
             sink.dispatch(frame)
@@ -647,6 +652,19 @@ unsafe fn bind_natives(env: *mut JNIEnv, guest_host: jobject) {
       }
    }
    log::info!("bridge: nativeDispatch re-bound");
+}
+
+/// Loads `name` (dotted) through Phoenix's class loader, as a local reference.
+///
+/// # Safety
+///
+/// `env` is the current thread's `JNIEnv`.
+pub unsafe fn app_class(env: *mut JNIEnv, name: &CStr) -> Option<jclass> {
+   let anchor = guest_host();
+   // SAFETY: `anchor` is the live `GuestHost` global reference, when set.
+   (!anchor.is_null())
+      .then(|| unsafe { load_class(env, anchor, name) })
+      .flatten()
 }
 
 /// Loads `name` (dotted) through the class loader of `anchor`'s class.

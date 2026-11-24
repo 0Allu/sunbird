@@ -86,13 +86,7 @@ fn submit(field: Field) {
 
 fn press(pressed: Press) {
    match pressed {
-      Press::PickFile => {
-         if let Err(err) = crate::picker::pick() {
-            log::error!("file picker: {err}");
-            settings().install_status =
-               Some((format!("The file picker failed: {err}"), COLOR_ERROR));
-         }
-      },
+      Press::PickFile => crate::picker::pick(),
       // The editor starts from the plugin's code, kept as the field's draft.
       Press::EditCode(index) => {
          if let Some(plugin) = plugin(index)

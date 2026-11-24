@@ -20,7 +20,7 @@ Read this file before changing code. Every fact here cost someone hours to learn
   joins) to test something. Test `phoenix.discord` writes against paths that return 404.
   Never inject fake messages into real channels.
 - Signing. Every APK, from the patcher CLI, the site or the in-app updater, is signed with
-  `crates/patcher/keys/` (the updater carries the same key in `web/signing-key.json`). v3 only, with
+  `crates/patcher/keys/`, which the runtime links through the patcher crate. v3 only, with
   the rotation proof from the old Valenced test key, so builds install over each other and keep
   the login. Never add the old private key. Read `keys/README.md` before touching signing.
 - Plugin API lives in Rust. UI ops, patch targets, settings pages, stores and HTTP live in the
@@ -46,7 +46,9 @@ Read this file before changing code. Every fact here cost someone hours to learn
 | `crates/runtime/src/settings/` | The Phoenix Unlock settings pages, built from UI ops. |
 | `crates/runtime/src/patches/` | UI patch targets, slash commands, profile tabs, emoji picker. |
 | `crates/runtime/src/discord.rs` | `phoenix.discord`, Discord's API through Phoenix's own `Networking` module and session. |
-| `crates/runtime/src/picker.rs`, `java/phx/` | File picker, link opening and the APK self-updater (`Updater.java`) through a small in-memory dex. |
+| `crates/runtime/src/host.rs` | Phoenix's host call, event and field numbers, read at startup from the name table in the installed APK's dex. `host::send` and `host::ask` call host modules. |
+| `crates/runtime/src/picker.rs`, `java/phx/` | File picker, toasts, clipboard and links through Phoenix's host modules, and the dialogs through a small in-memory dex. |
+| `crates/runtime/src/install.rs` | Opens Android's installer on the self-update APK through Discord's `FileProvider`. |
 | `crates/runtime/src/update.rs` | Update checks against the site, one-tap plugin updates and the APK self-update. |
 | `crates/runtime/src/remote.rs` | The debug shell on `127.0.0.1:4242`, off by default, switched on in Settings, Phoenix Unlocker, Debug. |
 | `crates/ui` | Typed codec for Phoenix's UI-op batches. `src/props.in` is Phoenix's prop table, `templates.json` holds captured layouts, `motion.rs` drives native springs, `mirror.rs` keeps a live copy of the view tree that host tests can drive. |
@@ -148,8 +150,9 @@ Read the decompiled host before guessing or bisecting.
 `nm -D`.
 
 - Update risks. `crates/ui/src/props.in` (props are named by index, so a new prop shifts them),
-  `GuestHost.d(byte[], Function0)` (an obfuscated name), `templates.json`, and every module,
-  method and field number below. Everything else is found by names, strings and patterns.
+  `GuestHost.d(byte[], Function0)` (an obfuscated name) and `templates.json`. Host module,
+  method, event and field numbers are read at startup by `host.rs`, so the numbers below are
+  for reading frames by hand. Everything else is found by names, strings and patterns.
 - Threads. Never send UI ops from the main thread, since Rust may hold the UI lock while it waits
   on Java. The settings worker sends them. Java only honors `WasmRuntime.nativeDispatch` on the
   `wasm-guest` HandlerThread, and a call from another thread is silently ignored. Queue a frame

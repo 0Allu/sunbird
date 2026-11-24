@@ -415,6 +415,32 @@ impl<'a> Apk<'a> {
    }
 }
 
+/// Swaps the loader of an APK this patcher made, one merged from the splits,
+/// for `loader` and signs it again, so the install updates in place.
+pub fn swap_loader<'a>(apk: &'a [u8], loader: &'a Library) -> Result<Apk<'a>, Error> {
+   let mut swapped = false;
+   let mut entries = Vec::new();
+   for record in zip::read(apk)? {
+      let entry = record.entry(apk);
+      let is_loader = record
+         .name
+         .strip_suffix(LOADER)
+         .is_some_and(|dir| dir.starts_with("lib/") && dir.ends_with('/'));
+      if is_loader && host::machine(&record.name, &entry.data()?)? == loader.machine {
+         entries.push(Entry::stored(record.name, &loader.bytes[..])?);
+         swapped = true;
+      } else {
+         entries.push(entry);
+      }
+   }
+   if !swapped {
+      return Err(Error::Input(format!(
+         "no {LOADER} for this machine in the APK"
+      )));
+   }
+   signed(entries)
+}
+
 fn signed(entries: Vec<Entry<'_>>) -> Result<Apk<'_>, Error> {
    let mut archive = zip::write(entries)?;
    sign::sign(&mut archive)?;

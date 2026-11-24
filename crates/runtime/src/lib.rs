@@ -35,6 +35,7 @@ pub mod console;
 mod gateway;
 #[cfg(target_os = "android")] mod highlight;
 #[cfg(target_os = "android")] mod host;
+#[cfg(target_os = "android")] mod install;
 mod js;
 #[cfg(target_os = "android")] mod jvm;
 mod local;
@@ -464,6 +465,7 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    let plugins = js::load_plugins(state, bundled)?;
    #[cfg(target_os = "android")]
    {
+      update::forget_update(&state.files_dir());
       std::thread::spawn(|| {
          if let Err(err) = host::load() {
             log::error!("host names: {err}");
