@@ -31,35 +31,6 @@ pub struct BuildId {
 }
 
 impl BuildId {
-   /// Parses lowercase or uppercase hex, as printed by `readelf -n`. Invalid
-   /// input fails constant evaluation.
-   #[must_use]
-   #[expect(
-      clippy::cast_possible_truncation,
-      reason = "the length is asserted to be at most 32"
-   )]
-   pub const fn hex(source: &str) -> Self {
-      let digits = source.as_bytes();
-      assert!(
-         !digits.is_empty() && digits.len() % 2 == 0 && digits.len() <= 64,
-         "build ID is 1 to 32 hex bytes"
-      );
-      let mut bytes = [0; 32];
-      let mut index = 0;
-      while index < digits.len() / 2 {
-         let (Some(high), Some(low)) = (nibble(digits[2 * index]), nibble(digits[2 * index + 1]))
-         else {
-            panic!("build ID is hex");
-         };
-         bytes[index] = high << 4 | low;
-         index += 1;
-      }
-      Self {
-         len: (digits.len() / 2) as u8,
-         bytes,
-      }
-   }
-
    #[must_use]
    pub fn from_bytes(id: &[u8]) -> Option<Self> {
       if id.is_empty() || id.len() > 32 {
@@ -96,15 +67,6 @@ impl BuildId {
          notes = notes.get(desc_at + align4(desc_len)..)?;
       }
       None
-   }
-}
-
-const fn nibble(byte: u8) -> Option<u8> {
-   match byte {
-      b'0'..=b'9' => Some(byte - b'0'),
-      b'a'..=b'f' => Some(byte - b'a' + 10),
-      b'A'..=b'F' => Some(byte - b'A' + 10),
-      _ => None,
    }
 }
 

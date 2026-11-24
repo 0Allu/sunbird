@@ -51,7 +51,7 @@ Read this file before changing code. Every fact here cost someone hours to learn
 | `crates/ui` | Typed codec for Phoenix's UI-op batches. `src/props.in` is Phoenix's prop table, `templates.json` holds captured layouts, `motion.rs` drives native springs, `mirror.rs` keeps a live copy of the view tree that host tests can drive. |
 | `crates/wire` | Tagged values and bridge frames (`HostCall`, `DispatchEvent`). |
 | `crates/hook` | Image scanner, `swap_words`, ShadowHook and bytehook (linked, unused). |
-| `crates/sigs`, `crates/sigscan` | Hook-point rules and a CLI that evaluates them against a library. |
+| `crates/sigs`, `crates/sigscan` | The gateway registry walk and handler ABI, and a CLI that dumps the registry of a library. |
 | `crates/patcher` | Patches the split APKs and signs them. |
 | `crates/stand-in*` | A fake gateway library and a demo, to test hooks without Discord. |
 | `plugins/*/src/index.ts` | Bundled plugins. Leading `// @` lines are the bundle banner and metadata, and `// @warning` shows a warning on the site. |

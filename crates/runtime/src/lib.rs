@@ -16,11 +16,16 @@ use std::{
    },
 };
 
-use phoenix_hook::image::Image;
+use phoenix_hook::image::{
+   BuildId,
+   Image,
+};
 use phoenix_sigs::{
-   Build,
    LIBRARIES,
-   registry::GatewayRegistry,
+   registry::{
+      self,
+      GatewayRegistry,
+   },
 };
 
 #[cfg(target_os = "android")] mod bridge;
@@ -43,7 +48,7 @@ mod staff;
 
 #[derive(Debug, flub::Error)]
 pub enum Error {
-   #[error("no loaded library matches a known build or one of {LIBRARIES:?}")]
+   #[error("no loaded library is one of {LIBRARIES:?}")]
    NoTarget,
    #[error("the runtime is already running")]
    AlreadyStarted,
@@ -58,7 +63,13 @@ pub enum Error {
    #[error("javascript: {0}")]
    Js(String),
    #[error(transparent)]
-   Sig(#[from] phoenix_sigs::Error),
+   Registry(#[from] registry::Error),
+   #[error("{event}: the registry slot held {found:#x}, the walk read {expected:#x}")]
+   SwapConflict {
+      event:    String,
+      expected: usize,
+      found:    usize,
+   },
    #[error(transparent)]
    Hook(#[from] phoenix_hook::Error),
    #[error("{url}: plugins install from https:// URLs ending in a name like plugin.js")]
@@ -74,7 +85,6 @@ pub enum Error {
 
 struct State {
    image: Image<'static>,
-   build: Option<&'static Build>,
    home:  PathBuf,
    js:    Mutex<js::Engine>,
 }
@@ -419,31 +429,22 @@ pub fn reload(name: &str) {
 /// What [`start`] found and loaded.
 pub struct Started {
    pub target:  String,
-   pub build:   Option<&'static str>,
+   pub build:   Option<BuildId>,
    pub plugins: Vec<String>,
 }
 
-/// Starts phoenix against the first loaded library that matches a known build
-/// ID.
-///
-/// Falls back to the first library named in [`LIBRARIES`]. `bundled` plugins
-/// load first, and a file in `home/plugins` with the same name replaces one.
+/// Starts phoenix against the first loaded library named in [`LIBRARIES`].
+/// `bundled` plugins load first, and a file in `home/plugins` with the same
+/// name replaces one.
 pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    // SAFETY: the target is the host app's own library, which stays mapped for
    // the life of the process, and scans run before the host's threads touch its
    // data.
    let images = unsafe { Image::loaded() };
-   let known = |image: &Image<'_>| image.build_id.and_then(Build::find);
-   let image = match images.iter().position(|image| known(image).is_some()) {
-      Some(index) => images.into_iter().nth(index),
-      None => {
-         images
-            .into_iter()
-            .find(|image| LIBRARIES.contains(&image.file_name()))
-      },
-   }
-   .ok_or(Error::NoTarget)?;
-   let build = image.build_id.and_then(Build::find);
+   let image = images
+      .into_iter()
+      .find(|image| LIBRARIES.contains(&image.file_name()))
+      .ok_or(Error::NoTarget)?;
    let walked = GatewayRegistry::locate(&image)?;
    log::info!("gateway registry: {} events", walked.iter().count());
 
@@ -451,13 +452,11 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    let engine = js::Engine::new(registry)?;
    let state = State {
       image,
-      build,
       home,
       js: Mutex::new(engine),
    };
    STATE.set(state).map_err(|_| Error::AlreadyStarted)?;
    let state = STATE.get().expect("STATE was set above");
-   std::thread::spawn(|| gateway::verify(state));
 
    let plugins = js::load_plugins(state, bundled)?;
    #[cfg(target_os = "android")]
@@ -471,7 +470,7 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    }
    Ok(Started {
       target: state.image.path.clone(),
-      build: state.build.map(|build| build.label),
+      build: state.image.build_id,
       plugins,
    })
 }

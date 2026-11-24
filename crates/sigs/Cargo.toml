@@ -1,6 +1,6 @@
 [package]
 name              = "phoenix-sigs"
-description       = "Typed hook-point rules and the per-build signature table"
+description       = "Phoenix's gateway registry walk and handler ABI"
 edition.workspace = true
 license.workspace = true
 version.workspace = true

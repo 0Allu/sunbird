@@ -62,7 +62,9 @@ extern "C" fn init() {
          log::info!(
             "phoenix started on {} ({}), plugins: {:?}",
             started.target,
-            started.build.unwrap_or("unknown build, portable rules"),
+            started
+               .build
+               .map_or_else(|| "no build ID".to_owned(), |id| id.to_string()),
             started.plugins,
          );
       },

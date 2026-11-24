@@ -73,7 +73,7 @@ deploys (`web/tools/bundle-plugins.mjs`).
 |---|---|
 | `crates/loader` | The injected library (`libplm.so`). |
 | `crates/runtime` | The QuickJS plugin runtime, the `phoenix` API and the Settings → Phoenix Unlocker pages. |
-| `crates/hook`, `crates/sigs`, `crates/sigscan` | Native hooks, hook-point rules, the per-build table. |
+| `crates/hook`, `crates/sigs`, `crates/sigscan` | Native hooks, the gateway registry walk, a registry dump CLI. |
 | `crates/ui`, `crates/wire` | Codecs for Phoenix's UI ops and bridge frames. |
 | `crates/patcher` | The command-line patcher. |
 | `crates/stand-in*` | A fake Phoenix gateway library for testing hooks without Discord. |

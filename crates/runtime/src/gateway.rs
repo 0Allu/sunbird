@@ -20,7 +20,6 @@ use std::{
 
 use phoenix_hook::image::Image;
 use phoenix_sigs::{
-   Abi,
    GATEWAY_HANDLER_FIELD,
    GatewayEvent,
    GatewayHandler,
@@ -39,13 +38,11 @@ use crate::{
    js::Before,
 };
 
-type HandlerFn = <GatewayHandler as Abi>::Fn;
-
 /// The registry's original handlers, in [`GatewayRegistry::iter`] order, and
 /// which events a plugin listens to.
 struct Gateway {
    registry:  GatewayRegistry,
-   originals: Vec<HandlerFn>,
+   originals: Vec<GatewayHandler>,
    hooked:    Vec<AtomicBool>,
 }
 
@@ -98,7 +95,7 @@ pub fn swap(
       .iter()
       // SAFETY: the registry walk only accepts entries whose handler starts a
       // function, and every registry handler has this ABI.
-      .map(|(_, entry)| unsafe { std::mem::transmute::<usize, HandlerFn>(entry.handler) })
+      .map(|(_, entry)| unsafe { std::mem::transmute::<usize, GatewayHandler>(entry.handler) })
       .collect();
    let hooked = registry.iter().map(|_| AtomicBool::new(false)).collect();
 
@@ -117,59 +114,14 @@ pub fn swap(
    let previous = unsafe { image.swap_words(&writes) }?;
    for ((_, entry), found) in gateway.registry.iter().zip(previous) {
       if found != entry.handler {
-         return Err(
-            phoenix_sigs::Error::Conflict {
-               sig: entry.name.clone(),
-               anchor: "registry swap".into(),
-               expected: entry.handler,
-               found,
-            }
-            .into(),
-         );
+         return Err(Error::SwapConflict {
+            event: entry.name.clone(),
+            expected: entry.handler,
+            found,
+         });
       }
    }
    Ok(&gateway.registry)
-}
-
-/// Checks the build table's rules against the registry walk. Code patterns
-/// scan all of `.text`, about 0.4 s each on Phoenix, so this runs off the
-/// host's startup path. Table anchors read the pointers [`swap`] already
-/// replaced and stop matching, so only code anchors count here.
-pub fn verify(state: &State) {
-   let gateway = GATEWAY
-      .get()
-      .expect("start swaps the registry before verifying");
-   for rule in state.build.map_or(&[][..], |build| build.gateway) {
-      let Some(entry) = gateway
-         .registry
-         .id(&rule.sig.name)
-         .map(|id| gateway.registry.entry(id))
-      else {
-         log::warn!("{}: no such event in the registry", rule.sig.name);
-         continue;
-      };
-
-      match rule.sig.resolve(&state.image) {
-         Ok(located) if located.addr == entry.handler => {
-            log::info!(
-               "{} at {:#x}, {}/{} anchors agree with the registry",
-               entry.name,
-               located.addr,
-               located.agreeing,
-               rule.sig.anchors.len(),
-            );
-         },
-         Ok(located) => {
-            log::error!(
-               "{}: the table rule found {:#x}, the registry holds {:#x}",
-               entry.name,
-               located.addr,
-               entry.handler,
-            );
-         },
-         Err(err) => log::error!("{err}"),
-      }
-   }
 }
 
 /// Runs `data` through Phoenix's own handler for `event`, skipping the

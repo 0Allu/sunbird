@@ -2,11 +2,7 @@ use std::collections::HashMap;
 
 use phoenix_hook::image::Image;
 
-use crate::{
-   Error,
-   GATEWAY_HANDLER_FIELD,
-   table_entries,
-};
+use crate::GATEWAY_HANDLER_FIELD;
 
 /// Every Phoenix build has this event, so its entry seeds the walk.
 const SEED: &str = "MESSAGE_CREATE";
@@ -15,6 +11,17 @@ const SEED: &str = "MESSAGE_CREATE";
 const DOMAIN_SEED: &str = "READY_SUPPLEMENTAL";
 const STRIDE: usize = 3 * size_of::<usize>();
 const MAX_NAME: usize = 64;
+
+#[derive(Debug, flub::Error)]
+pub enum Error {
+   #[error("no gateway table holds {seed}")]
+   NotFound { seed: &'static str },
+   #[error("{} gateway tables hold {seed}", .slots.len())]
+   Ambiguous {
+      seed:  &'static str,
+      slots: Vec<usize>,
+   },
+}
 
 /// A gateway event that exists in the loaded target. Only
 /// [`GatewayRegistry`] makes these, so holding one proves the event is live.
@@ -115,22 +122,17 @@ fn entry(image: &Image<'_>, slot: usize) -> Option<GatewayEntry> {
    })
 }
 
-fn walk(image: &Image<'_>, seed: &str) -> Result<Vec<GatewayEntry>, Error> {
+fn walk(image: &Image<'_>, seed: &'static str) -> Result<Vec<GatewayEntry>, Error> {
    let mut seeds = table_entries(image, seed, GATEWAY_HANDLER_FIELD);
    seeds.sort_unstable();
    seeds.dedup();
    let start = match seeds[..] {
       [(slot, _)] => slot,
-      [] => {
-         return Err(Error::NotFound {
-            sig: format!("gateway table holding {seed}"),
-         });
-      },
+      [] => return Err(Error::NotFound { seed }),
       _ => {
          return Err(Error::Ambiguous {
-            sig:    format!("gateway table holding {seed}"),
-            anchor: format!("table {seed:?}"),
-            hits:   seeds.iter().map(|(slot, _)| *slot).collect(),
+            seed,
+            slots: seeds.iter().map(|(slot, _)| *slot).collect(),
          });
       },
    };
@@ -146,4 +148,26 @@ fn walk(image: &Image<'_>, seed: &str) -> Result<Vec<GatewayEntry>, Error> {
       .map(|index| first + index * STRIDE)
       .map_while(|slot| entry(image, slot))
       .collect())
+}
+
+/// `(slot, code)` for every `{name ptr, name len, ...}` entry named `key` whose
+/// pointer `field` bytes in starts a function.
+fn table_entries(image: &Image<'_>, key: &str, field: usize) -> Vec<(usize, usize)> {
+   // Stops at the first copy of `key` a table points at. Literals sit in
+   // `.rodata` at the front of the image, so the scan never reaches `.text`
+   // (most of the library) at startup. Every table pointing at that copy still
+   // counts, so callers still see ambiguity.
+   image
+      .find_bytes_iter(key.as_bytes())
+      .map(|string| {
+         image
+            .pointers_to(string)
+            .into_iter()
+            .filter(|slot| image.read_usize(slot + size_of::<usize>()) == Some(key.len()))
+            .filter_map(|slot| Some((slot, image.read_usize(slot + field)?)))
+            .filter(|(_, code)| image.is_function(*code))
+            .collect::<Vec<_>>()
+      })
+      .find(|entries| !entries.is_empty())
+      .unwrap_or_default()
 }
