@@ -1,5 +1,7 @@
 # Phoenix Unlock
 
+[![discord][discord]](https://discord.gg/jEmw3bC2m7)
+
 Patches Phoenix, the native Rust client in Discord's Android alpha builds (356.7, versionCode
 356207), so it opens without the access gate. It also adds a plugin runtime: TypeScript plugins
 that hook gateway events, add buttons, rows and slash commands to Discord's own UI, and get their
@@ -104,3 +106,5 @@ The page itself lives in [sunbird-tools/site](https://github.com/sunbird-tools/s
 - [Amaan Qureshi](https://github.com/amaanq)
 
 Not affiliated with Discord.
+
+[discord]: https://img.shields.io/discord/917308687423533086?logo=discord&label=discord
