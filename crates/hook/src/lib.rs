@@ -27,6 +27,7 @@ pub mod dobby;
 pub mod image;
 pub mod pattern;
 #[cfg(target_os = "android")] pub mod plt;
+#[cfg(target_arch = "x86_64")] pub mod x86;
 #[cfg(all(
    target_os = "android",
    any(target_arch = "aarch64", target_arch = "arm")

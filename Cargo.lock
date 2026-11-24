@@ -426,6 +426,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ad320b3b96fb2a455a0726d16efe0a5afdbd34b71dea5bc53b05ea057714d4e"
 
 [[package]]
+name = "iced-x86"
+version = "1.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c23ad4d19dca41180e835ef6fbd2c1ee655777eca086ad80dd517e0513322879"
+dependencies = [
+ "lazy_static",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -669,6 +678,7 @@ dependencies = [
  "cc",
  "dobby-rs",
  "flub",
+ "iced-x86",
  "libc",
  "memchr",
  "sunhook-sys",
@@ -1088,6 +1098,7 @@ name = "sigscan"
 version = "0.1.0"
 dependencies = [
  "misstep",
+ "phoenix-hook",
  "phoenix-sigs",
 ]
 

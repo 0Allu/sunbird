@@ -36,10 +36,10 @@ use crate::pattern::Pattern;
 
 /// `jmp [rip]` followed by its 8-byte target.
 #[cfg(all(windows, target_arch = "x86_64"))]
-const ABSOLUTE_JUMP_LEN: usize = 14;
+pub(crate) const ABSOLUTE_JUMP_LEN: usize = 14;
 
 #[cfg(all(windows, target_arch = "x86_64"))]
-fn absolute_jump(to: usize) -> [u8; ABSOLUTE_JUMP_LEN] {
+pub(crate) fn absolute_jump(to: usize) -> [u8; ABSOLUTE_JUMP_LEN] {
    let mut jump = [0; ABSOLUTE_JUMP_LEN];
    jump[..2].copy_from_slice(&[0xFF, 0x25]);
    jump[6..].copy_from_slice(&to.to_le_bytes());
@@ -327,7 +327,7 @@ fn protection(maps: &str, addr: usize) -> Option<c_int> {
 }
 
 #[cfg(windows)]
-mod win32 {
+pub(crate) mod win32 {
    use std::ffi::c_void;
 
    pub const PAGE_EXECUTE_READWRITE: u32 = 0x40;
@@ -346,6 +346,13 @@ mod win32 {
    #[link(name = "kernel32")]
    unsafe extern "system" {
       pub fn GetCurrentProcess() -> *mut c_void;
+      pub fn ReadProcessMemory(
+         process: *mut c_void,
+         addr: *const c_void,
+         buffer: *mut c_void,
+         size: usize,
+         read: *mut usize,
+      ) -> i32;
       pub fn GetSystemInfo(info: *mut SystemInfo);
       pub fn VirtualAlloc(
          addr: *const c_void,
@@ -697,6 +704,28 @@ impl Image<'_> {
                .map(|offset| segment.addr + offset)
          })
          .collect()
+   }
+
+   /// `(field, target)` for each 32-bit displacement in executable segments
+   /// that points into `targets` relative to its own end, as in x86-64
+   /// RIP-relative `lea`, `mov` and `call`. Every offset is tried, so a hit
+   /// can be noise, and an instruction with an immediate after its
+   /// displacement is missed. Disassemble around a hit to confirm it.
+   #[must_use]
+   pub fn rip_refs(&self, targets: std::ops::Range<usize>) -> Vec<(usize, usize)> {
+      let mut found = Vec::new();
+      for segment in self.segments.iter().filter(|segment| segment.executable) {
+         for (offset, window) in segment.bytes.windows(4).enumerate() {
+            let rel = i32::from_le_bytes([window[0], window[1], window[2], window[3]]);
+            let field = segment.addr + offset;
+            if let Some(target) = (field + 4).checked_add_signed(rel as isize)
+               && targets.contains(&target)
+            {
+               found.push((field, target));
+            }
+         }
+      }
+      found
    }
 
    /// Addresses of `needle` in any segment. Linkers often merge `.rodata` into

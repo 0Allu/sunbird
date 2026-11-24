@@ -19,33 +19,47 @@ const fn hex_digit(byte: u8) -> Option<u8> {
    }
 }
 
+const fn valid(source: &str) -> bool {
+   let bytes = source.as_bytes();
+   let mut index = 0;
+   let mut literals = 0;
+   while index < bytes.len() {
+      if bytes[index] == b' ' {
+         index += 1;
+         continue;
+      }
+      let mut end = index;
+      while end < bytes.len() && bytes[end] != b' ' {
+         end += 1;
+      }
+      match end - index {
+         1 if bytes[index] == b'?' => {},
+         2 if bytes[index] == b'?' && bytes[index + 1] == b'?' => {},
+         2 if hex_digit(bytes[index]).is_some() && hex_digit(bytes[index + 1]).is_some() => {
+            literals += 1;
+         },
+         _ => return false,
+      }
+      index = end;
+   }
+   literals > 0
+}
+
 impl Pattern {
    #[must_use]
    pub const fn new(source: &'static str) -> Self {
-      let bytes = source.as_bytes();
-      let mut index = 0;
-      let mut literals = 0;
-      while index < bytes.len() {
-         if bytes[index] == b' ' {
-            index += 1;
-            continue;
-         }
-         let mut end = index;
-         while end < bytes.len() && bytes[end] != b' ' {
-            end += 1;
-         }
-         match end - index {
-            1 if bytes[index] == b'?' => {},
-            2 if bytes[index] == b'?' && bytes[index + 1] == b'?' => {},
-            2 if hex_digit(bytes[index]).is_some() && hex_digit(bytes[index + 1]).is_some() => {
-               literals += 1;
-            },
-            _ => panic!("pattern tokens are two hex digits, `?` or `??`"),
-         }
-         index = end;
-      }
-      assert!(literals > 0, "a pattern needs at least one literal byte");
+      assert!(
+         valid(source),
+         "pattern tokens are two hex digits, `?` or `??`, with at least one literal byte"
+      );
       Self(source)
+   }
+
+   /// A pattern typed at runtime, like in the debug shell. Each one leaks its
+   /// text, which the debug tools can afford.
+   #[must_use]
+   pub fn leak(source: String) -> Option<Self> {
+      valid(&source).then(|| Self(Box::leak(source.into_boxed_str())))
    }
 
    fn tokens(self) -> Vec<Option<u8>> {

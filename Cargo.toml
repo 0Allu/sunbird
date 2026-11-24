@@ -28,6 +28,7 @@ cc              = "1"
 crc32fast       = "1"
 dobby-rs        = "0.1"
 flub            = "0.1"
+iced-x86        = { default-features = false, features = [ "block_encoder", "decoder", "encoder", "instr_info", "intel", "std" ], version = "1.22" }
 jni-sys         = "0.4"
 libc            = "0.2"
 log             = "0.4"
