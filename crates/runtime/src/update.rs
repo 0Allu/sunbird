@@ -2,15 +2,18 @@
 //! or plugin bundles that differ from the installed ones. The site publishes
 //! both in `version.json` (`web/tools/bundle-plugins.ts`).
 //!
-//! Applying an update works in-app:
+//! Applying an update works in-app, in one tap:
 //! - Plugin-only updates download each changed `plugins/<name>.js`, verify its
 //!   CRC-32 against `version.json`, write it to `files/phoenix/plugins/`, and
 //!   hot-reload it live with zero APK reinstall.
-//! - Loader updates download `plugins/libphoenix-<abi>.so`, swap it into the
-//!   installed APK with [`patcher::swap_loader`], which signs it again, and
-//!   open Android's installer on it through Discord's own `FileProvider`. An
-//!   install from separate splits cannot update from one APK, so it opens the
-//!   site instead.
+//! - Loader updates first stage the changed plugins in `plugins.next/`, since
+//!   they are built against the new loader, then download
+//!   `plugins/libphoenix-<abi>.so`, swap it into the installed APK with
+//!   [`patcher::swap_loader`], which signs it again, and open Android's
+//!   installer on it through Discord's own `FileProvider`. The new loader moves
+//!   the staged plugins in before it loads any (`adopt_staged`). An install
+//!   from separate splits cannot update from one APK, so it opens the site
+//!   instead.
 
 use std::{
    collections::BTreeMap,
@@ -188,19 +191,16 @@ pub fn check() {
          },
       };
       let loader = (site.loader.as_str() > VERSION).then_some(site.loader);
+      // Plugins come along with a loader update, so one tap brings both.
       let mut plugins = Vec::new();
       let mut plugin_crcs = BTreeMap::new();
-      // The site's plugins are built against its loader, so they can call
-      // API this one lacks. They wait until the loader is current.
-      if loader.is_none() {
-         for plugin in crate::plugins() {
-            if let Some(&crc) = site.plugins.get(&plugin.name)
-               && crate::source(&plugin.name)
-                  .is_some_and(|source| crc32fast::hash(source.as_bytes()) != crc)
-            {
-               plugin_crcs.insert(plugin.name.clone(), crc);
-               plugins.push(plugin.name);
-            }
+      for plugin in crate::plugins() {
+         if let Some(&crc) = site.plugins.get(&plugin.name)
+            && crate::source(&plugin.name)
+               .is_some_and(|source| crc32fast::hash(source.as_bytes()) != crc)
+         {
+            plugin_crcs.insert(plugin.name.clone(), crc);
+            plugins.push(plugin.name);
          }
       }
       let update = Update {
@@ -272,6 +272,15 @@ pub fn apply() {
       return;
    }
    thread::spawn(move || {
+      // The site's plugins are built against its loader and can call API this
+      // one lacks, so with a loader update they wait in `plugins.next/` for it.
+      #[cfg(target_os = "android")]
+      if let Some(version) = &update.loader {
+         set_status(Some("Downloading plugins...".to_owned()));
+         stage_plugins(version, &update);
+         run_loader_self_update();
+         return;
+      }
       let mut updated_plugins = Vec::new();
       if !update.plugins.is_empty() {
          set_status(Some(format!(
@@ -317,12 +326,6 @@ pub fn apply() {
          }
       }
 
-      #[cfg(target_os = "android")]
-      if update.loader.is_some() {
-         run_loader_self_update();
-         return;
-      }
-
       // Plugin-only OTA update completed cleanly.
       set_status(None);
       BUSY.store(false, Ordering::Release);
@@ -358,6 +361,12 @@ pub fn self_update_from_site() {
 }
 
 fn update_plugin(name: &str, expected_crc: Option<u32>) -> Result<(), String> {
+   let source = download_plugin(name, expected_crc)?;
+   crate::save_source(name, source).map_err(|err| err.to_string())
+}
+
+/// The site's `plugins/<name>.js`, checked against its CRC-32.
+fn download_plugin(name: &str, expected_crc: Option<u32>) -> Result<String, String> {
    let url = format!("{ASSETS}plugins/{name}.js");
    let bytes = crate::fetch::get(&url).map_err(|err| format!("fetch: {err}"))?;
    if let Some(expected) = expected_crc {
@@ -368,8 +377,68 @@ fn update_plugin(name: &str, expected_crc: Option<u32>) -> Result<(), String> {
          ));
       }
    }
-   let source = String::from_utf8(bytes).map_err(|err| format!("invalid UTF-8: {err}"))?;
-   crate::save_source(name, source).map_err(|err| err.to_string())
+   String::from_utf8(bytes).map_err(|err| format!("invalid UTF-8: {err}"))
+}
+
+/// Where plugins for a loader not installed yet wait, with that loader's
+/// version in [`STAGED_FOR`].
+#[cfg(target_os = "android")] const STAGED: &str = "plugins.next";
+#[cfg(target_os = "android")] const STAGED_FOR: &str = "loader";
+
+/// Downloads `update`'s plugins into [`STAGED`] for loader `version`. One that
+/// fails stays as it is, and the next check offers it again.
+#[cfg(target_os = "android")]
+fn stage_plugins(version: &str, update: &Update) {
+   let Some(state) = crate::STATE.get() else {
+      return;
+   };
+   let dir = state.home.join(STAGED);
+   let _ = fs::remove_dir_all(&dir);
+   if let Err(err) = fs::create_dir_all(&dir) {
+      log::error!("staging plugins: {}: {err}", dir.display());
+      return;
+   }
+   for name in &update.plugins {
+      let staged = download_plugin(name, update.plugin_crcs.get(name).copied())
+         .and_then(|source| {
+            fs::write(dir.join(format!("{name}.js")), source).map_err(|err| err.to_string())
+         });
+      match staged {
+         Ok(()) => log::info!("staged plugin {name} for {version}"),
+         Err(err) => log::error!("staging {name} failed: {err}"),
+      }
+   }
+   if let Err(err) = fs::write(dir.join(STAGED_FOR), version) {
+      log::error!("staging plugins: {err}");
+   }
+}
+
+/// Moves the plugins staged for this loader, or an older one, into `plugins`.
+/// Plugins staged for a newer loader, whose install was not finished, wait.
+#[cfg(target_os = "android")]
+pub fn adopt_staged(home: &Path, plugins: &Path) {
+   let dir = home.join(STAGED);
+   let Ok(version) = fs::read_to_string(dir.join(STAGED_FOR)) else {
+      return;
+   };
+   if version.trim() > VERSION {
+      return;
+   }
+   if let Err(err) = fs::create_dir_all(plugins) {
+      log::error!("staged plugins: {}: {err}", plugins.display());
+      return;
+   }
+   for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+      let path = entry.path();
+      if path.extension().is_some_and(|extension| extension == "js")
+         && let Some(name) = path.file_name()
+         && let Err(err) = fs::rename(&path, plugins.join(name))
+      {
+         log::error!("staged plugin {}: {err}", path.display());
+      }
+   }
+   let _ = fs::remove_dir_all(&dir);
+   log::info!("moved in the plugins staged for {}", version.trim());
 }
 
 #[cfg(target_os = "android")]
