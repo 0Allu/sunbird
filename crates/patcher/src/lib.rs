@@ -66,6 +66,8 @@ pub enum Error {
    },
    #[error("dex: {0}")]
    Dex(String),
+   #[error("dex: {0}")]
+   Parse(pokedex::error::Error),
    #[error("{0}")]
    Host(String),
    #[error(transparent)]
@@ -315,13 +317,11 @@ fn patch_split<'a>(
             .strip_prefix("classes")
             .and_then(|rest| rest.strip_suffix(".dex"))
             .is_some()
+         && let Some(data) = dex::patch(record.entry(apk).data()?.into_owned())?
       {
-         let mut data = record.entry(apk).data()?.into_owned();
-         if dex::patch(&mut data)?.is_some() {
-            log(&format!("{name}: launcher returns true"));
-            progress.dex = true;
-            replaced[index] = Some(Some(data));
-         }
+         log(&format!("{name}: launcher returns true"));
+         progress.dex = true;
+         replaced[index] = Some(Some(data));
       }
    }
 
