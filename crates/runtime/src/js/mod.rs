@@ -108,12 +108,14 @@ const fn default_true() -> bool {
    true
 }
 
-/// Which plugins the user turned off and how they set each plugin's
-/// settings, kept in `home/plugins.json`.
+/// Which plugins the user turned off or on against their default and how
+/// they set each plugin's settings, kept in `home/plugins.json`.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Choices<'a> {
    #[serde(default)]
    disabled:     BTreeSet<String>,
+   #[serde(default)]
+   enabled:      BTreeSet<String>,
    #[serde(default)]
    settings:     Cow<'a, ChosenMap>,
    #[serde(default = "default_true")]
@@ -126,6 +128,7 @@ impl Default for Choices<'_> {
    fn default() -> Self {
       Self {
          disabled:     BTreeSet::new(),
+         enabled:      BTreeSet::new(),
          settings:     Cow::Owned(BTreeMap::new()),
          staff:        true,
          remote_shell: false,
@@ -463,12 +466,16 @@ impl Engine {
    }
 
    pub fn save_choices(&self) {
-      let disabled = self
-         .plugins
-         .iter()
-         .filter(|(_, loaded)| !loaded.enabled)
-         .map(|(name, _)| name.clone())
-         .collect();
+      let (mut disabled, mut enabled) = (BTreeSet::new(), BTreeSet::new());
+      for (name, loaded) in &self.plugins {
+         if Header::from(loaded.source.as_str()).default_off {
+            if loaded.enabled {
+               enabled.insert(name.clone());
+            }
+         } else if !loaded.enabled {
+            disabled.insert(name.clone());
+         }
+      }
       #[cfg(target_os = "android")]
       let remote_shell = crate::remote_shell_enabled();
       #[cfg(not(target_os = "android"))]
@@ -479,6 +486,7 @@ impl Engine {
          let empty = BTreeMap::new();
          serde_json::to_vec(&Choices {
             disabled,
+            enabled,
             settings: Cow::Borrowed(chosen.as_deref().unwrap_or(&empty)),
             staff: crate::staff_enabled(),
             remote_shell,
@@ -747,7 +755,11 @@ pub fn load_plugins(state: &'static State, bundled: Vec<Plugin>) -> Result<Vec<S
    engine.plugins = sources
       .into_iter()
       .map(|(name, (source, installed))| {
-         let enabled = !choices.disabled.contains(&name);
+         let enabled = if Header::from(source.as_str()).default_off {
+            choices.enabled.contains(&name)
+         } else {
+            !choices.disabled.contains(&name)
+         };
          (name, Loaded {
             source,
             enabled,

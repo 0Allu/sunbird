@@ -104,6 +104,9 @@ pub struct Header {
    pub description: Option<String>,
    pub version:     Option<String>,
    pub author:      Option<String>,
+   /// `// @enabled false`, for plugins that stay off until the user turns
+   /// them on.
+   pub default_off: bool,
 }
 
 impl From<&str> for Header {
@@ -124,11 +127,12 @@ impl From<&str> for Header {
          else {
             continue;
          };
-         let value = Some(value.trim().to_owned());
+         let value = value.trim();
          match key {
-            "description" => header.description = value,
-            "version" => header.version = value,
-            "author" => header.author = value,
+            "description" => header.description = Some(value.to_owned()),
+            "version" => header.version = Some(value.to_owned()),
+            "author" => header.author = Some(value.to_owned()),
+            "enabled" => header.default_off = value == "false",
             _ => {},
          }
       }
