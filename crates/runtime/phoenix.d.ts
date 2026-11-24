@@ -873,8 +873,18 @@ declare namespace Phoenix {
     readonly [sig]: P;
   }
 
+  /// Partial READY, topics/gateway-events#ready. Phoenix applies it outside the registry, so its
+  /// `after` hooks run before the app has applied it, and a hook cannot drop it.
+  interface Ready {
+    v: number;
+    user: CurrentUser;
+    session_id: string;
+  }
+
   /// Payload types for gateway events, keyed like `phoenix.gateway`.
   interface GatewayPayloads {
+    ready: Ready;
+    userUpdate: CurrentUser;
     messageCreate: GatewayMessage;
     /// A full message per the docs, with `tts` always false.
     messageUpdate: GatewayMessage;

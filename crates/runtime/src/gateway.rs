@@ -204,6 +204,38 @@ pub fn event(name: &str) -> Option<EventId> {
    GATEWAY.get()?.registry.id(name)
 }
 
+/// Runs plugin hooks on `data` for an event Phoenix's session applies without
+/// the registry, like `READY`, and returns the replacement JSON. Its `after`
+/// hooks run before Phoenix applies it, and it cannot be dropped.
+#[cfg(target_os = "android")]
+pub fn intercept(event: EventId, data: &str) -> Option<String> {
+   let gateway = GATEWAY.get()?;
+   if !gateway.hooked[event.index()].load(Ordering::Acquire) || IN_JS.get() {
+      return None;
+   }
+   let state = STATE.get()?;
+   let name = &gateway.registry.entry(event).name;
+   let replaced = match run_js(state, |engine| engine.before(event, name, data))? {
+      Before::Keep => None,
+      Before::Drop => {
+         log::warn!("gateway: {name} cannot be dropped, it went through");
+         None
+      },
+      Before::Replace(json) => Some(json),
+   };
+   let applied = replaced.as_deref().unwrap_or(data);
+   run_js(state, |engine| engine.after(event, name, applied, true));
+   replaced
+}
+
+/// Whether a plugin hooks `event`.
+#[cfg(target_os = "android")]
+pub fn listened(event: EventId) -> bool {
+   GATEWAY
+      .get()
+      .is_some_and(|gateway| gateway.hooked[event.index()].load(Ordering::Acquire))
+}
+
 /// Runs `data` through Phoenix's own handler for `event` ahead of the next
 /// event Phoenix handles.
 pub fn enqueue(event: EventId, data: String) {

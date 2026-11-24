@@ -36,6 +36,7 @@ mod local;
 #[cfg(target_os = "android")] mod picker;
 #[cfg(target_os = "android")] mod remote;
 #[cfg(target_os = "android")] mod settings;
+#[cfg(target_os = "android")] mod socket;
 mod staff;
 #[cfg(target_os = "android")] mod store;
 #[cfg(target_os = "android")] mod update;
@@ -462,6 +463,7 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
       }
       settings::start();
       patches::start();
+      bridge::install(Box::new(socket::Socket));
    }
    Ok(Started {
       target: state.image.path.clone(),
