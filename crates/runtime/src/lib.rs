@@ -34,6 +34,7 @@ pub mod console;
 #[cfg(target_os = "android")] mod fetch;
 mod gateway;
 #[cfg(target_os = "android")] mod highlight;
+#[cfg(target_os = "android")] mod host;
 mod js;
 #[cfg(target_os = "android")] mod jvm;
 mod local;
@@ -463,6 +464,11 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    let plugins = js::load_plugins(state, bundled)?;
    #[cfg(target_os = "android")]
    {
+      std::thread::spawn(|| {
+         if let Err(err) = host::load() {
+            log::error!("host names: {err}");
+         }
+      });
       if remote_shell_enabled() {
          remote::ensure_started();
       }

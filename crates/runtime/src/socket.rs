@@ -20,9 +20,8 @@ use crate::{
       Sink,
    },
    gateway,
+   host::Event,
 };
-
-const WS_EVENT: u16 = 378;
 
 /// Discord's gateway JSON is compact, so a READY message holds these bytes
 /// and every other frame is skipped with one scan.
@@ -55,17 +54,17 @@ impl Sink for Socket {
       let Ok(items) = decode_dispatch(frame) else {
          return Action::Pass;
       };
+      // Before the host names load, the body alone tells a gateway message.
+      let ws = crate::host::table().and_then(|host| host.event(Event::Ws));
       let edits = items
          .iter()
          .filter_map(|item| {
-            let DispatchEvent::Host {
-               event: WS_EVENT,
-               body,
-               ..
-            } = item.event
-            else {
+            let DispatchEvent::Host { event, body, .. } = item.event else {
                return None;
             };
+            if ws.is_some_and(|number| event != number) {
+               return None;
+            }
             let message = serde_json::from_slice::<Message<'_>>(body).ok()?;
             let data = message.d.filter(|_| message.t == Some("READY"))?.get();
             let json = gateway::intercept(ready, data)?;

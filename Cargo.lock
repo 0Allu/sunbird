@@ -650,6 +650,7 @@ dependencies = [
  "libc",
  "log",
  "memchr",
+ "patcher",
  "phoenix-hook",
  "phoenix-sigs",
  "phoenix-ui",

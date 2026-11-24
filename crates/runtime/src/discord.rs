@@ -9,8 +9,7 @@
 //!   [`filter`] takes the `@http` replies for those ids out of the dispatch
 //!   stream before Phoenix sees them.
 //!
-//! Module, method and field numbers index the host's name table `hh.jb`,
-//! versionCode 356207.
+//! Module, method and field numbers come from [`crate::host`].
 
 use std::{
    collections::HashMap,
@@ -52,18 +51,44 @@ use crate::{
    },
    console::url_encoded,
    fetch::Response,
+   host::{
+      Event,
+      Field,
+      Method,
+   },
 };
 
-const NETWORKING: u16 = 43;
-const REQUEST: u16 = 168;
-const HTTP_EVENT: u16 = 321;
+/// `Networking.request`'s numbers in the running build.
+#[derive(Clone, Copy)]
+struct Numbers {
+   module:  u16,
+   request: u16,
+   http:    u16,
+   error:   Key,
+   id:      Key,
+   method:  Key,
+   url:     Key,
+   headers: Key,
+   status:  Key,
+}
 
-const ERROR: Key = Key::new(403);
-const ID: Key = Key::new(417);
-const METHOD: Key = Key::new(421);
-const URL: Key = Key::new(422);
-const HEADERS: Key = Key::new(423);
-const STATUS: Key = Key::new(430);
+impl Numbers {
+   fn get() -> Option<Self> {
+      let host = crate::host::table()?;
+      let (module, request) = host.call(Method::NetworkingRequest)?;
+      Some(Self {
+         module,
+         request,
+         http: host.event(Event::Http)?,
+         error: host.key(Field::Error)?,
+         id: host.key(Field::Id)?,
+         method: host.key(Field::Method)?,
+         url: host.key(Field::Url)?,
+         headers: host.key(Field::Headers)?,
+         status: host.key(Field::Status)?,
+      })
+   }
+}
 
 /// Far above the counter Phoenix numbers its own requests with.
 const FIRST_ID: i32 = 0x5000_0000;
@@ -121,6 +146,8 @@ pub enum DiscordError {
    Path { path: String },
    #[error("Phoenix's bridge is not up yet")]
    NoBridge,
+   #[error("Phoenix's host names are not read yet")]
+   NoHostNames,
    #[error("{path}: no answer in {} seconds", TIMEOUT.as_secs())]
    Timeout { path: String },
    #[error("{path}: {message}")]
@@ -262,8 +289,8 @@ fn api_path(url: &str) -> Option<&str> {
 }
 
 /// `Networking.request`'s `headers`, an array of `[name, value]` pairs.
-fn headers(args: &Value) -> Vec<(String, String)> {
-   let Some(Value::Arr(pairs)) = args.field(HEADERS) else {
+fn headers(args: &Value, key: Key) -> Vec<(String, String)> {
+   let Some(Value::Arr(pairs)) = args.field(key) else {
       return Vec::new();
    };
    pairs
@@ -292,23 +319,26 @@ fn api_base(url: &str) -> Option<&str> {
 /// Whether an `invoke` frame starting with `head` is one [`observe_call`]
 /// reads.
 pub fn wants(head: &[u8]) -> bool {
-   HostCall::target(head) == Some((NETWORKING, REQUEST))
+   Numbers::get().is_some_and(|keys| HostCall::target(head) == Some((keys.module, keys.request)))
 }
 
 /// Observes one of Phoenix's own API requests and runs any matching
 /// `phoenix.discord.onRequest` hooks (filtered in Rust first so non-matching
 /// calls never enter `QuickJS`). Never exposes session headers to JS.
 pub fn intercept_call(frame: &[u8]) -> Action {
+   let Some(keys) = Numbers::get() else {
+      return Action::Pass;
+   };
    let Ok(mut call) = HostCall::decode(frame) else {
       return Action::Pass;
    };
-   observe_decoded(&call);
+   observe_decoded(&call, keys);
    if REQUEST_HOOK_COUNT.load(Ordering::Relaxed) == 0 {
       return Action::Pass;
    }
    let Some(method) = call
       .args
-      .field(METHOD)
+      .field(keys.method)
       .and_then(Value::as_str)
       .map(str::to_owned)
    else {
@@ -316,7 +346,7 @@ pub fn intercept_call(frame: &[u8]) -> Action {
    };
    let Some(path) = call
       .args
-      .field(URL)
+      .field(keys.url)
       .and_then(Value::as_str)
       .and_then(api_path)
       .map(str::to_owned)
@@ -343,7 +373,7 @@ pub fn intercept_call(frame: &[u8]) -> Action {
          // length.
          if let Value::Obj(ref mut fields) = call.args {
             for (key, value) in fields.iter_mut() {
-               if *key == HEADERS
+               if *key == keys.headers
                   && let Value::Arr(pairs) = value
                {
                   pairs.retain(|pair| {
@@ -358,13 +388,13 @@ pub fn intercept_call(frame: &[u8]) -> Action {
 }
 
 /// Keeps the session of one of Phoenix's own API requests.
-fn observe_decoded(call: &HostCall) {
+fn observe_decoded(call: &HostCall, keys: Numbers) {
    if RESPONSE_HOOK_COUNT.load(Ordering::Relaxed) > 0
-      && let Some(id) = call.args.field(ID).and_then(Value::as_i32)
-      && let Some(method) = call.args.field(METHOD).and_then(Value::as_str)
+      && let Some(id) = call.args.field(keys.id).and_then(Value::as_i32)
+      && let Some(method) = call.args.field(keys.method).and_then(Value::as_str)
       && let Some(path) = call
          .args
-         .field(URL)
+         .field(keys.url)
          .and_then(Value::as_str)
          .and_then(api_path)
    {
@@ -393,15 +423,15 @@ fn observe_decoded(call: &HostCall) {
    }
    if let Some(id) = call
       .args
-      .field(URL)
+      .field(keys.url)
       .and_then(Value::as_str)
       .and_then(profile_of)
    {
       *LAST_PROFILE.lock().unwrap_or_else(PoisonError::into_inner) = Some((id, Instant::now()));
    }
-   if let Some(url) = call.args.field(URL).and_then(Value::as_str)
+   if let Some(url) = call.args.field(keys.url).and_then(Value::as_str)
       && url.contains("/oauth2/authorize?")
-      && call.args.field(METHOD).and_then(Value::as_str) == Some("POST")
+      && call.args.field(keys.method).and_then(Value::as_str) == Some("POST")
       && let Some(authorizing) = AUTHORIZING
          .lock()
          .unwrap_or_else(PoisonError::into_inner)
@@ -410,17 +440,17 @@ fn observe_decoded(call: &HostCall) {
          .split(['?', '&'])
          .any(|pair| pair.strip_prefix("client_id=") == Some(authorizing.client_id.as_str()))
    {
-      authorizing.call = call.args.field(ID).and_then(Value::as_i32);
+      authorizing.call = call.args.field(keys.id).and_then(Value::as_i32);
    }
    let Some(base) = call
       .args
-      .field(URL)
+      .field(keys.url)
       .and_then(Value::as_str)
       .and_then(api_base)
    else {
       return;
    };
-   let headers = headers(&call.args)
+   let headers = headers(&call.args, keys.headers)
       .into_iter()
       .filter(|(name, _)| !PER_REQUEST.contains(&name.to_ascii_lowercase().as_str()))
       .collect::<Vec<_>>();
@@ -444,6 +474,9 @@ fn observe_decoded(call: &HostCall) {
 /// Takes the `@http` replies to phoenix's requests out of a `nativeDispatch`
 /// call, and defers replies matched by `phoenix.discord.onResponse` hooks.
 pub fn filter(bytes: &[u8]) -> Action {
+   let Some(keys) = Numbers::get() else {
+      return Action::Pass;
+   };
    let watching = AUTHORIZING
       .lock()
       .unwrap_or_else(PoisonError::into_inner)
@@ -470,15 +503,13 @@ pub fn filter(bytes: &[u8]) -> Action {
    let taken = items
       .into_iter()
       .filter_map(|item| {
-         let DispatchEvent::Host {
-            event: HTTP_EVENT,
-            args,
-            body,
-         } = item.event
-         else {
+         let DispatchEvent::Host { event, args, body } = item.event else {
             return None;
          };
-         let id = args.field(ID).and_then(Value::as_i32)?;
+         if event != keys.http {
+            return None;
+         }
+         let id = args.field(keys.id).and_then(Value::as_i32)?;
          if id < FIRST_ID {
             let frame = &bytes[item.offset..item.offset + item.len];
             if let Some(new) = authorized(id, frame, body) {
@@ -490,7 +521,7 @@ pub fn filter(bytes: &[u8]) -> Action {
                .remove(&id);
             if let Some(in_flight) = in_flight {
                let status = args
-                  .field(STATUS)
+                  .field(keys.status)
                   .and_then(Value::as_i32)
                   .unwrap_or_default();
                let owned_frame = frame.to_vec();
@@ -510,10 +541,13 @@ pub fn filter(bytes: &[u8]) -> Action {
          if let Some(waiter) = waiter {
             let _ = waiter.send(Reply {
                status: args
-                  .field(STATUS)
+                  .field(keys.status)
                   .and_then(Value::as_i32)
                   .unwrap_or_default(),
-               error:  args.field(ERROR).and_then(Value::as_str).map(str::to_owned),
+               error:  args
+                  .field(keys.error)
+                  .and_then(Value::as_str)
+                  .map(str::to_owned),
                body:   body.to_vec(),
             });
          }
@@ -587,19 +621,20 @@ pub fn send(
    });
    merged.extend(headers);
 
+   let keys = Numbers::get().ok_or(DiscordError::NoHostNames)?;
    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
    let pairs = merged
       .into_iter()
       .map(|(name, value)| Value::Arr(vec![Value::Str(name), Value::Str(value)]))
       .collect();
    let call = HostCall {
-      module: NETWORKING,
-      method: REQUEST,
+      module: keys.module,
+      method: keys.request,
       args: Value::Obj(vec![
-         (ID, Value::I32(id)),
-         (METHOD, Value::Str(method.to_owned())),
-         (URL, Value::Str(url)),
-         (HEADERS, Value::Arr(pairs)),
+         (keys.id, Value::I32(id)),
+         (keys.method, Value::Str(method.to_owned())),
+         (keys.url, Value::Str(url)),
+         (keys.headers, Value::Arr(pairs)),
       ]),
       body,
    };

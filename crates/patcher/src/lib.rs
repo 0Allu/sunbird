@@ -48,6 +48,26 @@ use crate::zip::{
    Record,
 };
 
+/// The numbers Phoenix's host name table gives `names` in `apk`.
+///
+/// `apk` is the base APK or one merged from the splits, and a name the build
+/// lacks gets `None`. Host calls, events and their fields go by these numbers,
+/// which a Discord build can renumber.
+pub fn host_names(apk: &[u8], names: &[&str]) -> Result<Vec<Option<u16>>, Error> {
+   let mut numbers = vec![None; names.len()];
+   for record in zip::read(apk)? {
+      let is_dex = record
+         .name
+         .strip_prefix("classes")
+         .and_then(|rest| rest.strip_suffix(".dex"))
+         .is_some();
+      if is_dex {
+         dex::host_numbers(record.entry(apk).data()?.into_owned(), names, &mut numbers)?;
+      }
+   }
+   Ok(numbers)
+}
+
 /// The loader's name in the APK.
 pub const LOADER: &str = host::INJECTED;
 

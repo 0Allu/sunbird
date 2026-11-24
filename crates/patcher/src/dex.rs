@@ -1,6 +1,7 @@
 //! Forces Phoenix to launch. The launcher method that falls back to the React
 //! Native client is found by its log string, since names are obfuscated per
-//! build, and made to return true.
+//! build, and made to return true. Phoenix's host name table is found the
+//! same way.
 
 use pokedex::{
    checksum::Checksums,
@@ -13,6 +14,8 @@ use pokedex::{
 use crate::Error;
 
 const ANCHOR: &str = "Phoenix didn't stay up for 3 launches";
+/// One entry of the host name table, which no other code holds.
+const TABLE_ANCHOR: &str = "Networking.request ";
 /// `const/4 v0, #1` then `return v0`.
 const RETURN_TRUE: [u8; 4] = [0x12, 0x10, 0x0F, 0x00];
 
@@ -40,6 +43,44 @@ fn loading<'dex>(dex: &'dex Dex, prefix: &str) -> Result<Vec<Method<'dex>>, Erro
       }
    }
    Ok(found)
+}
+
+/// Fills `numbers` from the `"<name> <number>"` entries of Phoenix's host name
+/// table, read from the strings of the method that builds it, and fails when
+/// the table gives one name two numbers.
+pub fn host_numbers(
+   data: Vec<u8>,
+   names: &[&str],
+   numbers: &mut [Option<u16>],
+) -> Result<(), Error> {
+   let dex = Dex::parse(data).map_err(Error::Parse)?;
+   for method in loading(&dex, TABLE_ANCHOR)? {
+      for index in method.string_loads().map_err(Error::Parse)? {
+         let Some(entry) = dex.strings().get(index.map_err(Error::Parse)?) else {
+            continue;
+         };
+         let Some((name, number)) = entry.rsplit_once(' ') else {
+            continue;
+         };
+         let Ok(number) = number.parse::<u16>() else {
+            continue;
+         };
+         for (wanted, slot) in names.iter().zip(numbers.iter_mut()) {
+            if *wanted != name {
+               continue;
+            }
+            match *slot {
+               Some(seen) if seen != number => {
+                  return Err(Error::Dex(format!(
+                     "host name {wanted} is both {seen} and {number}"
+                  )));
+               },
+               _ => *slot = Some(number),
+            }
+         }
+      }
+   }
+   Ok(())
 }
 
 /// Makes the launcher method return true, or `None` when this dex does not

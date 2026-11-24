@@ -23,6 +23,7 @@ crc32fast    = { workspace = true }
 jni-sys      = { workspace = true }
 libc         = { workspace = true }
 memchr       = { workspace = true }
+patcher      = { workspace = true }
 phoenix-ui   = { workspace = true }
 phoenix-wire = { workspace = true }
 
