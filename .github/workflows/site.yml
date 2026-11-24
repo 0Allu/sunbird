@@ -30,6 +30,7 @@ jobs:
           mkdir -p dist
           touch dist/.nojekyll
           cp -r web/pkg web/plugins web/version.json dist/
+          tar czf dist/site.tar.gz -C web pkg plugins version.json
       - uses: actions/upload-pages-artifact@v5
         with:
           path: dist
