@@ -7,15 +7,32 @@ use std::{
 
 use object::{
    Endianness,
+   LittleEndian,
+   Object,
    elf::{
       self,
       FileHeader32,
       FileHeader64,
    },
-   read::elf::{
-      FileHeader,
-      ProgramHeader,
-      SectionHeader,
+   pe::{
+      self,
+      IMAGE_DIRECTORY_ENTRY_EXCEPTION,
+      IMAGE_FILE_MACHINE_AMD64,
+      IMAGE_SCN_MEM_EXECUTE,
+      IMAGE_SCN_MEM_READ,
+      IMAGE_SCN_MEM_WRITE,
+   },
+   read::{
+      elf::{
+         FileHeader,
+         ProgramHeader,
+         SectionHeader,
+      },
+      pe::{
+         ImageNtHeaders,
+         ImageOptionalHeader,
+         PeFile64,
+      },
    },
 };
 use phoenix_hook::image::{
@@ -139,6 +156,7 @@ impl<'a> ElfFile<'a> {
          segments: Vec::new(),
          eh_frame_hdr: None,
          arm_exidx: None,
+         pdata: None,
          pointer_width,
       };
       let mut loads = Vec::new();
@@ -223,6 +241,107 @@ impl<'a> ElfFile<'a> {
          .iter()
          .find(|load| (load.vaddr..load.vaddr + load.size).contains(&vaddr))
          .map(|load| vaddr - load.vaddr + load.offset)
+   }
+}
+
+/// A PE64 image mapped at its preferred image base, for offline desktop tools.
+pub struct PeFile<'a> {
+   pub image:   Image<'a>,
+   pub machine: Machine,
+}
+
+impl<'a> PeFile<'a> {
+   pub fn parse(path: &str, data: &'a [u8]) -> Result<Self, FileError> {
+      let parse = |source| {
+         FileError::Parse {
+            path: path.to_owned(),
+            source,
+         }
+      };
+      let address = |source| {
+         FileError::Address {
+            path: path.to_owned(),
+            source,
+         }
+      };
+
+      let pe = PeFile64::parse(data).map_err(parse)?;
+      let machine = match pe.nt_headers().file_header().machine.get(LittleEndian) {
+         IMAGE_FILE_MACHINE_AMD64 => Machine::X86_64,
+         other => {
+            return Err(FileError::Machine {
+               path:    path.to_owned(),
+               machine: other.0,
+            });
+         },
+      };
+      let image_base = usize::try_from(pe.nt_headers().optional_header().image_base()).map_err(address)?;
+      let pdata = pe
+         .data_directory(IMAGE_DIRECTORY_ENTRY_EXCEPTION)
+         .and_then(|dir| {
+            let rva = usize::try_from(dir.virtual_address.get(LittleEndian)).ok()?;
+            let len = usize::try_from(dir.size.get(LittleEndian)).ok()?;
+            (rva != 0 && len >= 12).then_some((image_base, image_base + rva, len))
+         });
+
+      let mut segments = Vec::new();
+      for section in pe.section_table().iter() {
+         let chars = section.characteristics.get(LittleEndian).0;
+         if chars & IMAGE_SCN_MEM_READ.0 == 0 {
+            continue;
+         }
+         let bytes = section.pe_data(data).map_err(parse)?;
+         let rva = usize::try_from(section.virtual_address.get(LittleEndian)).map_err(address)?;
+         let vsize = u64::from(section.virtual_size.get(LittleEndian));
+         let memsz = vsize.max(bytes.len() as u64);
+         segments.push(Segment {
+            addr:       image_base + rva,
+            bytes:      mapped(bytes, memsz).map_err(address)?,
+            executable: chars & IMAGE_SCN_MEM_EXECUTE.0 != 0,
+            writable:   chars & IMAGE_SCN_MEM_WRITE.0 != 0,
+         });
+      }
+
+      let build_id = pe.pdb_info().ok().flatten().and_then(|info| {
+         BuildId::from_bytes(&info.guid())
+      });
+
+      Ok(Self {
+         image: Image {
+            path: path.to_owned(),
+            build_id,
+            segments,
+            eh_frame_hdr: None,
+            arm_exidx: None,
+            pdata,
+            pointer_width: 8,
+         },
+         machine,
+      })
+   }
+}
+
+/// Either an ELF or PE64 binary parsed from disk.
+pub enum BinaryFile<'a> {
+   Elf(ElfFile<'a>),
+   Pe(PeFile<'a>),
+}
+
+impl<'a> BinaryFile<'a> {
+   pub fn parse(path: &str, data: &'a [u8]) -> Result<Self, FileError> {
+      if data.starts_with(&pe::IMAGE_DOS_SIGNATURE.to_le_bytes()) {
+         Ok(Self::Pe(PeFile::parse(path, data)?))
+      } else {
+         Ok(Self::Elf(ElfFile::parse(path, data)?))
+      }
+   }
+
+   #[must_use]
+   pub const fn image(&self) -> &Image<'a> {
+      match self {
+         Self::Elf(file) => &file.image,
+         Self::Pe(file) => &file.image,
+      }
    }
 }
 

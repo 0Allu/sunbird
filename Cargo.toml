@@ -31,7 +31,7 @@ libc            = "0.2"
 log             = "0.4"
 memchr          = "2"
 misstep         = { features = [ "panic-hook", "pretty" ], version = "0.4.1" }
-object          = { default-features = false, features = [ "elf", "read_core", "std" ], version = "0.41" }
+object          = { default-features = false, features = [ "elf", "pe", "read_core", "std" ], version = "0.41" }
 patcher         = { path = "crates/patcher" }
 phoenix-hook    = { path = "crates/hook" }
 phoenix-runtime = { path = "crates/runtime" }

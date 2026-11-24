@@ -81,7 +81,8 @@ fn dex() {
          .expect("ANDROID_SDK_ROOT is unset, build inside `nix develop`"),
    );
    let jar = newest(&sdk.join("platforms"), "android-").join("android.jar");
-   let d8 = newest(&sdk.join("build-tools"), "").join("d8");
+   let d8_name = if cfg!(windows) { "d8.bat" } else { "d8" };
+   let d8 = newest(&sdk.join("build-tools"), "").join(d8_name);
    let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
    let classes = out.join("classes");
    let _ = fs::remove_dir_all(&classes);

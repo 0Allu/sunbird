@@ -2,11 +2,18 @@ use std::collections::HashMap;
 
 use phoenix_hook::image::Image;
 
+use crate::GATEWAY_HANDLER_FIELD;
+
 /// Every Phoenix build has this event, so its entry seeds the walk.
 const SEED: &str = "MESSAGE_CREATE";
-/// Seeds the walk over the reducers behind the exported
-/// `LIBDISCORD_REDUCERS_TABLE`, whose per-domain slices sit back to back.
+/// Seeds the walk over the session/domain reducers (`READY_SUPPLEMENTAL`,
+/// `RESUMED`, etc.) whose slice sits separately from the main registry or
+/// domain table.
 const DOMAIN_SEED: &str = "READY_SUPPLEMENTAL";
+const STRIDE: usize = 3 * size_of::<usize>();
+/// Stride of a `libdiscord` domain reducer descriptor:
+/// `{domain_name_ptr, domain_name_len, domain_id, slice_ptr, slice_len}`.
+const DOMAIN_STRIDE: usize = 5 * size_of::<usize>();
 const MAX_NAME: usize = 64;
 
 #[derive(Debug, flub::Error)]
@@ -36,16 +43,17 @@ impl EventId {
 #[derive(Clone, Debug)]
 pub struct GatewayEntry {
    pub name:    String,
-   pub slot:    usize,
+   /// All registry table slots holding this event's `{name_ptr, name_len,
+   /// handler}` record. Android has one slot per event; desktop builds can
+   /// emit duplicate copies of the static domain table across codegen units.
+   pub slots:   Vec<usize>,
    pub handler: usize,
 }
 
-/// The target's gateway registry, a contiguous array of `{name ptr, name len,
-/// handler}`, walked out from the [`SEED`] entry in both directions until an
-/// entry stops looking like one.
-///
-/// The domain reducers, found from [`DOMAIN_SEED`] the same way, follow when
-/// the target has them.
+/// The target's gateway registry, walked from [`SEED`] across either a flat
+/// `{name_ptr, name_len, handler}` table (Android) or `libdiscord`'s 40-byte
+/// per-domain descriptor table (Desktop), plus any separate [`DOMAIN_SEED`]
+/// slice (`READY_SUPPLEMENTAL`, etc.).
 pub struct GatewayRegistry {
    entries: Vec<GatewayEntry>,
    by_name: HashMap<String, EventId>,
@@ -53,16 +61,9 @@ pub struct GatewayRegistry {
 
 impl GatewayRegistry {
    pub fn locate(image: &Image<'_>) -> Result<Self, Error> {
-      let mut entries = walk(image, SEED)?;
-      match walk(image, DOMAIN_SEED) {
-         Ok(domain) => {
-            let main = entries.len();
-            for entry in domain {
-               if !entries[..main].iter().any(|known| known.name == entry.name) {
-                  entries.push(entry);
-               }
-            }
-         },
+      let mut entries = locate_primary(image)?;
+      match walk_flat(image, DOMAIN_SEED) {
+         Ok(domain) => merge_entries(&mut entries, domain),
          Err(Error::NotFound { .. }) => {},
          Err(err) => return Err(err),
       }
@@ -98,11 +99,64 @@ impl GatewayRegistry {
    }
 }
 
+/// Finds the primary event table(s) containing [`SEED`]. Supports both a
+/// single flat table (Android) and one or more per-domain descriptor tables
+/// (Desktop `libdiscord`).
+fn locate_primary(image: &Image<'_>) -> Result<Vec<GatewayEntry>, Error> {
+   let mut seeds = table_entries(image, SEED, GATEWAY_HANDLER_FIELD);
+   seeds.sort_unstable();
+   seeds.dedup();
+   if seeds.is_empty() {
+      return Err(Error::NotFound { seed: SEED });
+   }
+
+   // Try walking domain descriptor tables anchored at each seed slice first.
+   let mut domain_entries = Vec::new();
+   let mut all_domains = true;
+   for &(slot, _) in &seeds {
+      let slice_start = walk_slice_start(image, slot);
+      let Some(found) = walk_domains_from_slice(image, slice_start) else {
+         all_domains = false;
+         break;
+      };
+      merge_entries(&mut domain_entries, found);
+   }
+   if all_domains && !domain_entries.is_empty() {
+      return Ok(domain_entries);
+   }
+
+   match seeds.as_slice() {
+      [(slot, _)] => Ok(walk_from_slot(image, *slot)),
+      _ => {
+         Err(Error::Ambiguous {
+            seed:  SEED,
+            slots: seeds.iter().map(|(slot, _)| *slot).collect(),
+         })
+      },
+   }
+}
+
+fn merge_entries(target: &mut Vec<GatewayEntry>, incoming: Vec<GatewayEntry>) {
+   for entry in incoming {
+      if let Some(existing) = target.iter_mut().find(|known| known.name == entry.name) {
+         if existing.handler == entry.handler {
+            for slot in entry.slots {
+               if !existing.slots.contains(&slot) {
+                  existing.slots.push(slot);
+               }
+            }
+         }
+      } else {
+         target.push(entry);
+      }
+   }
+}
+
 fn entry(image: &Image<'_>, slot: usize) -> Option<GatewayEntry> {
-   let width = image.pointer_width;
+   let ptr_size = image.pointer_width;
    let name = image.read_usize(slot)?;
-   let len = image.read_usize(slot + width)?;
-   let handler = image.read_usize(slot + 2 * width)?;
+   let len = image.read_usize(slot + ptr_size)?;
+   let handler = image.read_usize(slot + 2 * ptr_size)?;
    if !(1..=MAX_NAME).contains(&len) || !image.is_function(handler) {
       return None;
    }
@@ -114,60 +168,135 @@ fn entry(image: &Image<'_>, slot: usize) -> Option<GatewayEntry> {
       return None;
    }
    Some(GatewayEntry {
-      name: String::from_utf8(name.to_vec()).ok()?,
-      slot,
+      name:    String::from_utf8(name.to_vec()).ok()?,
+      slots:   vec![slot],
       handler,
    })
 }
 
-fn walk(image: &Image<'_>, seed: &'static str) -> Result<Vec<GatewayEntry>, Error> {
+fn walk_slice_start(image: &Image<'_>, start: usize) -> usize {
    let stride = 3 * image.pointer_width;
-   let mut seeds = table_entries(image, seed, 2 * image.pointer_width);
-   seeds.sort_unstable();
-   seeds.dedup();
-
-   let start = match seeds[..] {
-      [(slot, _)] => slot,
-      [] => return Err(Error::NotFound { seed }),
-      _ => {
-         return Err(Error::Ambiguous {
-            seed,
-            slots: seeds.iter().map(|(slot, _)| *slot).collect(),
-         });
-      },
-   };
-
    let mut first = start;
    while let Some(previous) = first.checked_sub(stride)
       && entry(image, previous).is_some()
    {
       first = previous;
    }
+   first
+}
 
-   Ok((0..)
+fn walk_from_slot(image: &Image<'_>, start: usize) -> Vec<GatewayEntry> {
+   let stride = 3 * image.pointer_width;
+   let first = walk_slice_start(image, start);
+   (0..)
       .map(|index| first + index * stride)
       .map_while(|slot| entry(image, slot))
-      .collect())
+      .collect()
+}
+
+fn walk_flat(image: &Image<'_>, seed: &'static str) -> Result<Vec<GatewayEntry>, Error> {
+   let mut seeds = table_entries(image, seed, 2 * image.pointer_width);
+   seeds.sort_unstable();
+   seeds.dedup();
+   match seeds.as_slice() {
+      [(slot, _)] => Ok(walk_from_slot(image, *slot)),
+      [] => Err(Error::NotFound { seed }),
+      _ => {
+         Err(Error::Ambiguous {
+            seed,
+            slots: seeds.iter().map(|(slot, _)| *slot).collect(),
+         })
+      },
+   }
+}
+
+/// Checks whether `slice_start` is referenced by a 5-word `libdiscord` domain
+/// descriptor `{name_ptr, name_len, domain_id, slice_ptr, slice_len}` and, if
+/// so, walks the entire contiguous domain table.
+fn walk_domains_from_slice(image: &Image<'_>, slice_start: usize) -> Option<Vec<GatewayEntry>> {
+   let ptr_size = image.pointer_width;
+   let domain_stride = 5 * ptr_size;
+   let slice_field = 3 * ptr_size;
+
+   let anchor = image
+      .pointers_to(slice_start)
+      .into_iter()
+      .filter_map(|ptr_slot| ptr_slot.checked_sub(slice_field))
+      .find(|&desc| domain_entries(image, desc).is_some())?;
+
+   let mut first = anchor;
+   while let Some(prev) = first.checked_sub(domain_stride)
+      && domain_entries(image, prev).is_some()
+   {
+      first = prev;
+   }
+
+   let mut out = Vec::new();
+   let mut domains = 0usize;
+   let mut cur = first;
+   while let Some(slice_entries) = domain_entries(image, cur) {
+      domains += 1;
+      merge_entries(&mut out, slice_entries);
+      cur += domain_stride;
+   }
+   (domains >= 2 && !out.is_empty()).then_some(out)
+}
+
+/// Parses one `libdiscord` domain descriptor at `addr`:
+/// `{name_ptr, name_len, domain_id, slice_ptr, slice_len}`.
+fn domain_entries(image: &Image<'_>, addr: usize) -> Option<Vec<GatewayEntry>> {
+   let ptr_size = image.pointer_width;
+   let name_ptr = image.read_usize(addr)?;
+   let name_len = image.read_usize(addr + ptr_size)?;
+   let domain_id = image.read_usize(addr + 2 * ptr_size)?;
+   let slice_ptr = image.read_usize(addr + 3 * ptr_size)?;
+   let slice_len = image.read_usize(addr + 4 * ptr_size)?;
+
+   if !(1..=MAX_NAME).contains(&name_len) || domain_id > 1024 || slice_len > 256 {
+      return None;
+   }
+   let name = image.read(name_ptr, name_len)?;
+   if !name
+      .iter()
+      .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
+   {
+      return None;
+   }
+   let stride = 3 * ptr_size;
+   let mut out = Vec::with_capacity(slice_len);
+   for index in 0..slice_len {
+      out.push(entry(image, slice_ptr + index * stride)?);
+   }
+   Some(out)
 }
 
 /// `(slot, code)` for every `{name ptr, name len, ...}` entry named `key` whose
 /// pointer `field` bytes in starts a function.
 fn table_entries(image: &Image<'_>, key: &str, field: usize) -> Vec<(usize, usize)> {
-   // Stops at the first copy of `key` a table points at. Literals sit in
-   // `.rodata` at the front of the image, so the scan never reaches `.text`
-   // (most of the library) at startup. Every table pointing at that copy still
-   // counts, so callers still see ambiguity.
-   image
-      .find_bytes_iter(key.as_bytes())
-      .map(|string| {
-         image
-            .pointers_to(string)
-            .into_iter()
-            .filter(|slot| image.read_usize(slot + image.pointer_width) == Some(key.len()))
-            .filter_map(|slot| Some((slot, image.read_usize(slot + field)?)))
-            .filter(|(_, code)| image.is_function(*code))
-            .collect::<Vec<_>>()
-      })
-      .find(|entries| !entries.is_empty())
-      .unwrap_or_default()
+   let ptr_size = image.pointer_width;
+   let field = if field == GATEWAY_HANDLER_FIELD {
+      2 * ptr_size
+   } else {
+      field
+   };
+   let mut out = Vec::new();
+   for string in image.find_bytes_iter(key.as_bytes()) {
+      for slot in image.pointers_to(string) {
+         if image.read_usize(slot + ptr_size) != Some(key.len()) {
+            continue;
+         }
+         let Some(code) = image.read_usize(slot + field) else {
+            continue;
+         };
+         if image.is_function(code) {
+            out.push((slot, code));
+         }
+      }
+      if !out.is_empty() {
+         break;
+      }
+   }
+   // Keep compile-time constants referenced on 64-bit targets.
+   let _ = (STRIDE, DOMAIN_STRIDE);
+   out
 }

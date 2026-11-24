@@ -1,7 +1,7 @@
-//! `sigscan <library.so>`
+//! `sigscan <library.so | Discord.exe>`
 //!
-//! Loads an ELF file the way the dynamic linker would see it, with relative
-//! relocations applied, and dumps the gateway registry the runtime would hook.
+//! Loads an ELF or PE64 binary the way the OS loader maps it and dumps the
+//! gateway registry the runtime would hook.
 
 use std::{
    collections::HashMap,
@@ -14,15 +14,18 @@ use misstep::{
    ResultExt,
 };
 use phoenix_sigs::{
-   file::ElfFile,
+   file::BinaryFile,
    registry::GatewayRegistry,
 };
 
 fn main() -> misstep::Result<()> {
    misstep::install_panic_hook();
-   let path = env::args().nth(1).context("usage: sigscan <library.so>")?;
+   let path = env::args()
+      .nth(1)
+      .context("usage: sigscan <library.so | Discord.exe>")?;
    let data = fs::read(&path).with_context(|| format!("reading {path}"))?;
-   let image = ElfFile::parse(&path, &data)?.image;
+   let parsed = BinaryFile::parse(&path, &data)?;
+   let image = parsed.image();
    match image.build_id {
       Some(id) => println!("{} build {id}", image.file_name()),
       None => println!("{} without a build ID", image.file_name()),

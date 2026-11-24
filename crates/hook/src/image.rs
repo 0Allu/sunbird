@@ -1,12 +1,28 @@
 use std::{
    borrow::Cow,
+   fmt,
+   path::Path,
+};
+#[cfg(unix)]
+use std::{
    ffi::{
       CStr,
       c_int,
       c_void,
    },
-   fmt,
-   path::Path,
+   slice,
+   sync::atomic::{
+      AtomicUsize,
+      Ordering,
+   },
+};
+#[cfg(windows)]
+use std::{
+   ffi::{
+      OsString,
+      c_void,
+   },
+   os::windows::ffi::OsStringExt,
    slice,
    sync::atomic::{
       AtomicUsize,
@@ -19,10 +35,10 @@ use memchr::memmem;
 use crate::pattern::Pattern;
 
 const NT_GNU_BUILD_ID: u32 = 3;
-const PF_X: u32 = 1;
-const PF_W: u32 = 2;
-const PF_R: u32 = 4;
-const PT_ARM_EXIDX: u32 = 0x7000_0001;
+#[cfg(unix)] const PF_X: u32 = 1;
+#[cfg(unix)] const PF_W: u32 = 2;
+#[cfg(unix)] const PF_R: u32 = 4;
+#[cfg(unix)] const PT_ARM_EXIDX: u32 = 0x7000_0001;
 
 /// The `NT_GNU_BUILD_ID` note of an ELF module, 1 to 32 bytes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -101,20 +117,23 @@ impl Segment<'_> {
    }
 }
 
-/// An ELF module, either mapped in this process or rebuilt from a file with its
-/// relative relocations applied, so pointer slots hold the addresses code would
-/// see.
+/// A loaded or offline binary module (ELF or PE), mapped with its relative
+/// relocations applied so pointer slots hold the addresses code would see.
 pub struct Image<'a> {
-   pub path:         String,
-   pub build_id:     Option<BuildId>,
-   pub segments:     Vec<Segment<'a>>,
+   pub path:          String,
+   pub build_id:      Option<BuildId>,
+   pub segments:      Vec<Segment<'a>>,
    /// Address of `.eh_frame_hdr`, from `PT_GNU_EH_FRAME`.
-   pub eh_frame_hdr: Option<usize>,
+   pub eh_frame_hdr:  Option<usize>,
    /// `.ARM.exidx` address and byte length, from `PT_ARM_EXIDX`. ARM32 unwinds
    /// through this table, so it carries the function starts `.eh_frame_hdr`
    /// holds on other targets.
-   pub arm_exidx:    Option<(usize, usize)>,
-   /// Width of a pointer in this image, 4 for ELF32 and 8 for ELF64. A file
+   pub arm_exidx:     Option<(usize, usize)>,
+   /// PE64 exception directory `(image_base, pdata_addr, pdata_len)` holding
+   /// sorted 12-byte `RUNTIME_FUNCTION` `{begin_rva, end_rva, unwind_rva}`
+   /// entries.
+   pub pdata:         Option<(usize, usize, usize)>,
+   /// Width of a pointer in this image, 4 for 32-bit and 8 for 64-bit. A file
    /// parsed offline keeps the target's width, not the host's.
    pub pointer_width: usize,
 }
@@ -162,6 +181,7 @@ impl Image<'static> {
             segments: Vec::new(),
             eh_frame_hdr: None,
             arm_exidx: None,
+            pdata: None,
             pointer_width: size_of::<usize>(),
          };
          for header in headers {
@@ -294,6 +314,262 @@ fn protection(maps: &str, addr: usize) -> Option<c_int> {
    })
 }
 
+#[cfg(windows)]
+mod win32 {
+   use std::ffi::c_void;
+
+   pub const PAGE_EXECUTE_READWRITE: u32 = 0x40;
+   pub const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
+   pub const IMAGE_SCN_MEM_READ: u32 = 0x4000_0000;
+   pub const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
+
+   #[repr(C)]
+   pub struct SystemInfo {
+      pub arch_or_oem: u32,
+      pub page_size:   u32,
+      pub _rest:       [u8; 40],
+   }
+
+   #[link(name = "kernel32")]
+   unsafe extern "system" {
+      pub fn GetCurrentProcess() -> *mut c_void;
+      pub fn GetSystemInfo(info: *mut SystemInfo);
+      pub fn VirtualProtect(
+         addr: *mut c_void,
+         size: usize,
+         new_protect: u32,
+         old_protect: *mut u32,
+      ) -> i32;
+      pub fn K32EnumProcessModules(
+         process: *mut c_void,
+         modules: *mut *mut c_void,
+         cb: u32,
+         needed: *mut u32,
+      ) -> i32;
+      pub fn K32GetModuleFileNameExW(
+         process: *mut c_void,
+         module: *mut c_void,
+         filename: *mut u16,
+         size: u32,
+      ) -> u32;
+   }
+}
+
+#[cfg(windows)]
+impl Image<'static> {
+   /// Every loaded PE module in the current process.
+   ///
+   /// # Safety
+   ///
+   /// The segments borrow mapped memory. The modules stay loaded while the
+   /// images live, and no thread writes the writable segments during a scan.
+   pub unsafe fn loaded() -> Vec<Self> {
+      // SAFETY: GetCurrentProcess returns a valid pseudo-handle.
+      let process = unsafe { win32::GetCurrentProcess() };
+      let mut needed = 0u32;
+      let mut handles = vec![std::ptr::null_mut::<c_void>(); 256];
+      loop {
+         let cb = u32::try_from(handles.len() * size_of::<*mut c_void>()).unwrap_or(u32::MAX);
+         // SAFETY: `handles` has space for `cb` bytes.
+         let ok = unsafe {
+            win32::K32EnumProcessModules(process, handles.as_mut_ptr(), cb, &raw mut needed)
+         };
+         if ok == 0 {
+            return Vec::new();
+         }
+         let count = (needed as usize) / size_of::<*mut c_void>();
+         if count <= handles.len() {
+            handles.truncate(count);
+            break;
+         }
+         handles.resize(count, std::ptr::null_mut());
+      }
+
+      handles
+         .into_iter()
+         .filter_map(|handle| {
+            // SAFETY: `handle` is an HMODULE reported by K32EnumProcessModules.
+            unsafe { Self::from_hmodule(process, handle) }
+         })
+         .collect()
+   }
+
+   /// # Safety
+   ///
+   /// `module` is a live `HMODULE` mapped into `process`.
+   unsafe fn from_hmodule(process: *mut c_void, module: *mut c_void) -> Option<Self> {
+      let base = module as usize;
+      if base == 0 {
+         return None;
+      }
+      let mut name_buf = [0u16; 1024];
+      // SAFETY: `name_buf` is valid for its length.
+      let name_len = unsafe {
+         win32::K32GetModuleFileNameExW(
+            process,
+            module,
+            name_buf.as_mut_ptr(),
+            u32::try_from(name_buf.len()).ok()?,
+         )
+      } as usize;
+      let path = OsString::from_wide(&name_buf[..name_len])
+         .to_string_lossy()
+         .into_owned();
+
+      // SAFETY: a valid PE module starts with an IMAGE_DOS_HEADER (at least 64 bytes).
+      let dos = unsafe { slice::from_raw_parts(base as *const u8, 64) };
+      if &dos[0..2] != b"MZ" {
+         return None;
+      }
+      let pe_off = usize::try_from(u32::from_le_bytes(dos[0x3C..0x40].try_into().ok()?)).ok()?;
+      // SAFETY: NT headers sit within the mapped image header page.
+      let nt = unsafe { slice::from_raw_parts((base + pe_off) as *const u8, 24) };
+      if &nt[0..4] != b"PE\0\0" {
+         return None;
+      }
+      let nsec = usize::from(u16::from_le_bytes(nt[6..8].try_into().ok()?));
+      let opt_size = usize::from(u16::from_le_bytes(nt[20..22].try_into().ok()?));
+      // SAFETY: optional header and section table follow the COFF header.
+      let opt = unsafe { slice::from_raw_parts((base + pe_off + 24) as *const u8, opt_size) };
+      let magic = u16::from_le_bytes(opt.get(0..2)?.try_into().ok()?);
+      let (pointer_width, pdata) = match magic {
+         0x020B => {
+            // PE32+: Exception directory is data directory index 3 at optional header offset 112 + 3*8.
+            let pdata = opt.get(136..144).and_then(|dir| {
+               let rva = usize::try_from(u32::from_le_bytes(dir[0..4].try_into().ok()?)).ok()?;
+               let len = usize::try_from(u32::from_le_bytes(dir[4..8].try_into().ok()?)).ok()?;
+               (rva != 0 && len >= 12).then_some((base, base + rva, len))
+            });
+            (8, pdata)
+         },
+         0x010B => (4, None),
+         _ => return None,
+      };
+
+      let sec_table = base + pe_off + 24 + opt_size;
+      // SAFETY: `nsec` 40-byte section headers follow the optional header.
+      let raw_secs = unsafe { slice::from_raw_parts(sec_table as *const u8, nsec * 40) };
+      let mut segments = Vec::with_capacity(nsec);
+      for hdr in raw_secs.chunks_exact(40) {
+         let vsize = usize::try_from(u32::from_le_bytes(hdr[8..12].try_into().ok()?)).ok()?;
+         let va = usize::try_from(u32::from_le_bytes(hdr[12..16].try_into().ok()?)).ok()?;
+         let chars = u32::from_le_bytes(hdr[36..40].try_into().ok()?);
+         if vsize == 0 || chars & win32::IMAGE_SCN_MEM_READ == 0 {
+            continue;
+         }
+         let addr = base + va;
+         // SAFETY: mapped readable PE section lives for the module's lifetime.
+         let bytes = unsafe { slice::from_raw_parts(addr as *const u8, vsize) };
+         segments.push(Segment {
+            addr,
+            bytes: Cow::Borrowed(bytes),
+            executable: chars & win32::IMAGE_SCN_MEM_EXECUTE != 0,
+            writable: chars & win32::IMAGE_SCN_MEM_WRITE != 0,
+         });
+      }
+
+      Some(Self {
+         path,
+         build_id: None,
+         segments,
+         eh_frame_hdr: None,
+         arm_exidx: None,
+         pdata,
+         pointer_width,
+      })
+   }
+
+   /// Writes each `(slot, value)` pair into this module's mapped memory and
+   /// returns the values the slots held. Read-only pages are made writable for
+   /// the write and get their protection back afterwards.
+   ///
+   /// # Safety
+   ///
+   /// Every slot is a pointer-aligned word in this module, and no thread reads
+   /// a slot while it is written.
+   pub unsafe fn swap_words(&self, writes: &[(usize, usize)]) -> Result<Vec<usize>, crate::Error> {
+      // SAFETY: forwarded from the caller.
+      unsafe { swap_words(writes) }
+   }
+}
+
+#[cfg(windows)]
+/// Atomically swaps each `(slot, value)` pair in mapped memory and returns the
+/// values the slots held. Read-only pages are made writable for the write and
+/// get their protection back afterwards.
+///
+/// # Safety
+///
+/// Every slot is a mapped, pointer-aligned word, and code that reads it accepts
+/// either value.
+pub unsafe fn swap_words(writes: &[(usize, usize)]) -> Result<Vec<usize>, crate::Error> {
+   let mut info = win32::SystemInfo {
+      arch_or_oem: 0,
+      page_size:   4096,
+      _rest:       [0; 40],
+   };
+   // SAFETY: GetSystemInfo fills the struct.
+   unsafe { win32::GetSystemInfo(&raw mut info) };
+   let page_size = (info.page_size as usize).max(4096);
+
+   let mut pages = writes
+      .iter()
+      .map(|&(slot, _)| slot & !(page_size - 1))
+      .collect::<Vec<usize>>();
+   pages.sort_unstable();
+   pages.dedup();
+
+   let mut restore = Vec::with_capacity(pages.len());
+   for page in pages {
+      let mut old = 0u32;
+      // SAFETY: `page` is a mapped page in this process.
+      if unsafe {
+         win32::VirtualProtect(
+            page as *mut c_void,
+            page_size,
+            win32::PAGE_EXECUTE_READWRITE,
+            &raw mut old,
+         )
+      } == 0
+      {
+         for &(done, prot) in &restore {
+            let mut ignored = 0u32;
+            // SAFETY: restoring previously changed page protection.
+            unsafe {
+               win32::VirtualProtect(done as *mut c_void, page_size, prot, &raw mut ignored);
+            }
+         }
+         return Err(crate::Error::Protect {
+            addr:   page,
+            source: std::io::Error::last_os_error(),
+         });
+      }
+      restore.push((page, old));
+   }
+
+   let previous = writes
+      .iter()
+      // SAFETY: the caller guarantees aligned, mapped slots, now writable.
+      .map(|&(slot, value)| {
+         unsafe { AtomicUsize::from_ptr(slot as *mut usize) }.swap(value, Ordering::AcqRel)
+      })
+      .collect();
+
+   for (page, prot) in restore {
+      let mut ignored = 0u32;
+      // SAFETY: restoring the page's original protection.
+      if unsafe { win32::VirtualProtect(page as *mut c_void, page_size, prot, &raw mut ignored) }
+         == 0
+      {
+         return Err(crate::Error::Protect {
+            addr:   page,
+            source: std::io::Error::last_os_error(),
+         });
+      }
+   }
+   Ok(previous)
+}
+
 impl Image<'_> {
    #[must_use]
    pub fn file_name(&self) -> &str {
@@ -400,6 +676,9 @@ impl Image<'_> {
          let target = addr & !1;
          return self.exidx_containing(base, len / 8, target) == Some(target);
       }
+      if self.pdata.is_some() {
+         return self.function_containing(addr) == Some(addr);
+      }
       if self.eh_frame_hdr.is_none() {
          return self.is_code(addr);
       }
@@ -408,11 +687,15 @@ impl Image<'_> {
 
    /// Start of the last function at or below `addr` in the unwind table. The
    /// table holds starts only, so an address past a function's end still maps
-   /// to it. ARM32 reads `.ARM.exidx`, every other target `.eh_frame_hdr`.
+   /// to it. ARM32 reads `.ARM.exidx`, PE64 reads `.pdata`, every other target
+   /// `.eh_frame_hdr`.
    #[must_use]
    pub fn function_containing(&self, addr: usize) -> Option<usize> {
       if let Some((base, len)) = self.arm_exidx {
          return self.exidx_containing(base, len / 8, addr);
+      }
+      if let Some((image_base, base, len)) = self.pdata {
+         return self.pdata_containing(image_base, base, len / 12, addr);
       }
 
       const UDATA4: u8 = 0x03;
@@ -470,5 +753,31 @@ impl Image<'_> {
          }
       }
       start(low.checked_sub(1)?)
+   }
+
+   /// Binary search over PE64 `.pdata`, whose `count` `RUNTIME_FUNCTION` entries
+   /// are 12 bytes (`begin_rva`, `end_rva`, `unwind_rva`), sorted by `begin_rva`.
+   fn pdata_containing(
+      &self,
+      image_base: usize,
+      base: usize,
+      count: usize,
+      addr: usize,
+   ) -> Option<usize> {
+      let rva = u32::try_from(addr.checked_sub(image_base)?).ok()?;
+      let begin = |index: usize| self.read_u32(base + index * 12);
+      let (mut low, mut high) = (0, count);
+      while low < high {
+         let mid = low + (high - low) / 2;
+         if begin(mid)? <= rva {
+            low = mid + 1;
+         } else {
+            high = mid;
+         }
+      }
+      let index = low.checked_sub(1)?;
+      let start = begin(index)?;
+      let end = self.read_u32(base + index * 12 + 4)?;
+      (rva < end).then(|| image_base + start as usize)
    }
 }

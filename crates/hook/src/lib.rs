@@ -21,9 +21,9 @@ use std::{
    ))
 ))]
 pub mod dobby;
-// On Windows and wasm32 only the parts the host-side patcher reads build; the
-// rest needs dl_iterate_phdr.
-#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
+// On wasm32 only the parts the host-side patcher reads build; live process
+// scanning uses dl_iterate_phdr on Unix and PE module enumeration on Windows.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code, unused_imports))]
 pub mod image;
 pub mod pattern;
 #[cfg(target_os = "android")] pub mod plt;

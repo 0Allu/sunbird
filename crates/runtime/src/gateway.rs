@@ -85,11 +85,11 @@ pub fn swap(
 ) -> Result<&'static GatewayRegistry, Error> {
    let writes = registry
       .iter()
-      .map(|(_, entry)| {
-         (
-            entry.slot + GATEWAY_HANDLER_FIELD,
-            detour as *const () as usize,
-         )
+      .flat_map(|(_, entry)| {
+         entry
+            .slots
+            .iter()
+            .map(|&slot| (slot + GATEWAY_HANDLER_FIELD, detour as *const () as usize))
       })
       .collect::<Vec<(usize, usize)>>();
    let originals = registry
@@ -113,7 +113,11 @@ pub fn swap(
    // and the host has not started dispatching while its constructors are
    // pending.
    let previous = unsafe { image.swap_words(&writes) }?;
-   for ((_, entry), found) in gateway.registry.iter().zip(previous) {
+   let expected = gateway
+      .registry
+      .iter()
+      .flat_map(|(_, entry)| entry.slots.iter().map(move |_| entry));
+   for (entry, found) in expected.zip(previous) {
       if found != entry.handler {
          return Err(Error::SwapConflict {
             event: entry.name.clone(),

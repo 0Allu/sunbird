@@ -11,7 +11,10 @@ use std::ffi::c_void;
 pub mod registry;
 
 /// Libraries that carry the gateway registry, Phoenix's and the stand-in's.
+#[cfg(not(target_os = "windows"))]
 pub const LIBRARIES: &[&str] = &["liblibdiscord_wasm_host.so", "libstand_in.so"];
+#[cfg(target_os = "windows")]
+pub const LIBRARIES: &[&str] = &["Discord.exe", "stand_in.dll"];
 
 /// Name of the plugin bundle the patcher stores next to the loader in the APK's
 /// native library directory, a JSON object of plugin name to source.
