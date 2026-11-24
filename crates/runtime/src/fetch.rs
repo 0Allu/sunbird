@@ -19,6 +19,7 @@ use crate::jvm::{
    method,
    new_bytes,
    read_bytes,
+   signature,
    take_exception,
 };
 
@@ -94,7 +95,7 @@ unsafe fn exchange(env: *mut JNIEnv, request: &Request) -> Result<Response, Fetc
    // SAFETY: forwarded from the caller.
    unsafe {
       let (connection, http_class) = connect(env, request)?;
-      let code = method(env, http_class, c"getResponseCode", c"()I");
+      let code = method(env, http_class, c"getResponseCode", signature!(() -> int));
       let status = jni!(env, CallIntMethodA, connection, code, ptr::null());
       if jni!(env, ExceptionCheck) {
          return Err(java_error(env, url));
@@ -107,7 +108,12 @@ unsafe fn exchange(env: *mut JNIEnv, request: &Request) -> Result<Response, Fetc
       } else {
          c"getInputStream"
       };
-      let input = method(env, http_class, name, c"()Ljava/io/InputStream;");
+      let input = method(
+         env,
+         http_class,
+         name,
+         signature!(() -> java::io::InputStream),
+      );
       let stream = jni!(env, CallObjectMethodA, connection, input, ptr::null());
       if jni!(env, ExceptionCheck) {
          return Err(java_error(env, url));
@@ -118,7 +124,7 @@ unsafe fn exchange(env: *mut JNIEnv, request: &Request) -> Result<Response, Fetc
          read_all(env, stream, url)
       };
 
-      let disconnect = method(env, http_class, c"disconnect", c"()V");
+      let disconnect = method(env, http_class, c"disconnect", signature!(() -> void));
       jni!(env, CallVoidMethodA, connection, disconnect, ptr::null());
       jni!(env, ExceptionClear);
       Ok(Response {
@@ -136,7 +142,7 @@ unsafe fn read_all(env: *mut JNIEnv, stream: jobject, url: &str) -> Result<Vec<u
    // SAFETY: forwarded from the caller.
    unsafe {
       let stream_class = jni!(env, GetObjectClass, stream);
-      let read = method(env, stream_class, c"read", c"([B)I");
+      let read = method(env, stream_class, c"read", signature!(([byte]) -> int));
       let buffer = jni!(env, NewByteArray, CHUNK);
       let mut body = Vec::new();
       let outcome = loop {
@@ -160,7 +166,7 @@ unsafe fn read_all(env: *mut JNIEnv, stream: jobject, url: &str) -> Result<Vec<u
             });
          }
       };
-      let close = method(env, stream_class, c"close", c"()V");
+      let close = method(env, stream_class, c"close", signature!(() -> void));
       jni!(env, CallVoidMethodA, stream, close, ptr::null());
       jni!(env, ExceptionClear);
       outcome.map(|()| body)
@@ -192,7 +198,7 @@ unsafe fn connect(env: *mut JNIEnv, request: &Request) -> Result<(jobject, jclas
          return Err(java_error(env, url));
       }
 
-      let init = method(env, url_class, c"<init>", c"(Ljava/lang/String;)V");
+      let init = method(env, url_class, c"<init>", signature!((String) -> void));
       let url_object = jni!(
          env,
          NewObjectA,
@@ -207,7 +213,7 @@ unsafe fn connect(env: *mut JNIEnv, request: &Request) -> Result<(jobject, jclas
          env,
          url_class,
          c"openConnection",
-         c"()Ljava/net/URLConnection;",
+         signature!(() -> java::net::URLConnection),
       );
       let connection = jni!(env, CallObjectMethodA, url_object, open, ptr::null());
       if connection.is_null() {
@@ -218,7 +224,7 @@ unsafe fn connect(env: *mut JNIEnv, request: &Request) -> Result<(jobject, jclas
       }
 
       for name in [c"setConnectTimeout", c"setReadTimeout"] {
-         let set = method(env, http_class, name, c"(I)V");
+         let set = method(env, http_class, name, signature!((int) -> void));
          jni!(
             env,
             CallVoidMethodA,
@@ -231,7 +237,7 @@ unsafe fn connect(env: *mut JNIEnv, request: &Request) -> Result<(jobject, jclas
          env,
          http_class,
          c"setRequestMethod",
-         c"(Ljava/lang/String;)V",
+         signature!((String) -> void),
       );
       let verb = string(&request.method)?;
       jni!(
@@ -245,7 +251,7 @@ unsafe fn connect(env: *mut JNIEnv, request: &Request) -> Result<(jobject, jclas
          env,
          http_class,
          c"setRequestProperty",
-         c"(Ljava/lang/String;Ljava/lang/String;)V",
+         signature!((String, String) -> void),
       );
       for (name, value) in &request.headers {
          let args = [jvalue { l: string(name)? }, jvalue { l: string(value)? }];
@@ -277,7 +283,12 @@ unsafe fn send_body(
 ) -> Result<(), FetchError> {
    // SAFETY: forwarded from the caller.
    unsafe {
-      let set_output = method(env, http_class, c"setDoOutput", c"(Z)V");
+      let set_output = method(
+         env,
+         http_class,
+         c"setDoOutput",
+         signature!((boolean) -> void),
+      );
       jni!(
          env,
          CallVoidMethodA,
@@ -289,7 +300,7 @@ unsafe fn send_body(
          env,
          http_class,
          c"getOutputStream",
-         c"()Ljava/io/OutputStream;",
+         signature!(() -> java::io::OutputStream),
       );
       let stream = jni!(env, CallObjectMethodA, connection, output, ptr::null());
       if stream.is_null() {
@@ -301,8 +312,8 @@ unsafe fn send_body(
          });
       };
       let stream_class = jni!(env, GetObjectClass, stream);
-      let write = method(env, stream_class, c"write", c"([B)V");
-      let close = method(env, stream_class, c"close", c"()V");
+      let write = method(env, stream_class, c"write", signature!(([byte]) -> void));
+      let close = method(env, stream_class, c"close", signature!(() -> void));
       jni!(
          env,
          CallVoidMethodA,

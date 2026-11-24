@@ -50,6 +50,76 @@ macro_rules! jni {
    };
 }
 
+/// A JNI method descriptor as a `&'static CStr`, written with Java's types:
+/// `signature!((String, [byte]) -> boolean)` is `c"(Ljava/lang/String;[B)Z"`.
+/// Other classes go by their paths with `::`, and nested classes follow a
+/// `.`, so `android::database::sqlite::SQLiteDatabase.CursorFactory` is
+/// `SQLiteDatabase$CursorFactory`.
+macro_rules! signature {
+   (($($args:tt)*) -> $($ret:tt)+) => {
+      $crate::jvm::signature!(@type ["(",] [$($args)* @close $($ret)+])
+   };
+   (@type [$($done:tt)*] []) => {
+      const {
+         match ::core::ffi::CStr::from_bytes_with_nul(concat!($($done)* "\0").as_bytes()) {
+            Ok(signature) => signature,
+            Err(_) => panic!("signature! has a NUL inside"),
+         }
+      }
+   };
+   (@type [$($done:tt)*] [, $($rest:tt)*]) => {
+      $crate::jvm::signature!(@type [$($done)*] [$($rest)*])
+   };
+   (@type [$($done:tt)*] [@close $($rest:tt)*]) => {
+      $crate::jvm::signature!(@type [$($done)* ")",] [$($rest)*])
+   };
+   (@type [$($done:tt)*] [[$($inner:tt)+] $($rest:tt)*]) => {
+      $crate::jvm::signature!(@type [$($done)* "[",] [$($inner)+ $($rest)*])
+   };
+   (@type [$($done:tt)*] [void $($rest:tt)*]) => {
+      $crate::jvm::signature!(@type [$($done)* "V",] [$($rest)*])
+   };
+   (@type [$($done:tt)*] [boolean $($rest:tt)*]) => {
+      $crate::jvm::signature!(@type [$($done)* "Z",] [$($rest)*])
+   };
+   (@type [$($done:tt)*] [byte $($rest:tt)*]) => {
+      $crate::jvm::signature!(@type [$($done)* "B",] [$($rest)*])
+   };
+   (@type [$($done:tt)*] [int $($rest:tt)*]) => {
+      $crate::jvm::signature!(@type [$($done)* "I",] [$($rest)*])
+   };
+   (@type [$($done:tt)*] [long $($rest:tt)*]) => {
+      $crate::jvm::signature!(@type [$($done)* "J",] [$($rest)*])
+   };
+   (@type [$($done:tt)*] [double $($rest:tt)*]) => {
+      $crate::jvm::signature!(@type [$($done)* "D",] [$($rest)*])
+   };
+   (@type [$($done:tt)*] [String $($rest:tt)*]) => {
+      $crate::jvm::signature!(@type [$($done)* "Ljava/lang/String;",] [$($rest)*])
+   };
+   (@type [$($done:tt)*] [Object $($rest:tt)*]) => {
+      $crate::jvm::signature!(@type [$($done)* "Ljava/lang/Object;",] [$($rest)*])
+   };
+   (@type [$($done:tt)*] [$package:ident :: $($rest:tt)*]) => {
+      $crate::jvm::signature!(@path [$($done)* "L", stringify!($package),] [$($rest)*])
+   };
+   (@path [$($done:tt)*] [$package:ident :: $($rest:tt)*]) => {
+      $crate::jvm::signature!(@path [$($done)* "/", stringify!($package),] [$($rest)*])
+   };
+   (@path [$($done:tt)*] [$class:ident . $($rest:tt)*]) => {
+      $crate::jvm::signature!(@nested [$($done)* "/", stringify!($class),] [$($rest)*])
+   };
+   (@path [$($done:tt)*] [$class:ident $($rest:tt)*]) => {
+      $crate::jvm::signature!(@type [$($done)* "/", stringify!($class), ";",] [$($rest)*])
+   };
+   (@nested [$($done:tt)*] [$class:ident . $($rest:tt)*]) => {
+      $crate::jvm::signature!(@nested [$($done)* "$", stringify!($class),] [$($rest)*])
+   };
+   (@nested [$($done:tt)*] [$class:ident $($rest:tt)*]) => {
+      $crate::jvm::signature!(@type [$($done)* "$", stringify!($class), ";",] [$($rest)*])
+   };
+}
+
 /// # Safety
 ///
 /// `env` is the current thread's `JNIEnv`.
@@ -237,7 +307,7 @@ pub unsafe fn take_exception(env: *mut JNIEnv) -> Option<String> {
          return None;
       }
       let class = jni!(env, GetObjectClass, thrown);
-      let to_string = method(env, class, c"toString", c"()Ljava/lang/String;");
+      let to_string = method(env, class, c"toString", signature!(() -> String));
       let text = jni!(env, CallObjectMethodA, thrown, to_string, ptr::null());
       jni!(env, ExceptionClear);
       read_string(env, text)
@@ -245,3 +315,4 @@ pub unsafe fn take_exception(env: *mut JNIEnv) -> Option<String> {
 }
 
 pub(crate) use jni;
+pub(crate) use signature;

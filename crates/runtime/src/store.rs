@@ -34,6 +34,7 @@ use crate::jvm::{
    method,
    read_bytes,
    read_string,
+   signature,
    take_exception,
 };
 
@@ -189,7 +190,7 @@ unsafe fn run(
          GetStaticMethodID,
          db_class,
          c"openDatabase".as_ptr(),
-         c"(Ljava/lang/String;Landroid/database/sqlite/SQLiteDatabase$CursorFactory;I)Landroid/database/sqlite/SQLiteDatabase;"
+         signature!((String, android::database::sqlite::SQLiteDatabase.CursorFactory, int) -> android::database::sqlite::SQLiteDatabase)
             .as_ptr()
       );
       let path = string(&database.to_string_lossy())?;
@@ -216,7 +217,7 @@ unsafe fn run(
          env,
          db_class,
          c"rawQuery",
-         c"(Ljava/lang/String;[Ljava/lang/String;)Landroid/database/Cursor;",
+         signature!((String, [String]) -> android::database::Cursor),
       );
       let cursor = jni!(
          env,
@@ -231,7 +232,7 @@ unsafe fn run(
          rows(env, cursor)
       };
 
-      let close = method(env, db_class, c"close", c"()V");
+      let close = method(env, db_class, c"close", signature!(() -> void));
       jni!(env, CallVoidMethodA, db, close, ptr::null());
       clear_exception(env);
       rows
@@ -247,15 +248,15 @@ unsafe fn rows(env: *mut JNIEnv, cursor: jobject) -> Result<Rows, StoreError> {
    // deleted after it is read, so a long result does not fill the frame.
    unsafe {
       let class = jni!(env, GetObjectClass, cursor);
-      let column_count = method(env, class, c"getColumnCount", c"()I");
-      let column_name = method(env, class, c"getColumnName", c"(I)Ljava/lang/String;");
-      let move_next = method(env, class, c"moveToNext", c"()Z");
-      let kind = method(env, class, c"getType", c"(I)I");
-      let get_long = method(env, class, c"getLong", c"(I)J");
-      let get_double = method(env, class, c"getDouble", c"(I)D");
-      let get_string = method(env, class, c"getString", c"(I)Ljava/lang/String;");
-      let get_blob = method(env, class, c"getBlob", c"(I)[B");
-      let close = method(env, class, c"close", c"()V");
+      let column_count = method(env, class, c"getColumnCount", signature!(() -> int));
+      let column_name = method(env, class, c"getColumnName", signature!((int) -> String));
+      let move_next = method(env, class, c"moveToNext", signature!(() -> boolean));
+      let kind = method(env, class, c"getType", signature!((int) -> int));
+      let get_long = method(env, class, c"getLong", signature!((int) -> long));
+      let get_double = method(env, class, c"getDouble", signature!((int) -> double));
+      let get_string = method(env, class, c"getString", signature!((int) -> String));
+      let get_blob = method(env, class, c"getBlob", signature!((int) -> [byte]));
+      let close = method(env, class, c"close", signature!(() -> void));
 
       let count = jni!(env, CallIntMethodA, cursor, column_count, ptr::null());
       let columns = (0..count)

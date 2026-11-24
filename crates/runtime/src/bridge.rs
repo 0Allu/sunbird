@@ -66,6 +66,7 @@ use crate::{
       new_bytes,
       read_bytes,
       read_string,
+      signature,
       table,
       vm,
    },
@@ -279,7 +280,7 @@ pub fn inject(frame: &[u8]) -> bool {
             GetMethodID,
             class,
             c"d".as_ptr(),
-            c"([BLkotlin/jvm/functions/Function0;)V".as_ptr()
+            signature!(([byte], kotlin::jvm::functions::Function0) -> void).as_ptr()
          );
          jni!(env, DeleteLocalRef, class);
          if clear_exception(env) || method.is_null() {
@@ -336,7 +337,7 @@ unsafe fn method_kind(env: *mut JNIEnv, obj: jobject, method: jmethodID) -> Meth
          }
          let reflected_class = jni!(env, GetObjectClass, reflected);
          let get_name = c"getName".as_ptr();
-         let signature = c"()Ljava/lang/String;".as_ptr();
+         let signature = signature!(() -> String).as_ptr();
          let method_name = jni!(env, GetMethodID, reflected_class, get_name, signature);
          if method_name.is_null() {
             return None;
@@ -636,7 +637,7 @@ unsafe fn bind_natives(env: *mut JNIEnv, guest_host: jobject) {
       };
       let entry = JNINativeMethod {
          name:      c"nativeDispatch".as_ptr().cast_mut(),
-         signature: c"(J[B)Z".as_ptr().cast_mut(),
+         signature: signature!((long, [byte]) -> boolean).as_ptr().cast_mut(),
          fnPtr:     (native_dispatch as *const ()).cast_mut().cast(),
       };
       if jni!(env, RegisterNatives, runtime, &raw const entry, 1) != JNI_OK {
@@ -664,7 +665,7 @@ unsafe fn load_class(env: *mut JNIEnv, anchor: jobject, name: &CStr) -> Option<j
          GetMethodID,
          class_class,
          c"getClassLoader".as_ptr(),
-         c"()Ljava/lang/ClassLoader;".as_ptr(),
+         signature!(() -> java::lang::ClassLoader).as_ptr(),
       );
       if get_loader.is_null() {
          clear_exception(env);
@@ -687,7 +688,7 @@ unsafe fn load_class(env: *mut JNIEnv, anchor: jobject, name: &CStr) -> Option<j
          GetMethodID,
          loader_class,
          c"loadClass".as_ptr(),
-         c"(Ljava/lang/String;)Ljava/lang/Class;".as_ptr(),
+         signature!((String) -> java::lang::Class).as_ptr(),
       );
       let class_name = jni!(env, NewStringUTF, name.as_ptr());
       if load.is_null() || class_name.is_null() {
