@@ -79,7 +79,7 @@ The bundled plugins live in `plugins/*/src/index.ts`. CI bundles them with esbui
 | `crates/patcher-web` | The same patcher built to wasm for the site. |
 | `crates/stand-in*` | A fake Phoenix gateway library for testing hooks without Discord. |
 | `plugins/` | The bundled plugins. |
-| `web/` | What CI publishes as the `site` release: the patcher wasm, loader libraries and plugin bundles. |
+| `web/` | What CI deploys to assets.sunbird.tools: the patcher wasm, loader libraries and plugin bundles. |
 | `frida/` | The Frida gadget bootstrap. |
 
 ## Building

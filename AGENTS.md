@@ -60,7 +60,7 @@ Read this file before changing code. Every fact here cost someone hours to learn
 | `crates/stand-in*` | A fake gateway library and a demo, to test hooks without Discord. |
 | `plugins/*/src/index.ts` | Bundled plugins. Leading `// @` lines are the bundle banner and metadata, `// @warning` shows a warning on the site, and `// @unlisted` keeps a plugin out of the site and its updates. |
 | `docs/phoenix-356207.*` | Phoenix's schema pulled from the APK by `scripts/extract-schema.py`: 29 view kinds, 855 props, 79 host modules with 433 methods, 109 events, 286 `ic_mana_*` icons and the accessibility ids. Read it before decompiling. |
-| `web/` | The `site` release that sunbird-tools/site deploys: patcher wasm, loader libraries, plugin bundles, `version.json`. Installed builds fetch the last three from sunbird.tools, so they must stay at the same paths. |
+| `web/` | What CI deploys to assets.sunbird.tools, with a `site.tar.gz` of it that sunbird-tools/site builds from: patcher wasm, loader libraries, plugin bundles, `version.json`. Builds before 76bc0d7 fetch the last three from sunbird.tools, so the site keeps serving them at the same paths. |
 | `frida/` | Optional Frida gadget bootstrap, for debugging on x86. |
 | `scripts/*.nu` | `phoenix.nu` builds, patches and installs on a phone. `site.nu` builds the site's native libs and wasm. |
 | `scripts/dev.ps1` | The Windows dev loop, described below. |
@@ -87,7 +87,7 @@ Read this file before changing code. Every fact here cost someone hours to learn
     then `cargo build --release -p patcher`.
 - Site. `nu scripts/site.nu web` and `node web/tools/bundle-plugins.ts` (set `ESBUILD`
   if esbuild is not on `PATH`), then `nu scripts/fetch.nu <this checkout>` in sunbird-tools/site.
-  CI publishes the same files as the `site` release on pushes to `main`, and the site picks it up within 10 minutes.
+  CI deploys the same files to assets.sunbird.tools on pushes to `main`, and the site picks them up within 10 minutes.
 
 ## Fast loop
 
