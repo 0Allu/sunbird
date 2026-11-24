@@ -46,6 +46,12 @@ pub unsafe extern "system" fn DllMain(
    if reason == DLL_PROCESS_ATTACH {
       // SAFETY: `module` is the HINSTANCE handed to DllMain.
       unsafe { DisableThreadLibraryCalls(module) };
+      logging();
+      let started = std::time::Instant::now();
+      if let Err(err) = phoenix_runtime::prepare() {
+         log::error!("phoenix could not hook Discord: {err}");
+      }
+      log::info!("hooked Discord in {:?}", started.elapsed());
       let _ = std::thread::Builder::new()
          .name("sunbird-init".to_owned())
          .spawn(|| init());

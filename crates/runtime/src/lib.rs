@@ -445,6 +445,84 @@ pub fn reload(name: &str) {
    }
 }
 
+/// Desktop Phoenix shows "This app isn't available for your account" from
+/// `libdiscord_ops_surfaces::client_access::ClientAccessGate`. One function
+/// reads it (1 blocked, 2 no gate, also what a missing value reads as), and the
+/// gate is only considered while it is not 2: its one small caller is
+/// `signed_in && access(..) != 2`. This makes it return 2. Discord settles on
+/// the gate within its first frames, so the loader calls this from `DllMain`,
+/// before Discord's own code.
+#[cfg(windows)]
+fn open_access_gate(image: &Image<'static>) {
+   const CALLER: phoenix_hook::pattern::Pattern = phoenix_hook::pattern::Pattern::new(
+      "83 79 ?? 03 75 0C E8 ?? ?? ?? ?? 3C 02 0F 95 C0 EB 02 31 C0",
+   );
+   /// `mov al, 2; ret`
+   const ALLOWED: [u8; 3] = [0xB0, 0x02, 0xC3];
+
+   let found = image.scan(CALLER);
+   let [caller] = found[..] else {
+      log::warn!("access gate: {} matches, leaving it", found.len());
+      return;
+   };
+   let call = caller + 6;
+   let Some(rel) = image.read_u32(call + 1) else {
+      return;
+   };
+   let access = (call + 5).wrapping_add_signed(rel.cast_signed() as isize);
+   if !image.is_code(access) {
+      log::warn!("access gate: the call at {call:#x} leaves the code");
+      return;
+   }
+   // SAFETY: code in Discord.exe, written from `DllMain` before Discord's own
+   // code runs.
+   match unsafe { image.write_code(access, &ALLOWED) } {
+      Ok(()) => log::info!("access gate: open"),
+      Err(err) => log::error!("access gate: {err}"),
+   }
+}
+
+/// The target and its swapped gateway registry, when [`prepare`] hooked them.
+#[cfg(windows)]
+static PREPARED: Mutex<Option<(Image<'static>, &'static GatewayRegistry)>> = Mutex::new(None);
+
+/// The first loaded library named in [`LIBRARIES`].
+fn target() -> Result<Image<'static>, Error> {
+   // SAFETY: the target is the host app's own library, which stays mapped for
+   // the life of the process, and scans run before the host's threads touch its
+   // data.
+   let images = unsafe { Image::loaded() };
+   images
+      .into_iter()
+      .find(|image| LIBRARIES.contains(&image.file_name()))
+      .ok_or(Error::NoTarget)
+}
+
+/// Swaps the gateway handlers, and on desktop the HTTP transport.
+fn hook(image: &Image<'static>) -> Result<&'static GatewayRegistry, Error> {
+   let walked = GatewayRegistry::locate(image)?;
+   log::info!("gateway registry: {} events", walked.iter().count());
+   let registry = gateway::swap(image, walked)?;
+   #[cfg(not(target_os = "android"))]
+   discord::install(image);
+   Ok(registry)
+}
+
+/// Hooks `Discord.exe` from `DllMain`, before its own code runs: Desktop
+/// Phoenix settles on the access gate in its first frames and stops reading the
+/// gateway registry and HTTP vtables once started, so hooks swapped later from
+/// [`start`]'s thread never run. [`start`] picks up what this hooked.
+#[cfg(windows)]
+pub fn prepare() -> Result<(), Error> {
+   let image = target()?;
+   open_access_gate(&image);
+   let registry = hook(&image)?;
+   *PREPARED
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((image, registry));
+   Ok(())
+}
+
 /// What [`start`] found and loaded.
 pub struct Started {
    pub target:  String,
@@ -456,18 +534,21 @@ pub struct Started {
 /// `bundled` plugins load first, and a file in `home/plugins` with the same
 /// name replaces one.
 pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
-   // SAFETY: the target is the host app's own library, which stays mapped for
-   // the life of the process, and scans run before the host's threads touch its
-   // data.
-   let images = unsafe { Image::loaded() };
-   let image = images
-      .into_iter()
-      .find(|image| LIBRARIES.contains(&image.file_name()))
-      .ok_or(Error::NoTarget)?;
-   let walked = GatewayRegistry::locate(&image)?;
-   log::info!("gateway registry: {} events", walked.iter().count());
-
-   let registry = gateway::swap(&image, walked)?;
+   #[cfg(windows)]
+   let prepared = PREPARED
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .take();
+   #[cfg(not(windows))]
+   let prepared = None;
+   let (image, registry) = match prepared {
+      Some(prepared) => prepared,
+      None => {
+         let image = target()?;
+         let registry = hook(&image)?;
+         (image, registry)
+      },
+   };
    let engine = js::Engine::new(registry)?;
    let state = State {
       image,
@@ -495,7 +576,6 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    }
    #[cfg(not(target_os = "android"))]
    {
-      discord::install(&state.image);
       if remote_shell_enabled() {
          phoenix_ui_desktop::start_tray(&format!("http://{}/ui", remote::ADDR));
       }
