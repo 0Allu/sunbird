@@ -1,6 +1,6 @@
 [package]
 name              = "phoenix-runtime"
-description       = "QuickJS plugin runtime that drives phoenix's gateway hooks"
+description       = "QuickJS plugin runtime that drives phoenix's gateway hooks, shared by every platform"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -20,16 +20,8 @@ serde_json   = { workspace = true }
 # rquickjs-sys ships pregenerated bindings for desktop triples only.
 rquickjs = { features = [ "bindgen" ], workspace = true }
 
-[target.'cfg(target_os = "android")'.dependencies]
-jni-sys           = { workspace = true }
-libc              = { workspace = true }
-patcher           = { workspace = true }
-phoenix-ui-mobile = { workspace = true }
-phoenix-wire      = { workspace = true }
-
-[target.'cfg(not(target_os = "android"))'.dependencies]
-phoenix-ui-desktop = { workspace = true }
-rusqlite           = { workspace = true }
+[target."cfg(unix)".dependencies]
+libc = { workspace = true }
 
 [lints]
 workspace = true

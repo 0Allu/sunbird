@@ -29,7 +29,7 @@ Read this file before changing code. Every fact here cost someone hours to learn
 - Typed boundaries. Plugins get opaque handles (`phoenix.gateway.messageCreate`), not strings
   like `"MESSAGE_CREATE"`. Read lists of events, props and handlers live from the binary. Never
   add a hand-maintained list file.
-- No committed build output. `picker.dex` is built by `crates/runtime/build.rs`,
+- No committed build output. `picker.dex` is built by `crates/runtime-mobile/build.rs`,
   `web/plugins/lib*.so` and `web/pkg/` by `scripts/site.nu`, plugin bundles by
   `web/tools/bundle-plugins.ts`.
   The Frida gadgets in `web/plugins/frida-*` are the one exception, kept for x86 WSA debugging.
@@ -40,17 +40,20 @@ Read this file before changing code. Every fact here cost someone hours to learn
 | Path | What |
 |---|---|
 | `crates/loader` | `libphoenix.so`, injected into the APK as `libplm.so`. Its constructor starts the runtime. |
-| `crates/runtime` | QuickJS plugin runtime and the `phoenix` API. `phoenix.d.ts` is the plugin API reference. |
+| `crates/runtime` | QuickJS plugin runtime and the `phoenix` API every platform shares. `phoenix.d.ts` is the plugin API reference. `platform.rs` is the `Platform` trait the platform crates implement. |
 | `crates/runtime/src/gateway.rs` | Gateway event hooks by swapping handler pointers in Phoenix's event registry. |
-| `crates/runtime/src/bridge.rs` | JNI table patch on `GuestHost.invoke`/`applyOps` and the `nativeDispatch` rebind. Sinks return `Action::{Pass, Drop, Replace}`. |
-| `crates/runtime/src/settings/` | The Phoenix Unlock settings pages, built from UI ops. |
-| `crates/runtime/src/patches/` | UI patch targets, slash commands, profile tabs, emoji picker. |
-| `crates/runtime/src/discord.rs` | `phoenix.discord`, Discord's API through Phoenix's own `Networking` module and session. |
-| `crates/runtime/src/host.rs` | Phoenix's host call, event and field numbers, read at startup from the name table in the installed APK's dex. `host::send` and `host::ask` call host modules. |
-| `crates/runtime/src/picker.rs`, `java/phx/` | File picker, toasts, clipboard and links through Phoenix's host modules, and the dialogs through a small in-memory dex. |
-| `crates/runtime/src/install.rs` | Opens Android's installer on the self-update APK through Discord's `FileProvider`. |
-| `crates/runtime/src/update.rs` | Update checks against the site, one-tap plugin updates and the APK self-update. |
-| `crates/runtime/src/remote.rs` | The debug shell on `127.0.0.1:4242`, off by default, switched on in Settings, Phoenix Unlocker, Debug. |
+| `crates/runtime/src/discord.rs` | `phoenix.discord`, Discord's API with Phoenix's own session. The platforms carry the requests. |
+| `crates/runtime/src/update.rs` | Update checks against the site and one-tap plugin updates. |
+| `crates/runtime/src/remote.rs` | The debug shell on `127.0.0.1:4242`, off by default on Android, switched on in Settings, Phoenix Unlocker, Debug. The platforms add their own endpoints. |
+| `crates/runtime-mobile` | phoenix on Phoenix's Android client, started by the loader there. |
+| `crates/runtime-mobile/src/bridge.rs` | JNI table patch on `GuestHost.invoke`/`applyOps` and the `nativeDispatch` rebind. Sinks return `Action::{Pass, Drop, Replace}`. |
+| `crates/runtime-mobile/src/settings/` | The Phoenix Unlock settings pages, built from UI ops. |
+| `crates/runtime-mobile/src/patches/` | UI patch targets, slash commands, profile tabs, emoji picker. |
+| `crates/runtime-mobile/src/discord.rs` | Plugin requests to Discord through Phoenix's own `Networking` module. |
+| `crates/runtime-mobile/src/host.rs` | Phoenix's host call, event and field numbers, read at startup from the name table in the installed APK's dex. `host::send` and `host::ask` call host modules. |
+| `crates/runtime-mobile/src/picker.rs`, `java/phx/` | File picker, toasts, clipboard and links through Phoenix's host modules, and the dialogs through a small in-memory dex. |
+| `crates/runtime-mobile/src/install.rs`, `loader.rs` | The APK self-update, and Android's installer opened on it through Discord's `FileProvider`. |
+| `crates/runtime-desktop` | phoenix on Desktop Phoenix (`Discord.exe`): the access gate, the HTTP transport hooks, the Sunbird pages in User Settings, message accessories and the tray. |
 | `crates/ui-mobile` | Typed codec for mobile (Android/iOS) Phoenix UI-op batches. `src/props.in` is Phoenix's prop table, `templates.json` holds captured layouts, `motion.rs` drives native springs, `mirror.rs` keeps a live copy of the view tree that host tests can drive. |
 | `crates/ui-desktop` | Desktop UI host primitives (clipboard, URLs, notifications, GPUI surface hooks). |
 | `crates/wire` | Tagged values and bridge frames (`HostCall`, `DispatchEvent`). |

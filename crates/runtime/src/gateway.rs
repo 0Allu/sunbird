@@ -76,9 +76,11 @@ struct Handling {
    ctx:   *mut c_void,
 }
 
-/// Points every registry entry at [`detour`]. Phoenix looks handlers up in the
-/// registry on each dispatch, so a pointer swap catches every event without
-/// patching code, and events no plugin listens to cost one atomic load.
+/// Points every registry entry at [`detour`].
+///
+/// Phoenix looks handlers up in the registry on each dispatch, so a pointer
+/// swap catches every event without patching code, and events no plugin
+/// listens to cost one atomic load.
 pub fn swap(
    image: &Image<'static>,
    registry: GatewayRegistry,
@@ -162,7 +164,6 @@ pub fn event(name: &str) -> Option<EventId> {
 }
 
 /// The host's original handler address for gateway event `name`.
-#[cfg(windows)]
 pub fn original_handler(name: &str) -> Option<usize> {
    let gateway = GATEWAY.get()?;
    let id = gateway.registry.id(name)?;
@@ -171,7 +172,6 @@ pub fn original_handler(name: &str) -> Option<usize> {
 
 /// Runs `MESSAGE_DELETE`'s JS `before` hooks for a same-client optimistic
 /// delete. Returns `true` when a plugin requested dropping the deletion.
-#[cfg(windows)]
 pub fn check_optimistic_delete(channel_id: u64, message_id: u64) -> bool {
    let Some(gateway) = GATEWAY.get() else {
       return false;
@@ -193,9 +193,9 @@ pub fn check_optimistic_delete(channel_id: u64, message_id: u64) -> bool {
 }
 
 /// Runs plugin hooks on `data` for an event Phoenix's session applies without
-/// the registry, like `READY`, and returns the replacement JSON. Its `after`
-/// hooks run before Phoenix applies it, and it cannot be dropped.
-#[cfg(target_os = "android")]
+/// the registry, like `READY`, and returns the replacement JSON.
+///
+/// Its `after` hooks run before Phoenix applies it, and it cannot be dropped.
 pub fn intercept(event: EventId, data: &str) -> Option<String> {
    let gateway = GATEWAY.get()?;
    if !gateway.hooked[event.index()].load(Ordering::Acquire) || IN_JS.get() {
@@ -217,7 +217,6 @@ pub fn intercept(event: EventId, data: &str) -> Option<String> {
 }
 
 /// Whether a plugin hooks `event`.
-#[cfg(target_os = "android")]
 pub fn listened(event: EventId) -> bool {
    GATEWAY
       .get()
@@ -284,17 +283,13 @@ unsafe extern "C" fn detour(
    event: *const GatewayEvent,
    ctx: *mut c_void,
 ) -> HandlerResult {
-   #[cfg(target_os = "android")]
-   crate::bridge::attach();
    let gateway = GATEWAY
       .get()
       .expect("slots point here only after GATEWAY is set");
    // SAFETY: the host passes a live event for the duration of the call.
    let event = unsafe { &*event };
-   // SAFETY: every registry handler takes the store state first.
-   #[cfg(not(target_arch = "arm"))]
-   unsafe {
-      crate::staff::apply(store);
+   if let Some(platform) = crate::platform() {
+      platform.gateway(store);
    }
    if QUEUED.swap(false, Ordering::AcqRel) {
       flush(gateway, store, ctx, event.rest);
@@ -323,7 +318,6 @@ unsafe extern "C" fn detour(
       ctx,
       rest: event.rest,
    }));
-   #[cfg(target_os = "android")]
    let original_data = data;
    let before = run_js(state, |engine| engine.before(id, name, data)).unwrap_or(Before::Keep);
    let (result, data) = match &before {
@@ -343,7 +337,6 @@ unsafe extern "C" fn detour(
          (call(&replaced), json.as_str())
       },
    };
-   #[cfg(target_os = "android")]
    if let (Before::Replace(json), "MESSAGE_CREATE" | "MESSAGE_UPDATE") = (&before, name) {
       remember_original(original_data, json);
    }
@@ -352,16 +345,14 @@ unsafe extern "C" fn detour(
    result
 }
 
-#[cfg(target_os = "android")]
 #[derive(serde::Deserialize)]
 struct Posted<'a> {
    #[serde(borrow)]
    content: Option<std::borrow::Cow<'a, str>>,
 }
 
-/// Hands the patches a message's text from before and after the plugin
+/// Tells the platform a message's text from before and after the plugin
 /// hooks, when they changed it.
-#[cfg(target_os = "android")]
 fn remember_original(before: &str, after: &str) {
    let (Ok(before), Ok(after)) = (
       serde_json::from_str::<Posted<'_>>(before),
@@ -371,8 +362,9 @@ fn remember_original(before: &str, after: &str) {
    };
    if let (Some(original), Some(shown)) = (before.content, after.content)
       && original != shown
+      && let Some(platform) = crate::platform()
    {
-      crate::patches::remember_original(shown.into_owned(), original.into_owned());
+      platform.rewritten(original.into_owned(), shown.into_owned());
    }
 }
 

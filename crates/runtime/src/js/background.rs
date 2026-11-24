@@ -34,9 +34,7 @@ impl Engine {
             Settlement::Fetch(Ok(response)) | Settlement::Discord(Ok(response)) => {
                response_object(&ctx, &response).map(|object| Ok(object.into_value()))
             },
-            #[cfg(target_os = "android")]
             Settlement::Int(Ok(number)) => Ok(Ok(Value::new_int(ctx.clone(), number))),
-            #[cfg(target_os = "android")]
             Settlement::Int(Err(err)) => Ok(Err(err)),
             Settlement::Text(Ok(text)) => {
                rquickjs::String::from_str(ctx.clone(), &text).map(|text| Ok(text.into_value()))
@@ -74,7 +72,6 @@ pub enum Settlement {
    Fetch(Result<fetch::Response, fetch::FetchError>),
    Discord(Result<fetch::Response, discord::DiscordError>),
    Text(Result<String, discord::DiscordError>),
-   #[cfg(target_os = "android")]
    Int(Result<i32, String>),
    Rows(Result<store::Rows, store::StoreError>),
    Json(Result<Option<String>, store::StoreError>),

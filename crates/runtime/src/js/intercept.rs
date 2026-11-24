@@ -29,6 +29,7 @@ use crate::{
 impl Engine {
    /// Runs matching `phoenix.discord.onRequest` hooks on an outgoing Discord
    /// API request.
+   #[must_use]
    pub fn intercept_request(
       &self,
       matched: &[u64],

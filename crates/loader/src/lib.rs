@@ -16,7 +16,9 @@ use std::{
 };
 
 use phoenix_runtime::{
+   Error,
    Plugin,
+   Started,
    console::Tee,
 };
 
@@ -48,7 +50,7 @@ pub unsafe extern "system" fn DllMain(
       unsafe { DisableThreadLibraryCalls(module) };
       logging();
       let started = std::time::Instant::now();
-      if let Err(err) = phoenix_runtime::prepare() {
+      if let Err(err) = phoenix_runtime_desktop::prepare() {
          log::error!("phoenix could not hook Discord: {err}");
       }
       log::info!("hooked Discord in {:?}", started.elapsed());
@@ -63,9 +65,7 @@ extern "C" fn init() {
    logging();
    // Unwinding out of a constructor aborts the host, so a bug here costs
    // plugins, not the app.
-   match panic::catch_unwind(AssertUnwindSafe(|| {
-      phoenix_runtime::start(home(), bundled())
-   })) {
+   match panic::catch_unwind(AssertUnwindSafe(|| start(home(), bundled()))) {
       Ok(Ok(started)) => {
          log::info!(
             "phoenix started on {} ({}), plugins: {:?}",
@@ -79,6 +79,21 @@ extern "C" fn init() {
       Ok(Err(err)) => log::error!("phoenix did not start: {err}"),
       Err(_) => log::error!("phoenix panicked while starting"),
    }
+}
+
+#[cfg(target_os = "android")]
+fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
+   phoenix_runtime_mobile::start(home, bundled)
+}
+
+#[cfg(windows)]
+fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
+   phoenix_runtime_desktop::start(home, bundled)
+}
+
+#[cfg(not(any(target_os = "android", windows)))]
+fn start(_home: PathBuf, _bundled: Vec<Plugin>) -> Result<Started, Error> {
+   Err(Error::NoTarget)
 }
 
 fn home() -> PathBuf {
@@ -154,8 +169,9 @@ mod unix {
    };
 
    /// Reads [`PLUGIN_BUNDLE`] from beside this library. Android maps native
-   /// libraries straight out of the APK, so `dladdr` names `<apk>!/lib/<abi>/...`
-   /// and the bundle is a stored entry in the same split.
+   /// libraries straight out of the APK, so `dladdr` names
+   /// `<apk>!/lib/<abi>/...` and the bundle is a stored entry in the same
+   /// split.
    pub fn read_bundle() -> misstep::Result<Vec<Plugin>> {
       let mut info = libc::Dl_info {
          dli_fname: std::ptr::null(),

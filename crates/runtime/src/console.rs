@@ -106,10 +106,8 @@ impl<L: Log> Log for Tee<L> {
          }
          lines.push_back(line);
       }
-      // A warning from refreshing the page would refresh it again, forever.
-      #[cfg(target_os = "android")]
-      if !record.target().starts_with("phoenix_runtime::settings") {
-         crate::settings::log_changed();
+      if let Some(platform) = crate::platform() {
+         platform.logged(record.target());
       }
    }
 
@@ -119,12 +117,9 @@ impl<L: Log> Log for Tee<L> {
 }
 
 /// The local time of day.
-#[cfg_attr(
-   not(any(target_os = "android", windows)),
-   allow(clippy::missing_const_for_fn)
-)]
+#[cfg_attr(not(any(unix, windows)), allow(clippy::missing_const_for_fn))]
 fn clock() -> String {
-   #[cfg(target_os = "android")]
+   #[cfg(unix)]
    {
       // SAFETY: `time` accepts null, and `localtime_r` only writes `tm`.
       let tm = unsafe {
@@ -168,7 +163,7 @@ fn clock() -> String {
       unsafe { GetLocalTime(&raw mut st) };
       format!("{:02}:{:02}:{:02}", st.hour, st.minute, st.second)
    }
-   #[cfg(not(any(target_os = "android", windows)))]
+   #[cfg(not(any(unix, windows)))]
    String::new()
 }
 

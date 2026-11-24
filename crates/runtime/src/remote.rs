@@ -1,8 +1,9 @@
-//! Localhost-only HTTP debug shell on `127.0.0.1:4242` for ADB development
-//! (`adb forward tcp:4242 tcp:4242`). Off by default; gated behind Debug →
-//! Remote debug shell in Phoenix Unlocker settings.
+//! Localhost-only HTTP debug shell on `127.0.0.1:4242`, for `adb forward
+//! tcp:4242 tcp:4242` on a phone. The platform adds its own endpoints through
+//! [`crate::Platform::route`].
 
 use std::{
+   collections::VecDeque,
    io::{
       BufRead,
       BufReader,
@@ -15,7 +16,10 @@ use std::{
       TcpStream,
    },
    sync::{
+      LazyLock,
+      Mutex,
       OnceLock,
+      PoisonError,
       atomic::{
          AtomicBool,
          Ordering,
@@ -24,21 +28,7 @@ use std::{
    thread,
    time::Duration,
 };
-use std::{
-   collections::VecDeque,
-   sync::{
-      LazyLock,
-      Mutex,
-      PoisonError,
-   },
-};
 
-#[cfg(target_os = "android")]
-use phoenix_ui_mobile::{
-   Op,
-   Prop,
-   inspect::WireJson,
-};
 use serde::{
    Deserialize,
    Serialize,
@@ -57,20 +47,86 @@ use crate::{
    },
 };
 
-#[cfg_attr(target_os = "android", allow(dead_code))]
 pub const ADDR: &str = "127.0.0.1:4242";
 const MAX_BODY: usize = 4 << 20;
-#[cfg(target_os = "android")] const MAX_OPS_LOG: usize = 64;
 const MAX_EVENTS_LOG: usize = 256;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static BOUND_ADDR: OnceLock<String> = OnceLock::new();
-#[cfg(target_os = "android")]
-static OPS_LOG: LazyLock<Mutex<VecDeque<Box<RawValue>>>> =
-   LazyLock::new(|| Mutex::new(VecDeque::with_capacity(MAX_OPS_LOG)));
-static EVENTS_LOG: LazyLock<Mutex<VecDeque<Box<RawValue>>>> =
-   LazyLock::new(|| Mutex::new(VecDeque::with_capacity(MAX_EVENTS_LOG)));
+static EVENTS: Ring = Ring::new(MAX_EVENTS_LOG);
+
+/// The last entries of a debug log, as JSON.
+pub struct Ring {
+   entries: LazyLock<Mutex<VecDeque<Box<RawValue>>>>,
+   max:     usize,
+}
+
+impl Ring {
+   #[must_use]
+   pub const fn new(max: usize) -> Self {
+      Self {
+         entries: LazyLock::new(|| Mutex::new(VecDeque::new())),
+         max,
+      }
+   }
+
+   /// Keeps `entry` when the debug shell is on, dropping the oldest past the
+   /// capacity.
+   pub fn push(&self, entry: &impl Serialize) {
+      if !enabled() {
+         return;
+      }
+      let entry = match serde_json::value::to_raw_value(entry) {
+         Ok(entry) => entry,
+         Err(err) => {
+            log::warn!("remote: a debug entry did not serialize: {err}");
+            return;
+         },
+      };
+      let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+      if entries.len() == self.max {
+         entries.pop_front();
+      }
+      entries.push_back(entry);
+   }
+
+   pub fn clear(&self) {
+      self
+         .entries
+         .lock()
+         .unwrap_or_else(PoisonError::into_inner)
+         .clear();
+   }
+
+   /// The newest entries, filtered by the `match` and `limit` query
+   /// parameters.
+   #[must_use]
+   pub fn recent(&self, query: &str, default_limit: usize) -> Reply {
+      let filter = query_param(query, "match");
+      let limit = query_param(query, "limit")
+         .and_then(|limit| limit.parse::<usize>().ok())
+         .unwrap_or(default_limit);
+      ok_json(
+         &self
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .rev()
+            .filter(|entry| {
+               filter
+                  .as_ref()
+                  .is_none_or(|needle| entry.get().contains(needle.as_str()))
+            })
+            .take(limit)
+            .collect::<Vec<_>>(),
+      )
+   }
+}
+
+/// A status line, a content type and a body.
+pub type Reply = (&'static str, &'static str, Vec<u8>);
 
 /// An event for the debug ring buffer. Never put HTTP headers, bodies,
 /// message content or credentials in one.
@@ -78,78 +134,23 @@ static EVENTS_LOG: LazyLock<Mutex<VecDeque<Box<RawValue>>>> =
 #[serde(tag = "source", rename_all = "camelCase")]
 pub enum Trace<'a> {
    /// A gateway event, by name and payload size.
-   Gateway {
-      event: &'a str,
-      bytes: usize,
-   },
+   Gateway { event: &'a str, bytes: usize },
    /// One of Discord's own API requests.
    Http {
       method: &'a str,
       path:   &'a str,
       bytes:  usize,
    },
-   /// A call into a function `phoenix.native.hook` observes.
-   #[cfg(all(windows, target_arch = "x86_64"))]
-   Native(Box<crate::js::native::Hit>),
-   #[cfg(target_os = "android")]
-   HostCall {
-      module: u16,
-      method: u16,
-   },
-   #[cfg(target_os = "android")]
-   HostEvent {
-      event: u16,
-   },
-   #[cfg(target_os = "android")]
-   View {
-      node:    i32,
-      event:   Prop,
-      aid:     Option<&'a str>,
-      payload: WireJson<'a>,
-   },
 }
 
-/// Records a decoded Phoenix UI-op batch into the debug ring buffer when the
-/// remote debug shell is enabled. Zero-cost atomic check when disabled.
-#[cfg(target_os = "android")]
-pub fn record_ops(ops: &[Op]) {
-   #[derive(Serialize)]
-   struct Batch<'a> {
-      count: usize,
-      ops:   &'a [Op],
-   }
-
-   if !enabled() || ops.is_empty() {
-      return;
-   }
-   let batch = Batch {
-      count: ops.len(),
-      ops,
-   };
-   push(&OPS_LOG, MAX_OPS_LOG, &batch);
+/// Records `trace` into the debug event log when the debug shell is on.
+pub fn record(trace: &impl Serialize) {
+   EVENTS.push(trace);
 }
 
-/// Records `trace` into the debug ring buffer when the remote debug shell is
-/// enabled.
-pub fn record(trace: &Trace<'_>) {
-   if enabled() {
-      push(&EVENTS_LOG, MAX_EVENTS_LOG, trace);
-   }
-}
-
-fn push(log: &Mutex<VecDeque<Box<RawValue>>>, max: usize, entry: &impl Serialize) {
-   let entry = match serde_json::value::to_raw_value(entry) {
-      Ok(entry) => entry,
-      Err(err) => {
-         log::warn!("remote: a debug entry did not serialize: {err}");
-         return;
-      },
-   };
-   let mut log = log.lock().unwrap_or_else(PoisonError::into_inner);
-   if log.len() == max {
-      log.pop_front();
-   }
-   log.push_back(entry);
+/// Empties the debug event log.
+pub fn clear_events() {
+   EVENTS.clear();
 }
 
 #[must_use]
@@ -170,7 +171,6 @@ pub fn set_enabled(on: bool) {
 
 /// Returns the actual bound `host:port` of the localhost server, falling back
 /// to [`ADDR`] if not started yet.
-#[cfg_attr(target_os = "android", allow(dead_code))]
 #[must_use]
 pub fn bound_addr() -> &'static str {
    BOUND_ADDR.get().map_or(ADDR, String::as_str)
@@ -207,10 +207,7 @@ pub fn ensure_started() {
    let addr_str = addr.to_string();
    let _ = BOUND_ADDR.set(addr_str.clone());
    let _ = listener.set_nonblocking(true);
-   #[cfg(target_os = "android")]
-   log::info!("remote shell listening on http://{addr_str} (use `adb forward tcp:4242 tcp:4242`)");
-   #[cfg(not(target_os = "android"))]
-   log::info!("Sunbird dashboard & API listening on http://{addr_str}/ui");
+   log::info!("debug shell listening on http://{addr_str}");
 
    thread::spawn(move || {
       while enabled() {
@@ -232,16 +229,16 @@ pub fn ensure_started() {
    });
 }
 
-struct HttpRequest {
-   method:         String,
-   path:           String,
-   query:          String,
-   #[cfg_attr(target_os = "android", allow(dead_code))]
-   accept:         String,
+/// A debug shell request.
+pub struct Request {
+   pub method:     String,
+   pub path:       String,
+   pub query:      String,
+   pub accept:     String,
    host:           Option<String>,
    origin:         Option<String>,
    sec_fetch_site: Option<String>,
-   body:           Vec<u8>,
+   pub body:       Vec<u8>,
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -250,9 +247,7 @@ fn is_loopback_host(host: &str) -> bool {
 }
 
 fn is_allowed_origin(origin: &str) -> bool {
-   origin
-      .strip_prefix("http://")
-      .is_some_and(is_loopback_host)
+   origin.strip_prefix("http://").is_some_and(is_loopback_host)
 }
 
 fn is_allowed_fetch_site(site: &str) -> bool {
@@ -292,15 +287,15 @@ fn handle(mut stream: TcpStream) {
 
 fn write_response(stream: &mut TcpStream, status: &str, content_type: &str, response: &[u8]) {
    let header = format!(
-      "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nCache-Control: no-store\r\nContent-Length: \
-       {}\r\nConnection: close\r\n\r\n",
+      "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nCache-Control: \
+       no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
       response.len()
    );
    let _ = stream.write_all(header.as_bytes());
    let _ = stream.write_all(response);
 }
 
-fn read_request(stream: &TcpStream) -> std::io::Result<HttpRequest> {
+fn read_request(stream: &TcpStream) -> std::io::Result<Request> {
    let mut reader = BufReader::new(stream);
    let mut request_line = String::new();
    if reader.read_line(&mut request_line)? == 0 {
@@ -351,7 +346,7 @@ fn read_request(stream: &TcpStream) -> std::io::Result<HttpRequest> {
    if content_length > 0 {
       reader.read_exact(&mut body)?;
    }
-   Ok(HttpRequest {
+   Ok(Request {
       method,
       path,
       query,
@@ -394,7 +389,8 @@ fn percent_decode(raw: &str) -> String {
 
 /// The percent-decoded value of `key`, as `encodeURIComponent` or a form wrote
 /// it.
-fn query_param(query: &str, key: &str) -> Option<String> {
+#[must_use]
+pub fn query_param(query: &str, key: &str) -> Option<String> {
    let (_, raw) = query
       .split('&')
       .filter_map(|pair| pair.split_once('='))
@@ -402,30 +398,16 @@ fn query_param(query: &str, key: &str) -> Option<String> {
    Some(percent_decode(raw))
 }
 
-fn dispatch(req: &HttpRequest) -> (&'static str, &'static str, Vec<u8>) {
+fn dispatch(req: &Request) -> Reply {
+   if let Some(reply) = crate::platform().and_then(|platform| platform.route(req)) {
+      return reply;
+   }
    let method = req.method.as_str();
    let path = req.path.as_str();
    let query = req.query.as_str();
    let body = req.body.as_slice();
 
    match (method, path) {
-      #[cfg(not(target_os = "android"))]
-      ("GET", "/ui") => (
-         "200 OK",
-         "text/html; charset=utf-8",
-         phoenix_ui_desktop::DASHBOARD_HTML.as_bytes().to_vec(),
-      ),
-      #[cfg(not(target_os = "android"))]
-      ("GET", "/") if req.accept.contains("text/html") => (
-         "200 OK",
-         "text/html; charset=utf-8",
-         phoenix_ui_desktop::DASHBOARD_HTML.as_bytes().to_vec(),
-      ),
-      #[cfg(not(target_os = "android"))]
-      ("POST", "/ui/devtools") => {
-         phoenix_ui_desktop::open_devtools();
-         ok_json(&Done::Started)
-      },
       ("GET", "/favicon.ico") => ("204 No Content", "image/x-icon", Vec::new()),
       ("GET", "/" | "/status") => {
          let plugins = crate::plugins();
@@ -470,37 +452,10 @@ fn dispatch(req: &HttpRequest) -> (&'static str, &'static str, Vec<u8>) {
             Err(message) => err("500 Internal Server Error", &message),
          }
       },
-      #[cfg(target_os = "android")]
-      ("GET", "/ops") => recent(&OPS_LOG, query, 20),
-      ("GET", "/events") => recent(&EVENTS_LOG, query, 50),
+      ("GET", "/events") => EVENTS.recent(query, 50),
       ("POST", "/clear") => {
-         #[cfg(target_os = "android")]
-         OPS_LOG
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
-         EVENTS_LOG
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
+         clear_events();
          ok_json(&Done::Cleared)
-      },
-      #[cfg(target_os = "android")]
-      ("GET", "/tree") => {
-         let depth = query_param(query, "depth")
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(6);
-         tree(None, depth)
-      },
-      #[cfg(target_os = "android")]
-      ("GET", _) if path.starts_with("/tree/") => {
-         let Ok(id) = path["/tree/".len()..].parse::<i32>() else {
-            return err("400 Bad Request", "invalid node id");
-         };
-         let depth = query_param(query, "depth")
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(6);
-         tree(Some(id), depth)
       },
       ("GET", "/update") => update_state(),
       ("POST", "/update/check") => {
@@ -509,11 +464,6 @@ fn dispatch(req: &HttpRequest) -> (&'static str, &'static str, Vec<u8>) {
       },
       ("POST", "/update/apply") => {
          crate::update::apply();
-         ok_json(&Done::Started)
-      },
-      #[cfg(target_os = "android")]
-      ("POST", "/update/self") => {
-         crate::update::self_update_from_site();
          ok_json(&Done::Started)
       },
       ("POST", "/debug/staff") => {
@@ -525,19 +475,15 @@ fn dispatch(req: &HttpRequest) -> (&'static str, &'static str, Vec<u8>) {
       },
       _ if path.starts_with("/plugins/") => plugin_route(method, &path["/plugins/".len()..], body),
       _ => {
-         #[cfg(target_os = "android")]
-         let help = "endpoints: GET /status, GET /plugins, GET|PUT|DELETE /plugins/<name>, POST \
-                     /plugins/<name>/{reload,enable,disable,setting,press}, GET /catalog, POST \
-                     /catalog/{refresh,install}, POST /eval, GET /logs, GET \
-                     /ops[?match=&limit=], GET /events[?match=&limit=], GET /tree[/<id>][?depth=], \
-                     POST /clear";
-         #[cfg(not(target_os = "android"))]
-         let help = "endpoints: GET /ui, GET /status, GET /plugins, POST /plugins/reload-all, \
-                     GET|PUT|DELETE /plugins/<name>, POST \
-                     /plugins/<name>/{reload,enable,disable,setting,press}, GET /catalog, POST \
-                     /catalog/{refresh,install}, GET /update, POST /update/{check,apply}, POST \
-                     /eval, GET /logs";
-         err("404 Not Found", help)
+         let routes = crate::platform().map_or("", |platform| platform.routes());
+         let help = format!(
+            "endpoints: GET /status, GET /plugins, POST /plugins/reload-all, GET|PUT|DELETE \
+             /plugins/<name>, POST /plugins/<name>/{{reload,enable,disable,setting,press}}, GET \
+             /catalog, POST /catalog/{{refresh,install}}, GET /update, POST \
+             /update/{{check,apply}}, POST /eval, GET /logs, GET /events[?match=&limit=], POST \
+             /clear{routes}"
+         );
+         err("404 Not Found", &help)
       },
    }
 }
@@ -605,18 +551,24 @@ impl<'a> From<&'a Setting> for SettingJson<'a> {
       let control = match &setting.control {
          Control::Switch(value) => ControlJson::Switch { value: *value },
          Control::Text(value) => ControlJson::Text { value },
-         Control::Secret(value) => ControlJson::Secret {
-            has_value: !value.is_empty(),
+         Control::Secret(value) => {
+            ControlJson::Secret {
+               has_value: !value.is_empty(),
+            }
          },
-         Control::Select { options, chosen } => ControlJson::Select {
-            value:   chosen,
-            options: options
-               .iter()
-               .map(|choice| ChoiceJson {
-                  value: &choice.value,
-                  label: &choice.label,
-               })
-               .collect(),
+         Control::Select { options, chosen } => {
+            ControlJson::Select {
+               value:   chosen,
+               options: options
+                  .iter()
+                  .map(|choice| {
+                     ChoiceJson {
+                        value: &choice.value,
+                        label: &choice.label,
+                     }
+                  })
+                  .collect(),
+            }
          },
          Control::Number(value) => ControlJson::Number { value: *value },
          Control::Button => ControlJson::Button,
@@ -648,7 +600,7 @@ impl<'a> From<&'a PluginInfo> for PluginJson<'a> {
 /// What a mutating endpoint did.
 #[derive(Serialize)]
 #[serde(rename_all = "lowercase")]
-enum Done<'a> {
+pub enum Done<'a> {
    Cleared,
    Started,
    Staff(bool),
@@ -661,44 +613,7 @@ enum Done<'a> {
    Pressed(&'a str),
 }
 
-/// The newest entries of `log`, filtered by the `match` and `limit` query
-/// parameters.
-fn recent(
-   log: &Mutex<VecDeque<Box<RawValue>>>,
-   query: &str,
-   default_limit: usize,
-) -> (&'static str, &'static str, Vec<u8>) {
-   let filter = query_param(query, "match");
-   let limit = query_param(query, "limit")
-      .and_then(|limit| limit.parse::<usize>().ok())
-      .unwrap_or(default_limit);
-   ok_json(
-      &log
-         .lock()
-         .unwrap_or_else(PoisonError::into_inner)
-         .iter()
-         .rev()
-         .filter(|entry| {
-            filter
-               .as_ref()
-               .is_none_or(|needle| entry.get().contains(needle.as_str()))
-         })
-         .take(limit)
-         .collect::<Vec<_>>(),
-   )
-}
-
-#[cfg(target_os = "android")]
-fn tree(root: Option<i32>, depth: usize) -> (&'static str, &'static str, Vec<u8>) {
-   crate::patches::with_tree(root, depth, |tree| {
-      tree.map_or_else(
-         || err("404 Not Found", "root node not seen yet"),
-         |tree| ok_json(&tree),
-      )
-   })
-}
-
-fn update_state() -> (&'static str, &'static str, Vec<u8>) {
+fn update_state() -> Reply {
    #[derive(Serialize)]
    struct Found {
       loader:  Option<String>,
@@ -726,7 +641,7 @@ fn update_state() -> (&'static str, &'static str, Vec<u8>) {
    })
 }
 
-fn plugin_route(method: &str, rest: &str, body: &[u8]) -> (&'static str, &'static str, Vec<u8>) {
+fn plugin_route(method: &str, rest: &str, body: &[u8]) -> Reply {
    let (raw_name, action) = rest
       .split_once('/')
       .map_or((rest, None), |(name, action)| (name, Some(action)));
@@ -816,7 +731,7 @@ fn plugin_route(method: &str, rest: &str, body: &[u8]) -> (&'static str, &'stati
    }
 }
 
-fn catalog_state() -> (&'static str, &'static str, Vec<u8>) {
+fn catalog_state() -> Reply {
    #[derive(Serialize)]
    #[serde(tag = "state", rename_all = "lowercase")]
    enum CatalogJson {
@@ -838,7 +753,7 @@ fn catalog_state() -> (&'static str, &'static str, Vec<u8>) {
    }
 }
 
-fn catalog_install(body: &[u8]) -> (&'static str, &'static str, Vec<u8>) {
+fn catalog_install(body: &[u8]) -> Reply {
    #[derive(Deserialize)]
    struct InstallRequest {
       name: Option<String>,
@@ -862,14 +777,15 @@ fn catalog_install(body: &[u8]) -> (&'static str, &'static str, Vec<u8>) {
    }
 }
 
-fn ok_json(value: &impl Serialize) -> (&'static str, &'static str, Vec<u8>) {
+pub fn ok_json(value: &impl Serialize) -> Reply {
    match serde_json::to_vec_pretty(value) {
       Ok(body) => ("200 OK", "application/json; charset=utf-8", body),
       Err(error) => err("500 Internal Server Error", &error.to_string()),
    }
 }
 
-fn err(status: &'static str, message: &str) -> (&'static str, &'static str, Vec<u8>) {
+#[must_use]
+pub fn err(status: &'static str, message: &str) -> Reply {
    (
       status,
       "text/plain; charset=utf-8",

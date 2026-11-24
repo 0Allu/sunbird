@@ -1,0 +1,21 @@
+[package]
+name              = "phoenix-runtime-desktop"
+description       = "phoenix on Desktop Phoenix: GPUI settings and accessories, the HTTP transport hooks and the tray"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[target."cfg(windows)".dependencies]
+flub               = { workspace = true }
+log                = { workspace = true }
+phoenix-hook       = { workspace = true }
+phoenix-runtime    = { workspace = true }
+phoenix-sigs       = { workspace = true }
+phoenix-ui-desktop = { workspace = true }
+rquickjs           = { workspace = true }
+rusqlite           = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+
+[lints]
+workspace = true

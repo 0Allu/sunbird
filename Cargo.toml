@@ -6,6 +6,8 @@ members  = [
   "crates/patcher",
   "crates/patcher-web",
   "crates/runtime",
+  "crates/runtime-desktop",
+  "crates/runtime-mobile",
   "crates/sigs",
   "crates/sigscan",
   "crates/stand-in",
@@ -22,32 +24,41 @@ license = "MIT"
 version = "0.1.0"
 
 [workspace.dependencies]
-android_logger  = { default-features = false, version = "0.15" }
-bindgen         = "0.73"
-cc              = "1"
-crc32fast       = "1"
-dobby-rs        = "0.1"
-flub            = "0.1"
-iced-x86        = { default-features = false, features = [ "block_encoder", "decoder", "encoder", "instr_info", "intel", "std" ], version = "1.22" }
-jni-sys         = "0.4"
-libc            = "0.2"
-log             = "0.4"
-memchr          = "2"
-misstep         = { features = [ "panic-hook", "pretty" ], version = "0.4.1" }
-object          = { default-features = false, features = [ "elf", "pe", "read_core", "std" ], version = "0.41" }
-patcher         = { path = "crates/patcher" }
-phoenix-hook    = { path = "crates/hook" }
-phoenix-runtime = { path = "crates/runtime" }
-phoenix-sigs       = { path = "crates/sigs" }
-phoenix-ui-desktop = { path = "crates/ui-desktop" }
-phoenix-ui-mobile  = { path = "crates/ui-mobile" }
-phoenix-wire       = { path = "crates/wire" }
-rquickjs        = { features = [ "parallel" ], version = "0.14" }
-rusqlite        = { default-features = false, features = [ "bundled" ], version = "0.35" }
-serde           = { features = [ "derive" ], version = "1" }
-serde_json      = { features = [ "raw_value" ], version = "1" }
-sunhook-sys     = { git = "https://github.com/sunbird-tools/sunhook" }
-zip             = { default-features = false, version = "9" }
+android_logger          = { default-features = false, version = "0.15" }
+bindgen                 = "0.73"
+cc                      = "1"
+crc32fast               = "1"
+dobby-rs                = "0.1"
+flub                    = "0.1"
+iced-x86                = { default-features = false, features = [
+  "block_encoder",
+  "decoder",
+  "encoder",
+  "instr_info",
+  "intel",
+  "std"
+], version = "1.22" }
+jni-sys                 = "0.4"
+libc                    = "0.2"
+log                     = "0.4"
+memchr                  = "2"
+misstep                 = { features = [ "panic-hook", "pretty" ], version = "0.4.1" }
+object                  = { default-features = false, features = [ "elf", "pe", "read_core", "std" ], version = "0.41" }
+patcher                 = { path = "crates/patcher" }
+phoenix-hook            = { path = "crates/hook" }
+phoenix-runtime         = { path = "crates/runtime" }
+phoenix-runtime-desktop = { path = "crates/runtime-desktop" }
+phoenix-runtime-mobile  = { path = "crates/runtime-mobile" }
+phoenix-sigs            = { path = "crates/sigs" }
+phoenix-ui-desktop      = { path = "crates/ui-desktop" }
+phoenix-ui-mobile       = { path = "crates/ui-mobile" }
+phoenix-wire            = { path = "crates/wire" }
+rquickjs                = { features = [ "parallel" ], version = "0.14" }
+rusqlite                = { default-features = false, features = [ "bundled" ], version = "0.35" }
+serde                   = { features = [ "derive" ], version = "1" }
+serde_json              = { features = [ "raw_value" ], version = "1" }
+sunhook-sys             = { git = "https://github.com/sunbird-tools/sunhook" }
+zip                     = { default-features = false, version = "9" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

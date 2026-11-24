@@ -13,6 +13,10 @@ use std::{
    sync::{
       Mutex,
       OnceLock,
+      atomic::{
+         AtomicBool,
+         Ordering,
+      },
    },
 };
 
@@ -28,28 +32,21 @@ use phoenix_sigs::{
    },
 };
 
-#[cfg(target_os = "android")] mod bridge;
 pub mod console;
-#[cfg(windows)] mod desktop_accessories;
-#[cfg(windows)] mod desktop_gpui;
-#[cfg(windows)] mod desktop_settings;
-mod discord;
-mod fetch;
-mod gateway;
-#[cfg(target_os = "android")] mod highlight;
-#[cfg(target_os = "android")] mod host;
-#[cfg(target_os = "android")] mod install;
-mod js;
-#[cfg(target_os = "android")] mod jvm;
-mod local;
-#[cfg(target_os = "android")] mod patches;
-#[cfg(target_os = "android")] mod picker;
-mod remote;
-#[cfg(target_os = "android")] mod settings;
-#[cfg(target_os = "android")] mod socket;
-mod staff;
-mod store;
-mod update;
+pub mod discord;
+pub mod fetch;
+pub mod gateway;
+pub mod js;
+pub mod local;
+mod platform;
+pub mod remote;
+pub mod store;
+pub mod update;
+
+pub use platform::{
+   Notice,
+   Platform,
+};
 
 #[derive(Debug, flub::Error)]
 pub enum Error {
@@ -89,13 +86,34 @@ pub enum Error {
    LoaderOutdated { version: String },
 }
 
-struct State {
-   image: Image<'static>,
-   home:  PathBuf,
-   js:    Mutex<js::Engine>,
+pub struct State {
+   pub image: Image<'static>,
+   pub home:  PathBuf,
+   js:        Mutex<js::Engine>,
 }
 
 static STATE: OnceLock<State> = OnceLock::new();
+static PLATFORM: OnceLock<&'static dyn Platform> = OnceLock::new();
+/// Phoenix's Staff Settings page reads `(user.flags | flag_override) & 1`, and
+/// the platforms set that bit while this is on.
+static STAFF: AtomicBool = AtomicBool::new(true);
+
+/// The running runtime, once [`start`] published it.
+#[must_use]
+pub fn state() -> Option<&'static State> {
+   STATE.get()
+}
+
+/// The platform [`start`] runs on.
+#[must_use]
+pub fn platform() -> Option<&'static dyn Platform> {
+   PLATFORM.get().copied()
+}
+
+/// Sets the platform ahead of [`start`], for hooks that run before it.
+pub fn set_platform(platform: &'static dyn Platform) {
+   let _ = PLATFORM.set(platform);
+}
 
 /// A plugin bundle, an esbuild IIFE that receives the `phoenix` API.
 pub struct Plugin {
@@ -195,7 +213,7 @@ pub enum Chosen {
    Text(String),
 }
 
-fn engine() -> Option<std::sync::MutexGuard<'static, js::Engine>> {
+pub fn engine() -> Option<std::sync::MutexGuard<'static, js::Engine>> {
    Some(
       STATE
          .get()?
@@ -207,8 +225,8 @@ fn engine() -> Option<std::sync::MutexGuard<'static, js::Engine>> {
 
 /// Runs matching `phoenix.discord.onRequest` hooks on an outgoing Discord API
 /// request.
-#[allow(dead_code)]
-pub(crate) fn intercept_request(
+#[must_use]
+pub fn intercept_request(
    matched: &[u64],
    method: &str,
    path: &str,
@@ -219,29 +237,9 @@ pub(crate) fn intercept_request(
    })
 }
 
-/// Runs `phoenix.messages.onSend` hooks against a desktop `POST
-/// /channels/<channel_id>/messages` body.
-#[cfg(not(target_os = "android"))]
-#[allow(dead_code)]
-pub(crate) fn intercept_send_body(channel_id: &str, body: &[u8]) -> discord::RequestAction {
-   engine().map_or(discord::RequestAction::Pass, |engine| {
-      engine.intercept_send_body(channel_id, body)
-   })
-}
-
-/// Evaluates all registered desktop `phoenix.ui.addMessageAccessory` callbacks
-/// for `message_id`.
-#[cfg(windows)]
-pub(crate) fn render_desktop_accessories(
-   message_id: u64,
-) -> Vec<desktop_accessories::RenderedAccessory> {
-   engine().map_or_default(|engine| engine.render_desktop_accessories(message_id))
-}
-
 /// Runs matching `phoenix.discord.onResponse` hooks (sync or async) on an
 /// incoming Discord API reply and delivers the final body through `done`.
-#[allow(dead_code)]
-pub(crate) fn intercept_response(
+pub fn intercept_response(
    matched: Vec<u64>,
    method: String,
    path: String,
@@ -256,18 +254,17 @@ pub(crate) fn intercept_response(
    }
 }
 
-pub(crate) fn refresh_settings() {
-   #[cfg(target_os = "android")]
-   settings::refresh();
+/// Redraws the platform's settings pages.
+pub fn refresh_settings() {
+   if let Some(platform) = platform() {
+      platform.refresh();
+   }
 }
 
-pub(crate) fn toast_user(message: &str) {
-   #[cfg(target_os = "android")]
-   {
-      let _ = picker::toast(message);
+pub fn toast(message: &str) {
+   if let Some(platform) = platform() {
+      platform.toast(message);
    }
-   #[cfg(not(target_os = "android"))]
-   phoenix_ui_desktop::toast(message);
 }
 
 /// Every plugin found at start, enabled or not.
@@ -276,15 +273,15 @@ pub fn plugins() -> Vec<PluginInfo> {
    engine().map_or_default(|engine| engine.plugins())
 }
 
-/// Whether the signed-in user has the staff flag.
+/// Whether the staff unlock is on.
 #[must_use]
 pub fn staff_enabled() -> bool {
-   staff::enabled()
+   STAFF.load(Ordering::Acquire)
 }
 
-/// Turns staff unlock on or off and remembers the choice across restarts.
+/// Turns the staff unlock on or off and remembers the choice across restarts.
 pub fn set_staff_enabled(enabled: bool) {
-   staff::set_enabled(enabled);
+   STAFF.store(enabled, Ordering::Release);
    if let Some(engine) = engine() {
       engine.save_choices();
    }
@@ -296,7 +293,7 @@ pub fn remote_shell_enabled() -> bool {
    remote::enabled()
 }
 
-pub(crate) fn set_remote_shell_flag(enabled: bool) {
+pub fn set_remote_shell_flag(enabled: bool) {
    remote::set_flag(enabled);
 }
 
@@ -469,39 +466,8 @@ pub fn reload_all() {
    }
 }
 
-/// Desktop Phoenix shows "This app isn't available for your account" from
-/// `libdiscord_ops_surfaces::client_access::ClientAccessGate`. One function
-/// reads it (1 blocked, 2 no gate, also what a missing value reads as), and the
-/// gate is only considered while it is not 2: its one small caller is
-/// `signed_in && access(..) != 2`. This makes it return 2. Discord settles on
-/// the gate within its first frames, so the loader calls this from `DllMain`,
-/// before Discord's own code.
-#[cfg(windows)]
-fn open_access_gate(image: &Image<'static>) {
-   /// `mov al, 2; ret`
-   const ALLOWED: [u8; 3] = [0xB0, 0x02, 0xC3];
-
-   let access = match phoenix_sigs::desktop::access_gate(image) {
-      Ok(access) => access,
-      Err(err) => {
-         log::warn!("access gate: {err}, leaving it");
-         return;
-      },
-   };
-   // SAFETY: code in Discord.exe, written from `DllMain` before Discord's own
-   // code runs.
-   match unsafe { image.write_code(access, &ALLOWED) } {
-      Ok(()) => log::info!("access gate: open"),
-      Err(err) => log::error!("access gate: {err}"),
-   }
-}
-
-/// The target and its swapped gateway registry, when [`prepare`] hooked them.
-#[cfg(windows)]
-static PREPARED: Mutex<Option<(Image<'static>, &'static GatewayRegistry)>> = Mutex::new(None);
-
 /// The first loaded library named in [`LIBRARIES`].
-fn target() -> Result<Image<'static>, Error> {
+pub fn target() -> Result<Image<'static>, Error> {
    // SAFETY: the target is the host app's own library, which stays mapped for
    // the life of the process, and scans run before the host's threads touch its
    // data.
@@ -512,33 +478,11 @@ fn target() -> Result<Image<'static>, Error> {
       .ok_or(Error::NoTarget)
 }
 
-/// Swaps the gateway handlers, and on desktop the HTTP transport.
-fn hook(image: &Image<'static>) -> Result<&'static GatewayRegistry, Error> {
+/// Points the gateway registry's handlers at phoenix.
+pub fn hook(image: &Image<'static>) -> Result<&'static GatewayRegistry, Error> {
    let walked = GatewayRegistry::locate(image)?;
    log::info!("gateway registry: {} events", walked.iter().count());
-   let registry = gateway::swap(image, walked)?;
-   #[cfg(not(target_os = "android"))]
-   discord::install(image);
-   Ok(registry)
-}
-
-/// Hooks `Discord.exe` from `DllMain`, before its own code runs: Desktop
-/// Phoenix settles on the access gate in its first frames and stops reading the
-/// gateway registry and HTTP vtables once started, so hooks swapped later from
-/// [`start`]'s thread never run. [`start`] picks up what this hooked.
-#[cfg(windows)]
-pub fn prepare() -> Result<(), Error> {
-   let image = target()?;
-   open_access_gate(&image);
-   staff::prepare(&image);
-   desktop_settings::install(&image);
-   desktop_accessories::install(&image);
-   let registry = hook(&image)?;
-   desktop_accessories::install_optimistic_delete(&image);
-   *PREPARED
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((image, registry));
-   Ok(())
+   gateway::swap(image, walked)
 }
 
 /// What [`start`] found and loaded.
@@ -548,25 +492,28 @@ pub struct Started {
    pub plugins: Vec<String>,
 }
 
-/// Starts phoenix against the first loaded library named in [`LIBRARIES`].
-/// `bundled` plugins load first, and a file in `home/plugins` with the same
-/// name replaces one.
-pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
-   #[cfg(windows)]
-   let prepared = PREPARED
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .take();
-   #[cfg(not(windows))]
-   let prepared = None;
-   let (image, registry) = match prepared {
-      Some(prepared) => prepared,
-      None => {
-         let image = target()?;
-         let registry = hook(&image)?;
-         (image, registry)
-      },
-   };
+/// Starts phoenix on `platform` against the first loaded library named in
+/// [`LIBRARIES`]. `bundled` plugins load first, and a file in `home/plugins`
+/// with the same name replaces one.
+pub fn start(
+   platform: &'static dyn Platform,
+   home: PathBuf,
+   bundled: Vec<Plugin>,
+) -> Result<Started, Error> {
+   let image = target()?;
+   let registry = hook(&image)?;
+   start_hooked(platform, image, registry, home, bundled)
+}
+
+/// [`start`] for a target whose registry [`hook`] already swapped.
+pub fn start_hooked(
+   platform: &'static dyn Platform,
+   image: Image<'static>,
+   registry: &'static GatewayRegistry,
+   home: PathBuf,
+   bundled: Vec<Plugin>,
+) -> Result<Started, Error> {
+   set_platform(platform);
    let engine = js::Engine::new(registry)?;
    let state = State {
       image,
@@ -577,50 +524,10 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    let state = STATE.get().expect("STATE was set above");
 
    let first_run = !state.choices_path().exists();
-   #[cfg(target_os = "android")]
-   update::adopt_staged(&state.home, &state.plugins_dir());
+   platform.before_plugins(&state.home);
    let plugins = js::load_plugins(state, bundled)?;
-   #[cfg(not(target_os = "android"))]
-   {
-      let _ = std::fs::create_dir_all(state.plugins_dir());
-      remote::set_flag(true);
-      remote::ensure_started();
-   }
-   #[cfg(target_os = "android")]
-   if remote_shell_enabled() {
-      remote::ensure_started();
-   }
-   #[cfg(target_os = "android")]
-   {
-      let _ = first_run;
-      update::forget_update(&state.files_dir());
-      std::thread::spawn(|| {
-         if let Err(err) = host::load() {
-            log::error!("host names: {err}");
-         }
-      });
-      settings::start();
-      patches::start();
-      bridge::install(Box::new(socket::Socket));
-   }
-   #[cfg(not(target_os = "android"))]
-   {
-      let dashboard_url = format!("http://{}/ui", remote::bound_addr());
-      phoenix_ui_desktop::start_tray(phoenix_ui_desktop::TrayConfig {
-         dashboard_url,
-         plugins_dir:      state.plugins_dir(),
-         on_reload_all:    Some(std::sync::Arc::new(reload_all)),
-         on_check_updates: Some(std::sync::Arc::new(update::check)),
-      });
-      phoenix_ui_desktop::notify(
-         "Sunbird ready",
-         Some("Open User Settings -> Sunbird, or press Ctrl+Shift+I for DevTools"),
-      );
-      if first_run && plugins.is_empty() {
-         phoenix_ui_desktop::open_settings();
-      }
-      update::check();
-   }
+   remote::ensure_started();
+   platform.started(first_run, &plugins);
    Ok(Started {
       target: state.image.path.clone(),
       build: state.image.build_id,
@@ -629,24 +536,24 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
 }
 
 impl State {
-   fn storage_path(&self, plugin: &str) -> PathBuf {
+   pub fn storage_path(&self, plugin: &str) -> PathBuf {
       self.home.join("storage").join(format!("{plugin}.json"))
    }
 
-   fn choices_path(&self) -> PathBuf {
+   pub fn choices_path(&self) -> PathBuf {
       self.home.join("plugins.json")
    }
 
    /// The app's data directory holding both phoenix's home and Phoenix's
    /// `store/<account>/cache.sqlite`.
-   fn files_dir(&self) -> PathBuf {
+   pub fn files_dir(&self) -> PathBuf {
       self
          .home
          .parent()
          .map_or_else(|| self.home.clone(), Path::to_path_buf)
    }
 
-   fn plugins_dir(&self) -> PathBuf {
+   pub fn plugins_dir(&self) -> PathBuf {
       self.home.join("plugins")
    }
 }

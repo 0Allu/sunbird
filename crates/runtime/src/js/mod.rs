@@ -1,18 +1,10 @@
-mod background;
-#[cfg(target_os = "android")] mod bridge;
-#[cfg(not(target_os = "android"))] mod desktop_ui;
+pub mod background;
 mod hooks;
-mod http;
+pub mod http;
 mod intercept;
-mod messages;
-#[cfg(target_os = "android")] mod mount;
-#[cfg(all(windows, target_arch = "x86_64"))] pub mod native;
-#[cfg(target_os = "android")] mod page;
+pub mod messages;
 mod settings;
 mod storage;
-#[cfg(target_os = "android")] mod ui;
-#[cfg(target_os = "android")] mod view;
-#[cfg(target_os = "android")] mod wire;
 
 use std::{
    borrow::Cow,
@@ -80,19 +72,6 @@ use crate::{
       },
    },
 };
-#[cfg(target_os = "android")]
-use crate::{
-   js::{
-      bridge::bridge_object,
-      messages::patch_api,
-      ui::Callbacks,
-      view::EventHook,
-   },
-   patches::{
-      self,
-      ContributionId,
-   },
-};
 
 pub struct Engine {
    runtime: Runtime,
@@ -114,10 +93,6 @@ const fn default_true() -> bool {
    true
 }
 
-const fn default_remote_shell() -> bool {
-   cfg!(not(target_os = "android"))
-}
-
 /// Which plugins the user turned off or on against their default and how
 /// they set each plugin's settings, kept in `home/plugins.json`.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -130,7 +105,7 @@ struct Choices<'a> {
    settings:     Cow<'a, ChosenMap>,
    #[serde(default = "default_true")]
    staff:        bool,
-   #[serde(default = "default_remote_shell")]
+   #[serde(default)]
    remote_shell: bool,
 }
 
@@ -141,7 +116,7 @@ impl Default for Choices<'_> {
          enabled:      BTreeSet::new(),
          settings:     Cow::Owned(BTreeMap::new()),
          staff:        true,
-         remote_shell: default_remote_shell(),
+         remote_shell: false,
       }
    }
 }
@@ -152,57 +127,30 @@ pub enum Before {
    Replace(String),
 }
 
-/// What plugins registered. It lives in the runtime's userdata, so callbacks
-/// stay JS values owned by the runtime, and the only thing plugins can reach is
-/// their own `phoenix` object.
-struct Registry<'js> {
-   gateway:        Object<'js>,
-   handles:        Vec<(EventId, Object<'js>)>,
-   hooks:          RefCell<HashMap<EventId, Vec<Hook<'js>>>>,
-   defined:        RefCell<BTreeMap<String, Vec<Definition<'js>>>>,
+/// What plugins registered, kept in the runtime's userdata next to the
+/// platform's own.
+///
+/// Callbacks stay JS values owned by the runtime, and the only thing plugins
+/// can reach is their own `phoenix` object.
+pub struct Registry<'js> {
+   gateway:          Object<'js>,
+   handles:          Vec<(EventId, Object<'js>)>,
+   hooks:            RefCell<HashMap<EventId, Vec<Hook<'js>>>>,
+   defined:          RefCell<BTreeMap<String, Vec<Definition<'js>>>>,
    /// Kept across unloads, so a reloaded plugin sees what the user chose.
-   chosen:         RefCell<ChosenMap>,
+   chosen:           RefCell<ChosenMap>,
    /// `phoenix.onUnload` callbacks, run when the plugin is turned off,
    /// reloaded or removed.
-   unloads:        RefCell<HashMap<String, Vec<Function<'js>>>>,
+   unloads:          RefCell<HashMap<String, Vec<Function<'js>>>>,
    /// The resolve and reject of each promise a worker thread will settle, by
    /// id.
-   pending:        RefCell<HashMap<u64, (Function<'js>, Function<'js>)>>,
+   pending:          RefCell<HashMap<u64, (Function<'js>, Function<'js>)>>,
    /// `phoenix.discord.onRequest` interceptors, by id.
-   request_hooks:  RefCell<HashMap<u64, (String, Function<'js>)>>,
+   request_hooks:    RefCell<HashMap<u64, (String, Function<'js>)>>,
    /// `phoenix.discord.onResponse` interceptors, by id.
-   response_hooks: RefCell<HashMap<u64, (String, Function<'js>)>>,
+   response_hooks:   RefCell<HashMap<u64, (String, Function<'js>)>>,
    /// `phoenix.messages.onSend` interceptors in registration order, by id.
-   interceptors:   RefCell<Vec<(u64, String, Function<'js>)>>,
-   /// Native Desktop GPUI `phoenix.ui.addMessageAccessory` callbacks.
-   #[cfg(windows)]
-   desktop_accessories: RefCell<Vec<desktop_ui::DesktopAccessory<'js>>>,
-   #[cfg(target_os = "android")]
-   ui:             RefCell<HashMap<ContributionId, Callbacks<'js>>>,
-   /// Slash commands by lowercase name, with the plugin that registered each.
-   #[cfg(target_os = "android")]
-   commands:       RefCell<HashMap<String, (String, Function<'js>)>>,
-   /// `phoenix.messages.onEmojiPick` handlers in registration order, by id.
-   #[cfg(target_os = "android")]
-   pickers:        RefCell<Vec<(u64, String, Function<'js>)>>,
-   /// `phoenix.ui.onEvent` handlers, by id.
-   #[cfg(target_os = "android")]
-   event_hooks:    RefCell<Vec<EventHook<'js>>>,
-   /// `phoenix.ui.onNode` watchers, by id.
-   #[cfg(target_os = "android")]
-   node_watchers:  RefCell<HashMap<u64, (String, Function<'js>)>>,
-   /// Open full-screen plugin pages (`phoenix.ui.openPage`) and their button
-   /// callbacks, by page id.
-   #[cfg(target_os = "android")]
-   open_pages:     RefCell<HashMap<u32, (String, Vec<Function<'js>>)>>,
-   /// Active in-app notification banner tap callbacks (`phoenix.ui.notify`), by
-   /// banner id.
-   #[cfg(target_os = "android")]
-   banners:        RefCell<HashMap<u32, (String, Function<'js>)>>,
-   /// Active raw JS-mounted subtrees (`phoenix.ui.mount`) and their callbacks,
-   /// by mount id.
-   #[cfg(target_os = "android")]
-   mounts:         RefCell<HashMap<u32, (String, Vec<Function<'js>>)>>,
+   pub interceptors: RefCell<Vec<(u64, String, Function<'js>)>>,
 }
 
 // SAFETY: every field is bound to 'js, and Changed swaps exactly that lifetime.
@@ -211,11 +159,13 @@ unsafe impl<'js> JsLifetime<'js> for Registry<'js> {
 }
 
 #[expect(clippy::needless_pass_by_value, reason = "used as a map_err callback")]
-fn js_error(err: CaughtError<'_>) -> Error {
+#[must_use]
+pub fn js_error(err: CaughtError<'_>) -> Error {
    Error::Js(err.to_string())
 }
 
-fn throw(ctx: &Ctx<'_>, err: &Error) -> rquickjs::Error {
+#[must_use]
+pub fn throw(ctx: &Ctx<'_>, err: &Error) -> rquickjs::Error {
    Exception::throw_message(ctx, &err.to_string())
 }
 
@@ -234,6 +184,9 @@ impl Engine {
          let registry = registry(&ctx, events).catch(&ctx).map_err(js_error)?;
          ctx.store_userdata(registry)
             .map_err(|err| Error::Js(err.to_string()))?;
+         if let Some(platform) = crate::platform() {
+            platform.init(&ctx).catch(&ctx).map_err(js_error)?;
+         }
          Ok::<_, Error>(())
       })?;
       Ok(Self {
@@ -243,10 +196,20 @@ impl Engine {
       })
    }
 
+   /// Runs `work` in the engine's context, then the promise reactions it
+   /// queued.
+   pub fn with<R>(&self, work: impl FnOnce(Ctx<'_>) -> R) -> R {
+      let result = self.context.with(work);
+      drain(&self.runtime);
+      result
+   }
+
+   #[must_use]
    pub fn source(&self, name: &str) -> Option<String> {
       self.plugins.get(name).map(|loaded| loaded.source.clone())
    }
 
+   #[must_use]
    pub fn plugins(&self) -> Vec<PluginInfo> {
       self.context.with(|ctx| {
          let registry = ctx.userdata::<Registry<'_>>();
@@ -340,79 +303,12 @@ impl Engine {
             .borrow_mut()
             .retain(|_, (plugin, _)| plugin != name);
          discord::forget_response_hooks(name);
-         {
-            let mut interceptors = registry.interceptors.borrow_mut();
-            interceptors.retain(|(_, plugin, _)| plugin != name);
-            #[cfg(target_os = "android")]
-            patches::set_interceptors(interceptors.len());
-         }
-         #[cfg(windows)]
-         {
-            let mut accessories = registry.desktop_accessories.borrow_mut();
-            let before = accessories.len();
-            accessories.retain(|entry| entry.plugin != name);
-            if accessories.len() != before {
-               crate::desktop_accessories::set_active_count(accessories.len());
-               crate::desktop_accessories::clear_cache();
-               crate::desktop_accessories::invalidate_discord_windows();
-            }
-         }
-         #[cfg(target_os = "android")]
-         {
-            registry
-               .ui
-               .borrow_mut()
-               .retain(|_, callbacks| callbacks.plugin != name);
-            registry
-               .commands
-               .borrow_mut()
-               .retain(|_, (plugin, _)| plugin != name);
-            let mut pickers = registry.pickers.borrow_mut();
-            pickers.retain(|(_, plugin, _)| plugin != name);
-            patches::set_emoji_pickers(pickers.len());
-            drop(pickers);
-            registry
-               .event_hooks
-               .borrow_mut()
-               .retain(|hook| hook.plugin != name);
-            registry
-               .node_watchers
-               .borrow_mut()
-               .retain(|_, (plugin, _)| plugin != name);
-            let mut open_pages = registry.open_pages.borrow_mut();
-            let closed = open_pages
-               .iter()
-               .filter(|(_, (plugin, _))| plugin == name)
-               .map(|(id, _)| *id)
-               .collect::<Vec<_>>();
-            for id in closed {
-               open_pages.remove(&id);
-               patches::pages::close_page(id);
-            }
-            drop(open_pages);
-            let mut banners = registry.banners.borrow_mut();
-            let dismissed = banners
-               .iter()
-               .filter(|(_, (plugin, _))| plugin == name)
-               .map(|(id, _)| *id)
-               .collect::<Vec<_>>();
-            for id in dismissed {
-               banners.remove(&id);
-               patches::banners::dismiss_banner(id);
-            }
-            drop(banners);
-            let mut mounts = registry.mounts.borrow_mut();
-            let unmounted = mounts
-               .iter()
-               .filter(|(_, (plugin, _))| plugin == name)
-               .map(|(id, _)| *id)
-               .collect::<Vec<_>>();
-            for id in unmounted {
-               mounts.remove(&id);
-               patches::mount::unmount(id);
-            }
-            drop(mounts);
-            patches::forget(name);
+         registry
+            .interceptors
+            .borrow_mut()
+            .retain(|(_, plugin, _)| plugin != name);
+         if let Some(platform) = crate::platform() {
+            platform.unload(&ctx, name);
          }
          let mut hooks = registry.hooks.borrow_mut();
          for (event, list) in hooks.iter_mut() {
@@ -526,8 +422,9 @@ impl Engine {
          let run = || -> rquickjs::Result<String> {
             if !ctx.globals().contains_key("phoenix")? {
                let phoenix = api(&ctx, "console")?;
-               #[cfg(all(windows, target_arch = "x86_64"))]
-               phoenix.set("native", native::object(&ctx)?)?;
+               if let Some(platform) = crate::platform() {
+                  platform.console(&ctx, &phoenix)?;
+               }
                ctx.globals().set("phoenix", phoenix)?;
             }
             let result = ctx.eval::<Value<'_>, _>(code)?;
@@ -552,7 +449,7 @@ impl Engine {
 
 /// Runs promise reactions until none are left. `QuickJS` queues them, and
 /// nothing else runs the queue.
-fn drain(runtime: &Runtime) {
+pub fn drain(runtime: &Runtime) {
    loop {
       match runtime.execute_pending_job() {
          Ok(true) => {},
@@ -595,24 +492,6 @@ fn registry<'js>(ctx: &Ctx<'js>, events: &GatewayRegistry) -> rquickjs::Result<R
       request_hooks: RefCell::default(),
       response_hooks: RefCell::default(),
       interceptors: RefCell::default(),
-      #[cfg(windows)]
-      desktop_accessories: RefCell::default(),
-      #[cfg(target_os = "android")]
-      ui: RefCell::default(),
-      #[cfg(target_os = "android")]
-      commands: RefCell::default(),
-      #[cfg(target_os = "android")]
-      pickers: RefCell::default(),
-      #[cfg(target_os = "android")]
-      event_hooks: RefCell::default(),
-      #[cfg(target_os = "android")]
-      node_watchers: RefCell::default(),
-      #[cfg(target_os = "android")]
-      open_pages: RefCell::default(),
-      #[cfg(target_os = "android")]
-      banners: RefCell::default(),
-      #[cfg(target_os = "android")]
-      mounts: RefCell::default(),
    })
 }
 
@@ -644,10 +523,9 @@ fn api<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
    add_gateway_api(ctx, plugin, &api)?;
 
    let messages = messages_object(ctx)?;
-   #[cfg(target_os = "android")]
-   patch_api(ctx, plugin, &api, &messages)?;
-   #[cfg(not(target_os = "android"))]
-   desktop_ui::desktop_patch_api(ctx, plugin, &api, &messages)?;
+   if let Some(platform) = crate::platform() {
+      platform.api(ctx, plugin, &api, &messages)?;
+   }
    api.set("messages", messages)?;
    api.set("log", log_object(ctx, plugin)?)?;
    api.set("storage", storage(ctx, plugin)?)?;
@@ -668,8 +546,6 @@ fn api<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
    )?;
    api.set("stores", stores_object(ctx)?)?;
    api.set("discord", discord_object(ctx, plugin)?)?;
-   #[cfg(target_os = "android")]
-   api.set("bridge", bridge_object(ctx)?)?;
    api.set(
       "fetch",
       Function::new(
@@ -730,8 +606,11 @@ pub fn load_plugins(state: &'static State, bundled: Vec<Plugin>) -> Result<Vec<S
       Err(err) if err.kind() == ErrorKind::NotFound => Choices::default(),
       Err(err) => return Err(io_error(&choices_path)(err)),
    };
-   crate::staff::start(choices.staff, &state.image);
+   crate::STAFF.store(choices.staff, std::sync::atomic::Ordering::Release);
    crate::set_remote_shell_flag(choices.remote_shell);
+   if let Some(platform) = crate::platform() {
+      platform.staff(&state.image);
+   }
 
    let dir = state.plugins_dir();
    let mut sources = bundled

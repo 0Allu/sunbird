@@ -700,6 +700,8 @@ dependencies = [
  "log",
  "misstep",
  "phoenix-runtime",
+ "phoenix-runtime-desktop",
+ "phoenix-runtime-mobile",
  "phoenix-sigs",
  "serde_json",
  "zip",
@@ -711,18 +713,48 @@ version = "0.1.0"
 dependencies = [
  "crc32fast",
  "flub",
+ "libc",
+ "log",
+ "memchr",
+ "phoenix-hook",
+ "phoenix-sigs",
+ "rquickjs",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "phoenix-runtime-desktop"
+version = "0.1.0"
+dependencies = [
+ "flub",
+ "log",
+ "phoenix-hook",
+ "phoenix-runtime",
+ "phoenix-sigs",
+ "phoenix-ui-desktop",
+ "rquickjs",
+ "rusqlite",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "phoenix-runtime-mobile"
+version = "0.1.0"
+dependencies = [
+ "flub",
  "jni-sys",
  "libc",
  "log",
  "memchr",
  "patcher",
  "phoenix-hook",
+ "phoenix-runtime",
  "phoenix-sigs",
- "phoenix-ui-desktop",
  "phoenix-ui-mobile",
  "phoenix-wire",
  "rquickjs",
- "rusqlite",
  "serde",
  "serde_json",
 ]
