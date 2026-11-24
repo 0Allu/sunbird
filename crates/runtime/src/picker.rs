@@ -47,9 +47,20 @@ use crate::{
    },
    jvm::{
       self,
+      CLASS,
+      CLASS_LOADER,
+      Class,
+      OBJECT,
+      STRING,
+      class,
       jni,
+      signature,
    },
 };
+
+const IN_MEMORY_DEX_CLASS_LOADER: Class = class!(dalvik::system::InMemoryDexClassLoader);
+const BYTE_BUFFER: Class = class!(java::nio::ByteBuffer);
+const PICKER: Class = class!(phx::Picker);
 
 const DEX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/picker.dex"));
 /// The user takes their time in the picker.
@@ -60,7 +71,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 pub type Picked = Result<Option<(String, Vec<u8>)>, String>;
 
 /// `phx.Picker` as a global reference.
-static CLASS: OnceLock<usize> = OnceLock::new();
+static PICKER_CLASS: OnceLock<usize> = OnceLock::new();
 /// Who waits for each open [`choose`] dialog.
 static CHOICES: Mutex<Option<HashMap<i32, Sender<i32>>>> = Mutex::new(None);
 
@@ -83,7 +94,7 @@ pub fn choose(
    let shown = call_static(c"choose", |env| {
       // SAFETY: `env` is this thread's, inside the caller's local frame.
       unsafe {
-         let string_class = jni!(env, FindClass, c"java/lang/String".as_ptr());
+         let string_class = STRING.find(env);
          let array = jni!(
             env,
             NewObjectArray,
@@ -102,7 +113,7 @@ pub fn choose(
             );
          }
          (
-            c"(Ljava/lang/Object;ILjava/lang/String;Ljava/lang/String;[Ljava/lang/String;)V",
+            signature!((OBJECT, int, STRING, STRING, [STRING]) -> void),
             vec![
                jvalue {
                   l: bridge::guest_host(),
@@ -172,7 +183,7 @@ pub fn view(
    let shown = call_static(c"view", |env| {
       // SAFETY: `env` is this thread's, inside the caller's local frame.
       unsafe {
-         let string_class = jni!(env, FindClass, c"java/lang/String".as_ptr());
+         let string_class = STRING.find(env);
          let array = jni!(
             env,
             NewObjectArray,
@@ -191,7 +202,7 @@ pub fn view(
             );
          }
          (
-            c"(Ljava/lang/Object;ILjava/lang/String;Ljava/lang/String;Z[Ljava/lang/String;)V",
+            signature!((OBJECT, int, STRING, STRING, boolean, [STRING]) -> void),
             vec![
                jvalue {
                   l: bridge::guest_host(),
@@ -345,7 +356,7 @@ pub fn open(url: &str) -> Result<(), String> {
 
 /// Loads `phx.Picker` once and binds its native callback.
 unsafe fn class(env: *mut JNIEnv) -> Result<jclass, String> {
-   if let Some(&class) = CLASS.get() {
+   if let Some(&class) = PICKER_CLASS.get() {
       return Ok(class as jclass);
    }
    let owner = bridge::guest_host();
@@ -355,12 +366,12 @@ unsafe fn class(env: *mut JNIEnv) -> Result<jclass, String> {
    // SAFETY: forwarded from `pick`; `owner` is the live GuestHost global
    // reference and `DEX` is static, so the direct buffer never dangles.
    unsafe {
-      let class_class = jni!(env, FindClass, c"java/lang/Class".as_ptr());
+      let class_class = CLASS.find(env);
       let get_loader = jvm::method(
          env,
          class_class,
          c"getClassLoader",
-         c"()Ljava/lang/ClassLoader;",
+         signature!(() -> CLASS_LOADER),
       );
       let owner_class = jni!(env, GetObjectClass, owner);
       let parent = jni!(env, CallObjectMethodA, owner_class, get_loader, ptr::null());
@@ -370,30 +381,21 @@ unsafe fn class(env: *mut JNIEnv) -> Result<jclass, String> {
          DEX.as_ptr().cast_mut().cast::<c_void>(),
          jlong::try_from(DEX.len()).expect("the picker dex is a few KB"),
       );
-      let loader_class = jni!(
-         env,
-         FindClass,
-         c"dalvik/system/InMemoryDexClassLoader".as_ptr()
-      );
+      let loader_class = IN_MEMORY_DEX_CLASS_LOADER.find(env);
       let init = jvm::method(
          env,
          loader_class,
          c"<init>",
-         c"(Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;)V",
+         signature!((BYTE_BUFFER, CLASS_LOADER) -> void),
       );
       let args = [jvalue { l: buffer }, jvalue { l: parent }];
       let loader = jni!(env, NewObjectA, loader_class, init, args.as_ptr());
       if loader.is_null() || jni!(env, ExceptionCheck) {
          return Err(failure(env, "could not load the picker dex"));
       }
-      let base = jni!(env, FindClass, c"java/lang/ClassLoader".as_ptr());
-      let load = jvm::method(
-         env,
-         base,
-         c"loadClass",
-         c"(Ljava/lang/String;)Ljava/lang/Class;",
-      );
-      let name = jni!(env, NewStringUTF, c"phx.Picker".as_ptr());
+      let base = CLASS_LOADER.find(env);
+      let load = jvm::method(env, base, c"loadClass", signature!((STRING) -> CLASS));
+      let name = jni!(env, NewStringUTF, PICKER.dotted().as_ptr());
       let class = jni!(
          env,
          CallObjectMethodA,
@@ -406,14 +408,14 @@ unsafe fn class(env: *mut JNIEnv) -> Result<jclass, String> {
       }
       let natives = [JNINativeMethod {
          name:      c"onChosen".as_ptr().cast_mut(),
-         signature: c"(II)V".as_ptr().cast_mut(),
+         signature: signature!((int, int) -> void).as_ptr().cast_mut(),
          fnPtr:     on_chosen as *mut c_void,
       }];
       if jni!(env, RegisterNatives, class, natives.as_ptr(), 1) != 0 {
          return Err(failure(env, "could not bind phx.Picker's natives"));
       }
       let global = jni!(env, NewGlobalRef, class) as usize;
-      Ok(*CLASS.get_or_init(|| global) as jclass)
+      Ok(*PICKER_CLASS.get_or_init(|| global) as jclass)
    }
 }
 

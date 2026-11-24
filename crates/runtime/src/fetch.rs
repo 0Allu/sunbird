@@ -14,6 +14,9 @@ use jni_sys::{
 };
 
 use crate::jvm::{
+   Class,
+   STRING,
+   class,
    env,
    jni,
    method,
@@ -22,6 +25,12 @@ use crate::jvm::{
    signature,
    take_exception,
 };
+
+const URL: Class = class!(java::net::URL);
+const HTTP_URL_CONNECTION: Class = class!(java::net::HttpURLConnection);
+const URL_CONNECTION: Class = class!(java::net::URLConnection);
+const INPUT_STREAM: Class = class!(java::io::InputStream);
+const OUTPUT_STREAM: Class = class!(java::io::OutputStream);
 
 /// Plugin bundles are a few hundred KiB, so anything far larger is a wrong URL.
 const LIMIT: usize = 8 << 20;
@@ -108,12 +117,7 @@ unsafe fn exchange(env: *mut JNIEnv, request: &Request) -> Result<Response, Fetc
       } else {
          c"getInputStream"
       };
-      let input = method(
-         env,
-         http_class,
-         name,
-         signature!(() -> java::io::InputStream),
-      );
+      let input = method(env, http_class, name, signature!(() -> INPUT_STREAM));
       let stream = jni!(env, CallObjectMethodA, connection, input, ptr::null());
       if jni!(env, ExceptionCheck) {
          return Err(java_error(env, url));
@@ -192,13 +196,13 @@ unsafe fn connect(env: *mut JNIEnv, request: &Request) -> Result<(jobject, jclas
          let text = CString::new(text).map_err(|_| not_http())?;
          Ok(jni!(env, NewStringUTF, text.as_ptr()))
       };
-      let url_class = jni!(env, FindClass, c"java/net/URL".as_ptr());
-      let http_class = jni!(env, FindClass, c"java/net/HttpURLConnection".as_ptr());
+      let url_class = URL.find(env);
+      let http_class = HTTP_URL_CONNECTION.find(env);
       if url_class.is_null() || http_class.is_null() {
          return Err(java_error(env, url));
       }
 
-      let init = method(env, url_class, c"<init>", signature!((String) -> void));
+      let init = method(env, url_class, c"<init>", signature!((STRING) -> void));
       let url_object = jni!(
          env,
          NewObjectA,
@@ -213,7 +217,7 @@ unsafe fn connect(env: *mut JNIEnv, request: &Request) -> Result<(jobject, jclas
          env,
          url_class,
          c"openConnection",
-         signature!(() -> java::net::URLConnection),
+         signature!(() -> URL_CONNECTION),
       );
       let connection = jni!(env, CallObjectMethodA, url_object, open, ptr::null());
       if connection.is_null() {
@@ -237,7 +241,7 @@ unsafe fn connect(env: *mut JNIEnv, request: &Request) -> Result<(jobject, jclas
          env,
          http_class,
          c"setRequestMethod",
-         signature!((String) -> void),
+         signature!((STRING) -> void),
       );
       let verb = string(&request.method)?;
       jni!(
@@ -251,7 +255,7 @@ unsafe fn connect(env: *mut JNIEnv, request: &Request) -> Result<(jobject, jclas
          env,
          http_class,
          c"setRequestProperty",
-         signature!((String, String) -> void),
+         signature!((STRING, STRING) -> void),
       );
       for (name, value) in &request.headers {
          let args = [jvalue { l: string(name)? }, jvalue { l: string(value)? }];
@@ -300,7 +304,7 @@ unsafe fn send_body(
          env,
          http_class,
          c"getOutputStream",
-         signature!(() -> java::io::OutputStream),
+         signature!(() -> OUTPUT_STREAM),
       );
       let stream = jni!(env, CallObjectMethodA, connection, output, ptr::null());
       if stream.is_null() {

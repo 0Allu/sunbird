@@ -18,11 +18,22 @@ use crate::{
    bridge,
    jvm::{
       self,
+      Class,
+      STRING,
+      class,
       jni,
       method,
       signature,
    },
 };
+
+const ACTIVITY_THREAD: Class = class!(android::app::ActivityThread);
+const APPLICATION: Class = class!(android::app::Application);
+const CONTEXT: Class = class!(android::content::Context);
+const INTENT: Class = class!(android::content::Intent);
+const URI: Class = class!(android::net::Uri);
+const FILE: Class = class!(java::io::File);
+const FILE_PROVIDER: Class = class!(androidx::core::content::FileProvider);
 
 const FLAG_GRANT_READ_URI_PERMISSION: i32 = 0x0000_0001;
 const FLAG_ACTIVITY_NEW_TASK: i32 = 0x1000_0000;
@@ -54,13 +65,13 @@ pub fn open(apk: &Path) -> Result<(), String> {
 unsafe fn application(env: *mut JNIEnv) -> Result<jobject, String> {
    // SAFETY: forwarded from `open`.
    unsafe {
-      let thread = jni!(env, FindClass, c"android/app/ActivityThread".as_ptr());
+      let thread = ACTIVITY_THREAD.find(env);
       let current = jni!(
          env,
          GetStaticMethodID,
          thread,
          c"currentApplication".as_ptr(),
-         signature!(() -> android::app::Application).as_ptr()
+         signature!(() -> APPLICATION).as_ptr()
       );
       checked(
          env,
@@ -80,7 +91,7 @@ unsafe fn content_uri(env: *mut JNIEnv, app: jobject, apk: &CString) -> Result<j
    // its result is used.
    unsafe {
       let app_class = jni!(env, GetObjectClass, app);
-      let package_name = method(env, app_class, c"getPackageName", signature!(() -> String));
+      let package_name = method(env, app_class, c"getPackageName", signature!(() -> STRING));
       let package = checked(
          env,
          jni!(env, CallObjectMethodA, app, package_name, ptr::null()),
@@ -90,8 +101,8 @@ unsafe fn content_uri(env: *mut JNIEnv, app: jobject, apk: &CString) -> Result<j
       let authority =
          CString::new(format!("{package}.file-provider")).map_err(|err| err.to_string())?;
 
-      let file_class = jni!(env, FindClass, c"java/io/File".as_ptr());
-      let file_init = method(env, file_class, c"<init>", signature!((String) -> void));
+      let file_class = FILE.find(env);
+      let file_init = method(env, file_class, c"<init>", signature!((STRING) -> void));
       let file = checked(
          env,
          jni!(
@@ -107,15 +118,14 @@ unsafe fn content_uri(env: *mut JNIEnv, app: jobject, apk: &CString) -> Result<j
          "could not make a File",
       )?;
 
-      let provider = bridge::app_class(env, c"androidx.core.content.FileProvider")
-         .ok_or("Discord has no androidx FileProvider")?;
+      let provider =
+         bridge::app_class(env, FILE_PROVIDER).ok_or("Discord has no androidx FileProvider")?;
       let uri_for_file = jni!(
          env,
          GetStaticMethodID,
          provider,
          c"getUriForFile".as_ptr(),
-         signature!((android::content::Context, String, java::io::File) -> android::net::Uri)
-            .as_ptr()
+         signature!((CONTEXT, STRING, FILE) -> URI).as_ptr()
       );
       checked(
          env,
@@ -146,8 +156,8 @@ unsafe fn content_uri(env: *mut JNIEnv, app: jobject, apk: &CString) -> Result<j
 unsafe fn start_view(env: *mut JNIEnv, app: jobject, uri: jobject) -> Result<(), String> {
    // SAFETY: forwarded from `open`.
    unsafe {
-      let intent_class = jni!(env, FindClass, c"android/content/Intent".as_ptr());
-      let intent_init = method(env, intent_class, c"<init>", signature!((String) -> void));
+      let intent_class = INTENT.find(env);
+      let intent_init = method(env, intent_class, c"<init>", signature!((STRING) -> void));
       let intent = checked(
          env,
          jni!(
@@ -166,7 +176,7 @@ unsafe fn start_view(env: *mut JNIEnv, app: jobject, uri: jobject) -> Result<(),
          env,
          intent_class,
          c"setDataAndType",
-         signature!((android::net::Uri, String) -> android::content::Intent),
+         signature!((URI, STRING) -> INTENT),
       );
       let kind = jni!(
          env,
@@ -180,12 +190,7 @@ unsafe fn start_view(env: *mut JNIEnv, app: jobject, uri: jobject) -> Result<(),
          set_data,
          [jvalue { l: uri }, jvalue { l: kind }].as_ptr()
       );
-      let add_flags = method(
-         env,
-         intent_class,
-         c"addFlags",
-         signature!((int) -> android::content::Intent),
-      );
+      let add_flags = method(env, intent_class, c"addFlags", signature!((int) -> INTENT));
       jni!(
          env,
          CallObjectMethodA,
@@ -200,7 +205,7 @@ unsafe fn start_view(env: *mut JNIEnv, app: jobject, uri: jobject) -> Result<(),
          env,
          jni!(env, GetObjectClass, app),
          c"startActivity",
-         signature!((android::content::Intent) -> void),
+         signature!((INTENT) -> void),
       );
       jni!(
          env,

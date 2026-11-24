@@ -28,6 +28,9 @@ use serde::{
 };
 
 use crate::jvm::{
+   Class,
+   STRING,
+   class,
    clear_exception,
    env,
    jni,
@@ -37,6 +40,10 @@ use crate::jvm::{
    signature,
    take_exception,
 };
+
+const SQLITE_DATABASE: Class = class!(android::database::sqlite::SQLiteDatabase);
+const CURSOR_FACTORY: Class = class!(android::database::sqlite::SQLiteDatabase.CursorFactory);
+const CURSOR: Class = class!(android::database::Cursor);
 
 /// `SQLiteDatabase.OPEN_READONLY | NO_LOCALIZED_COLLATORS`.
 const OPEN_FLAGS: jint = 0x01 | 0x10;
@@ -175,12 +182,8 @@ unsafe fn run(
          let text = CString::new(text).map_err(|_| StoreError::Nul)?;
          Ok(jni!(env, NewStringUTF, text.as_ptr()))
       };
-      let db_class = jni!(
-         env,
-         FindClass,
-         c"android/database/sqlite/SQLiteDatabase".as_ptr()
-      );
-      let string_class = jni!(env, FindClass, c"java/lang/String".as_ptr());
+      let db_class = SQLITE_DATABASE.find(env);
+      let string_class = STRING.find(env);
       if db_class.is_null() || string_class.is_null() {
          return Err(sql_error(env));
       }
@@ -190,8 +193,7 @@ unsafe fn run(
          GetStaticMethodID,
          db_class,
          c"openDatabase".as_ptr(),
-         signature!((String, android::database::sqlite::SQLiteDatabase.CursorFactory, int) -> android::database::sqlite::SQLiteDatabase)
-            .as_ptr()
+         signature!((STRING, CURSOR_FACTORY, int) -> SQLITE_DATABASE).as_ptr()
       );
       let path = string(&database.to_string_lossy())?;
       let db = jni!(
@@ -217,7 +219,7 @@ unsafe fn run(
          env,
          db_class,
          c"rawQuery",
-         signature!((String, [String]) -> android::database::Cursor),
+         signature!((STRING, [STRING]) -> CURSOR),
       );
       let cursor = jni!(
          env,
@@ -249,12 +251,12 @@ unsafe fn rows(env: *mut JNIEnv, cursor: jobject) -> Result<Rows, StoreError> {
    unsafe {
       let class = jni!(env, GetObjectClass, cursor);
       let column_count = method(env, class, c"getColumnCount", signature!(() -> int));
-      let column_name = method(env, class, c"getColumnName", signature!((int) -> String));
+      let column_name = method(env, class, c"getColumnName", signature!((int) -> STRING));
       let move_next = method(env, class, c"moveToNext", signature!(() -> boolean));
       let kind = method(env, class, c"getType", signature!((int) -> int));
       let get_long = method(env, class, c"getLong", signature!((int) -> long));
       let get_double = method(env, class, c"getDouble", signature!((int) -> double));
-      let get_string = method(env, class, c"getString", signature!((int) -> String));
+      let get_string = method(env, class, c"getString", signature!((int) -> STRING));
       let get_blob = method(env, class, c"getBlob", signature!((int) -> [byte]));
       let close = method(env, class, c"close", signature!(() -> void));
 

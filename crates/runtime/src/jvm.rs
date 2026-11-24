@@ -50,18 +50,122 @@ macro_rules! jni {
    };
 }
 
-/// A JNI method descriptor as a `&'static CStr`, written with Java's types:
-/// `signature!((String, [byte]) -> boolean)` is `c"(Ljava/lang/String;[B)Z"`.
-/// Other classes go by their paths with `::`, and nested classes follow a
-/// `.`, so `android::database::sqlite::SQLiteDatabase.CursorFactory` is
-/// `SQLiteDatabase$CursorFactory`.
+/// A Java class, written once and used both to find it and in signatures.
+#[derive(Clone, Copy)]
+pub struct Class {
+   slashed: &'static CStr,
+   dotted:  &'static CStr,
+}
+
+impl Class {
+   #[doc(hidden)]
+   pub const fn new(slashed: &'static str, dotted: &'static str) -> Self {
+      Self {
+         slashed: nul_terminated(slashed),
+         dotted:  nul_terminated(dotted),
+      }
+   }
+
+   /// The binary name with `.`, as `ClassLoader.loadClass` takes it.
+   pub const fn dotted(self) -> &'static CStr {
+      self.dotted
+   }
+
+   #[doc(hidden)]
+   pub const fn slashed(self) -> &'static [u8] {
+      self.slashed.to_bytes()
+   }
+
+   /// The class through `FindClass`, which only sees the boot and system
+   /// class loaders. Null with an exception pending when it is missing.
+   ///
+   /// # Safety
+   ///
+   /// `env` is the current thread's `JNIEnv`.
+   pub unsafe fn find(self, env: *mut JNIEnv) -> jclass {
+      // SAFETY: forwarded from the caller, and the name is NUL-terminated.
+      unsafe { jni!(env, FindClass, self.slashed.as_ptr()) }
+   }
+}
+
+#[doc(hidden)]
+pub const fn nul_terminated(text: &'static str) -> &'static CStr {
+   match CStr::from_bytes_with_nul(text.as_bytes()) {
+      Ok(text) => text,
+      Err(_) => panic!("a JNI name has a NUL inside"),
+   }
+}
+
+#[doc(hidden)]
+pub const fn joined_len(parts: &[&[u8]]) -> usize {
+   let (mut len, mut index) = (0, 0);
+   while index < parts.len() {
+      len += parts[index].len();
+      index += 1;
+   }
+   len
+}
+
+#[doc(hidden)]
+pub const fn join<const LEN: usize>(parts: &[&[u8]]) -> [u8; LEN] {
+   let mut out = [0; LEN];
+   let (mut at, mut part) = (0, 0);
+   while part < parts.len() {
+      let mut index = 0;
+      while index < parts[part].len() {
+         out[at] = parts[part][index];
+         at += 1;
+         index += 1;
+      }
+      part += 1;
+   }
+   out
+}
+
+/// A [`Class`] from its Java path, with `::` between packages and `.` before
+/// a nested class:
+/// `class!(android::database::sqlite::SQLiteDatabase.CursorFactory)`.
+macro_rules! class {
+   (@path [$($slashed:tt)*] [$($dotted:tt)*] [$package:ident :: $($rest:tt)+]) => {
+      $crate::jvm::class!(@path
+         [$($slashed)* stringify!($package), "/",]
+         [$($dotted)* stringify!($package), ".",]
+         [$($rest)+])
+   };
+   (@path [$($slashed:tt)*] [$($dotted:tt)*] [$class:ident . $($rest:tt)+]) => {
+      $crate::jvm::class!(@path
+         [$($slashed)* stringify!($class), "$",]
+         [$($dotted)* stringify!($class), "$",]
+         [$($rest)+])
+   };
+   (@path [$($slashed:tt)*] [$($dotted:tt)*] [$class:ident]) => {
+      $crate::jvm::Class::new(
+         concat!($($slashed)* stringify!($class), "\0"),
+         concat!($($dotted)* stringify!($class), "\0"),
+      )
+   };
+   ($($path:tt)+) => {
+      $crate::jvm::class!(@path [] [] [$($path)+])
+   };
+}
+
+pub const STRING: Class = class!(java::lang::String);
+pub const OBJECT: Class = class!(java::lang::Object);
+pub const CLASS: Class = class!(java::lang::Class);
+pub const CLASS_LOADER: Class = class!(java::lang::ClassLoader);
+
+/// A JNI method descriptor as a `&'static CStr`, with primitives by their
+/// Java names and classes as [`Class`] constants:
+/// `signature!((STRING, [byte]) -> boolean)` is `c"(Ljava/lang/String;[B)Z"`.
 macro_rules! signature {
    (($($args:tt)*) -> $($ret:tt)+) => {
-      $crate::jvm::signature!(@type ["(",] [$($args)* @close $($ret)+])
+      $crate::jvm::signature!(@type [b"(",] [$($args)* @close $($ret)+])
    };
    (@type [$($done:tt)*] []) => {
       const {
-         match ::core::ffi::CStr::from_bytes_with_nul(concat!($($done)* "\0").as_bytes()) {
+         const PARTS: &[&[u8]] = &[$($done)* b"\0"];
+         const BYTES: [u8; $crate::jvm::joined_len(PARTS)] = $crate::jvm::join(PARTS);
+         match ::core::ffi::CStr::from_bytes_with_nul(&BYTES) {
             Ok(signature) => signature,
             Err(_) => panic!("signature! has a NUL inside"),
          }
@@ -71,52 +175,31 @@ macro_rules! signature {
       $crate::jvm::signature!(@type [$($done)*] [$($rest)*])
    };
    (@type [$($done:tt)*] [@close $($rest:tt)*]) => {
-      $crate::jvm::signature!(@type [$($done)* ")",] [$($rest)*])
+      $crate::jvm::signature!(@type [$($done)* b")",] [$($rest)*])
    };
    (@type [$($done:tt)*] [[$($inner:tt)+] $($rest:tt)*]) => {
-      $crate::jvm::signature!(@type [$($done)* "[",] [$($inner)+ $($rest)*])
+      $crate::jvm::signature!(@type [$($done)* b"[",] [$($inner)+ $($rest)*])
    };
    (@type [$($done:tt)*] [void $($rest:tt)*]) => {
-      $crate::jvm::signature!(@type [$($done)* "V",] [$($rest)*])
+      $crate::jvm::signature!(@type [$($done)* b"V",] [$($rest)*])
    };
    (@type [$($done:tt)*] [boolean $($rest:tt)*]) => {
-      $crate::jvm::signature!(@type [$($done)* "Z",] [$($rest)*])
+      $crate::jvm::signature!(@type [$($done)* b"Z",] [$($rest)*])
    };
    (@type [$($done:tt)*] [byte $($rest:tt)*]) => {
-      $crate::jvm::signature!(@type [$($done)* "B",] [$($rest)*])
+      $crate::jvm::signature!(@type [$($done)* b"B",] [$($rest)*])
    };
    (@type [$($done:tt)*] [int $($rest:tt)*]) => {
-      $crate::jvm::signature!(@type [$($done)* "I",] [$($rest)*])
+      $crate::jvm::signature!(@type [$($done)* b"I",] [$($rest)*])
    };
    (@type [$($done:tt)*] [long $($rest:tt)*]) => {
-      $crate::jvm::signature!(@type [$($done)* "J",] [$($rest)*])
+      $crate::jvm::signature!(@type [$($done)* b"J",] [$($rest)*])
    };
    (@type [$($done:tt)*] [double $($rest:tt)*]) => {
-      $crate::jvm::signature!(@type [$($done)* "D",] [$($rest)*])
+      $crate::jvm::signature!(@type [$($done)* b"D",] [$($rest)*])
    };
-   (@type [$($done:tt)*] [String $($rest:tt)*]) => {
-      $crate::jvm::signature!(@type [$($done)* "Ljava/lang/String;",] [$($rest)*])
-   };
-   (@type [$($done:tt)*] [Object $($rest:tt)*]) => {
-      $crate::jvm::signature!(@type [$($done)* "Ljava/lang/Object;",] [$($rest)*])
-   };
-   (@type [$($done:tt)*] [$package:ident :: $($rest:tt)*]) => {
-      $crate::jvm::signature!(@path [$($done)* "L", stringify!($package),] [$($rest)*])
-   };
-   (@path [$($done:tt)*] [$package:ident :: $($rest:tt)*]) => {
-      $crate::jvm::signature!(@path [$($done)* "/", stringify!($package),] [$($rest)*])
-   };
-   (@path [$($done:tt)*] [$class:ident . $($rest:tt)*]) => {
-      $crate::jvm::signature!(@nested [$($done)* "/", stringify!($class),] [$($rest)*])
-   };
-   (@path [$($done:tt)*] [$class:ident $($rest:tt)*]) => {
-      $crate::jvm::signature!(@type [$($done)* "/", stringify!($class), ";",] [$($rest)*])
-   };
-   (@nested [$($done:tt)*] [$class:ident . $($rest:tt)*]) => {
-      $crate::jvm::signature!(@nested [$($done)* "$", stringify!($class),] [$($rest)*])
-   };
-   (@nested [$($done:tt)*] [$class:ident $($rest:tt)*]) => {
-      $crate::jvm::signature!(@type [$($done)* "$", stringify!($class), ";",] [$($rest)*])
+   (@type [$($done:tt)*] [$class:ident $($rest:tt)*]) => {
+      $crate::jvm::signature!(@type [$($done)* b"L", $class.slashed(), b";",] [$($rest)*])
    };
 }
 
@@ -307,12 +390,13 @@ pub unsafe fn take_exception(env: *mut JNIEnv) -> Option<String> {
          return None;
       }
       let class = jni!(env, GetObjectClass, thrown);
-      let to_string = method(env, class, c"toString", signature!(() -> String));
+      let to_string = method(env, class, c"toString", signature!(() -> STRING));
       let text = jni!(env, CallObjectMethodA, thrown, to_string, ptr::null());
       jni!(env, ExceptionClear);
       read_string(env, text)
    }
 }
 
+pub(crate) use class;
 pub(crate) use jni;
 pub(crate) use signature;
