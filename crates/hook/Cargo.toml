@@ -13,6 +13,9 @@ memchr = { workspace = true }
 [target.'cfg(all(unix, not(all(target_os = "android", any(target_arch = "aarch64", target_arch = "arm")))))'.dependencies]
 dobby-rs = { workspace = true }
 
+[target.'cfg(all(target_os = "android", any(target_arch = "aarch64", target_arch = "arm")))'.dependencies]
+sunhook-sys = { workspace = true }
+
 [build-dependencies]
 bindgen = { workspace = true }
 cc      = { workspace = true }

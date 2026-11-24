@@ -69,14 +69,13 @@ Read this file before changing code. Every fact here cost someone hours to learn
 
 - Linux. `nix develop`, then
   `nu scripts/phoenix.nu base.apk config.arm64_v8a.apk config.<dpi>.apk config.<lang>.apk`.
-  The devshell pins ShadowHook and bytehook through `flake.lock` and provides the SDK, NDK and JDK.
+  The devshell pins bytehook through `flake.lock` and provides the SDK, NDK and JDK.
   `phoenix.nu` ends in a blocking `adb logcat` tail, so run it in the background from a tool.
 - Windows, without Nix.
   - Rust `stable-x86_64-pc-windows-gnu` with the `aarch64-linux-android` target, `cargo-ndk`, an
     NDK, a JDK and an Android SDK with a platform and build-tools in `ANDROID_SDK_ROOT`.
-  - Fetch `sunbird-tools/sunhook` and bytedance `bhook` at the `flake.lock` revisions. Point
-    `SHADOWHOOK_SRC` at `.../shadowhook/src/main/cpp` and `BYTEHOOK_SRC` at
-    `.../bytehook/src/main/cpp`.
+  - Fetch bytedance `bhook` at the `flake.lock` revision and point `BYTEHOOK_SRC` at
+    `.../bytehook/src/main/cpp`. Cargo fetches ShadowHook as `sunhook-sys`.
   - Set `LIBCLANG_PATH` to an LLVM `bin` holding `libclang.dll`, and set
     `BINDGEN_EXTRA_CLANG_ARGS_aarch64-linux-android="--target=aarch64-linux-android28 --sysroot=<ndk>/toolchains/llvm/prebuilt/windows-x86_64/sysroot -isystem <ndk>/.../lib/clang/<ver>/include"`
     with `env`, since the name has hyphens.

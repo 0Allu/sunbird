@@ -57,8 +57,7 @@
       "inputs": {
         "bytehook": "bytehook",
         "fenix": "fenix",
-        "nixpkgs": "nixpkgs",
-        "shadowhook": "shadowhook"
+        "nixpkgs": "nixpkgs"
       }
     },
     "rust-analyzer-src": {
@@ -75,22 +74,6 @@
         "owner": "rust-lang",
         "ref": "nightly",
         "repo": "rust-analyzer",
-        "type": "github"
-      }
-    },
-    "shadowhook": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1795520868,
-        "narHash": "sha256-h2CZeIpjIF1etxZvU8OVr+hw1JY+ewt8USKx9G+4CdM=",
-        "owner": "sunbird-tools",
-        "repo": "sunhook",
-        "rev": "9b3c9c8f5f7162f2c006a762d8da082ce6c9fed5",
-        "type": "github"
-      },
-      "original": {
-        "owner": "sunbird-tools",
-        "repo": "sunhook",
         "type": "github"
       }
     }

@@ -10,21 +10,19 @@ use std::{
    sync::OnceLock,
 };
 
+use sunhook_sys::{
+   SHADOWHOOK_MODE_UNIQUE,
+   shadowhook_get_errno,
+   shadowhook_hook_func_addr,
+   shadowhook_init,
+   shadowhook_to_errmsg,
+   shadowhook_unhook,
+};
+
 use crate::{
    Error,
    Hook,
 };
-
-#[allow(
-   dead_code,
-   non_camel_case_types,
-   non_upper_case_globals,
-   clippy::all,
-   clippy::pedantic
-)]
-mod sys {
-   include!(concat!(env!("OUT_DIR"), "/shadowhook.rs"));
-}
 
 pub struct ShadowHook {
    stub:     NonNull<c_void>,
@@ -41,7 +39,7 @@ unsafe impl Sync for ShadowHook {}
 fn errmsg(errno: i32) -> String {
    // SAFETY: `shadowhook_to_errmsg` returns a static NUL-terminated string for
    // every errno.
-   unsafe { CStr::from_ptr(sys::shadowhook_to_errmsg(errno)) }
+   unsafe { CStr::from_ptr(shadowhook_to_errmsg(errno)) }
       .to_string_lossy()
       .into_owned()
 }
@@ -50,9 +48,7 @@ pub fn init() -> Result<(), Error> {
    static INIT: OnceLock<i32> = OnceLock::new();
 
    // SAFETY: shadowhook serializes init internally.
-   let errno = *INIT.get_or_init(|| unsafe {
-      sys::shadowhook_init(sys::shadowhook_mode_t_SHADOWHOOK_MODE_UNIQUE, false)
-   });
+   let errno = *INIT.get_or_init(|| unsafe { shadowhook_init(SHADOWHOOK_MODE_UNIQUE, false) });
 
    if errno == 0 {
       Ok(())
@@ -69,15 +65,14 @@ impl Hook for ShadowHook {
       init()?;
       let mut original = ptr::null_mut();
       // SAFETY: forwarded from the caller.
-      let stub = unsafe {
-         sys::shadowhook_hook_func_addr(target.as_ptr(), detour.as_ptr(), &raw mut original)
-      };
+      let stub =
+         unsafe { shadowhook_hook_func_addr(target.as_ptr(), detour.as_ptr(), &raw mut original) };
       let attach_error = || {
          Error::Attach {
             backend: "shadowhook",
             target:  target.addr().get(),
             // SAFETY: plain FFI call reading a thread-local errno.
-            message: errmsg(unsafe { sys::shadowhook_get_errno() }),
+            message: errmsg(unsafe { shadowhook_get_errno() }),
          }
       };
       let stub = NonNull::new(stub).ok_or_else(attach_error)?;
@@ -96,14 +91,14 @@ impl Hook for ShadowHook {
    unsafe fn detach(self) -> Result<(), Error> {
       // SAFETY: the stub came from shadowhook_hook_func_addr and is unhooked
       // once.
-      if unsafe { sys::shadowhook_unhook(self.stub.as_ptr()) } == 0 {
+      if unsafe { shadowhook_unhook(self.stub.as_ptr()) } == 0 {
          return Ok(());
       }
       Err(Error::Detach {
          backend: "shadowhook",
          target:  self.target,
          // SAFETY: plain FFI call reading a thread-local errno.
-         message: errmsg(unsafe { sys::shadowhook_get_errno() }),
+         message: errmsg(unsafe { shadowhook_get_errno() }),
       })
    }
 }

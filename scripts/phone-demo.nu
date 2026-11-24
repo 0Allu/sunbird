@@ -27,9 +27,7 @@ def main [] {
    for file in [libstand_in.so libphoenix.so stand-in-demo] {
       cp ($release | path join $file) $staging
    }
-   let probe = glob $"($release)/build/phoenix-hook/*/out/libshadowhook_nothing.so"
-      | sort-by { ls $in | get 0.modified }
-      | last
+   let probe = $release | path join libshadowhook_nothing.so
    cp $probe $staging
 
    ^adb shell $"rm -rf ($DEVICE_DIR)"

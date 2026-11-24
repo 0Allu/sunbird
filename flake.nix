@@ -7,10 +7,6 @@
       url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    shadowhook = {
-      url = "github:sunbird-tools/sunhook";
-      flake = false;
-    };
     bytehook = {
       url = "github:bytedance/bhook";
       flake = false;
@@ -21,7 +17,6 @@
     {
       nixpkgs,
       fenix,
-      shadowhook,
       bytehook,
       ...
     }:
@@ -76,7 +71,6 @@
             ANDROID_NDK_ROOT = android.ndkRoot;
             ANDROID_NDK_HOME = android.ndkRoot;
             LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-            SHADOWHOOK_SRC = "${shadowhook}/shadowhook/src/main/cpp";
             BYTEHOOK_SRC = "${bytehook}/bytehook/src/main/cpp";
           };
         }

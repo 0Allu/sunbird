@@ -17,15 +17,15 @@ fn main() {
    let bytehook = source_dir("BYTEHOOK_SRC");
    let arm = matches!(arch.as_str(), "aarch64" | "arm");
 
-   // bytehook's PLT path calls into shadowhook's linker monitor on ARM, so both
-   // get compiled into one archive. Both trees carry a copy of bytesig.c, and
-   // only shadowhook's is kept.
+   // bytehook's PLT path calls into shadowhook's linker monitor on ARM, which
+   // sunhook-sys links. Both trees carry the same bytesig.c, and only
+   // sunhook's is kept.
    let mut build = cc::Build::new();
 
-   // Their C constructors (errno TLS key, signal guards, linker offsets) must
-   // run before the loader's, which sits in plain .init_array ahead of these
-   // archive objects. A priority moves them into .init_array.00101, which the
-   // linker orders first.
+   // bytehook's C constructors (errno TLS key, signal guards) must run before
+   // the loader's, which sits in plain .init_array ahead of these archive
+   // objects. A priority moves them into .init_array.00101, which the linker
+   // orders first.
    build
       .std("c11")
       .flag("-Os")
@@ -38,31 +38,8 @@ fn main() {
 
    let mut sources = c_files(&bytehook, &["bh_jni.c"]);
    if arm {
-      let shadowhook = source_dir("SHADOWHOOK_SRC");
-      let isa = if arch == "aarch64" { "arm64" } else { "arm" };
-      for dir in [
-         "",
-         "include",
-         "common",
-         "third_party/xdl",
-         "third_party/bsd",
-         "third_party/lss",
-      ] {
-         build.include(shadowhook.join(dir));
-      }
-      build.include(shadowhook.join("arch").join(isa));
+      build.include(env::var_os("DEP_SHADOWHOOK_INCLUDE").expect("sunhook-sys sets its include"));
       sources.retain(|path| path.file_name().is_some_and(|name| name != "bytesig.c"));
-      sources.extend(c_files(&shadowhook, &["sh_jni.c"]));
-      for dir in ["common", "third_party/xdl"] {
-         sources.extend(c_files(&shadowhook.join(dir), &[]));
-      }
-      sources.extend(c_files(&shadowhook.join("arch").join(isa), &[]));
-      probe_library(&shadowhook, &out);
-      bind(
-         &shadowhook.join("include/shadowhook.h"),
-         "shadowhook_.*",
-         &out.join("shadowhook.rs"),
-      );
    }
    build.files(&sources).compile("phoenix_native_hooks");
    println!("cargo:rustc-link-lib=log");
@@ -71,32 +48,6 @@ fn main() {
       &bytehook.join("include/bytehook.h"),
       "bytehook_.*",
       &out.join("bytehook.rs"),
-   );
-}
-
-/// `shadowhook_init` dlopens `libshadowhook_nothing.so` by name to learn the
-/// linker's soinfo layout, and fails without it. It has to ship next to
-/// `libphoenix.so`, in the APK's native library directory, where the linker
-/// searches.
-fn probe_library(shadowhook: &Path, out: &Path) {
-   let library = out.join("libshadowhook_nothing.so");
-   let status = cc::Build::new()
-      .get_compiler()
-      .to_command()
-      .args([
-         "-shared",
-         "-Oz",
-         "-nostdlib",
-         "-Wl,-soname,libshadowhook_nothing.so",
-         "-o",
-      ])
-      .arg(&library)
-      .arg(shadowhook.join("nothing/sh_nothing.c"))
-      .status()
-      .expect("running the C compiler");
-   assert!(
-      status.success(),
-      "building libshadowhook_nothing.so failed with {status}"
    );
 }
 
@@ -128,7 +79,7 @@ fn bind(header: &Path, allow: &str, out: &Path) {
       .header(header.to_str().unwrap())
       .allowlist_function(allow)
       .allowlist_type(allow)
-      .allowlist_var("(SHADOWHOOK|BYTEHOOK)_.*")
+      .allowlist_var("BYTEHOOK_.*")
       .generate()
       .unwrap_or_else(|err| panic!("bindgen {}: {err}", header.display()))
       .write_to_file(out)

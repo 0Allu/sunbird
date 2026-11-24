@@ -17,9 +17,7 @@ def main [...apks: path] {
    ^cargo build --release -p patcher
 
    let release = $root | path join target aarch64-linux-android release
-   let probe = glob $"($release)/build/phoenix-hook/*/out/libshadowhook_nothing.so"
-      | sort-by { ls $in | get 0.modified }
-      | last
+   let probe = $release | path join libshadowhook_nothing.so
    let out = $root | path join target phoenix
    rm -rf $out
    let plugins = $root | path join target phoenix-plugins

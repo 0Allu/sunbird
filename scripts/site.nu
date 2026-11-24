@@ -20,9 +20,7 @@ def main [web: path] {
          ^cargo ndk -t $abi.android -P $API --link-builtins build --release -p phoenix-loader
       }
       let release = $root | path join target $abi.rust release
-      let probe = glob $"($release)/build/phoenix-hook/*/out/libshadowhook_nothing.so"
-         | sort-by { ls $in | get 0.modified }
-         | last
+      let probe = $release | path join libshadowhook_nothing.so
       cp ($release | path join libphoenix.so) ($plugins | path join $"libphoenix-($abi.name).so")
       cp $probe ($plugins | path join $"libshadowhook_nothing-($abi.name).so")
    }
