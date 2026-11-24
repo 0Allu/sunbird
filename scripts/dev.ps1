@@ -13,6 +13,8 @@ Fast build, patch, install, hot-reload, and live debug CLI for Phoenix Unlock.
 .\scripts\dev.ps1 -Tree               # Dump live Phoenix view tree from root
 .\scripts\dev.ps1 -Eval "phoenix.ui.root()"
 .\scripts\dev.ps1 -Test               # Run fast desktop Rust unit tests (phoenix-ui-mobile, phoenix-ui-desktop, phoenix-wire)
+.\scripts\dev.ps1 -Desktop            # Same loop for Desktop Phoenix: build, copy plugins, restart Discord through the injector
+.\scripts\dev.ps1 -Desktop -Logs      # Any debug-shell command above, against Desktop Phoenix (no adb)
 #>
 [CmdletBinding()]
 param(
@@ -21,6 +23,7 @@ param(
    [switch]$NoInstall,
    [switch]$NoLaunch,
    [switch]$Test,
+   [switch]$Desktop,
    [string]$HotReload,
    [string]$Eval,
    [switch]$Logs,
@@ -53,6 +56,9 @@ function Find-Esbuild {
 }
 
 function Forward-DebugShell {
+   # Desktop Phoenix listens on this machine's own 127.0.0.1:4242, which a
+   # forward would take.
+   if ($Desktop) { return }
    adb start-server | Out-Null
    adb forward tcp:4242 tcp:4242 | Out-Null
 }
@@ -131,6 +137,55 @@ if ($HotReload) {
       Write-Host "Hot-reloaded $HotReload`: $($resp | ConvertTo-Json -Compress)"
    } finally {
       Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+   }
+   exit 0
+}
+
+# Desktop Phoenix: build the loader and injector, copy plugins to its home and
+# restart Discord through the injector.
+if ($Desktop) {
+   Push-Location $RepoRoot
+   try {
+      $profileName = if ($Release) { "release" } else { "dev-fast" }
+      if (-not $SkipBuild) {
+         # Git's MinGW dlltool writes raw-dylib import libraries its ld cannot
+         # link, so take only dlltool from the toolchain and keep Git's gcc for
+         # QuickJS and SQLite.
+         $tools = Join-Path (Split-Path $TargetDir -Parent) "wintools"
+         if (-not (Test-Path (Join-Path $tools "dlltool.exe"))) {
+            New-Item -ItemType Directory -Force $tools | Out-Null
+            $sysroot = rustup run stable-x86_64-pc-windows-gnu rustc --print sysroot
+            Copy-Item (Join-Path $sysroot "lib\rustlib\x86_64-pc-windows-gnu\bin\self-contained\dlltool.exe") $tools
+         }
+         $env:PATH = "$tools;$env:PATH"
+         $env:CARGO_TARGET_DIR = $TargetDir
+         Write-Host "Building phoenix-loader and phoenix-inject (windows, profile=$profileName)..."
+         $cargoArgs = @("+stable-x86_64-pc-windows-gnu", "build", "-p", "phoenix-loader", "-p", "phoenix-inject")
+         if ($Release) { $cargoArgs += "--release" } else { $cargoArgs += @("--profile", "dev-fast") }
+         & cargo @cargoArgs
+         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      }
+
+      $env:ESBUILD = Find-Esbuild
+      node web/tools/bundle-plugins.ts
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      $pluginDir = Join-Path $env:LOCALAPPDATA "DiscordPhoenix\sunbird\plugins"
+      New-Item -ItemType Directory -Force $pluginDir | Out-Null
+      (Get-Content (Join-Path $RepoRoot "web\plugins\index.json") -Raw | ConvertFrom-Json) |
+         Where-Object { $_.name -ne "example" } |
+         ForEach-Object { Copy-Item (Join-Path $RepoRoot "web\plugins\$($_.name).js") $pluginDir -Force }
+
+      if (-not $NoLaunch) {
+         Get-Process Discord -ErrorAction SilentlyContinue |
+            Where-Object { $_.Path -like "*DiscordPhoenix*" } |
+            Stop-Process -Force
+         Start-Sleep -Milliseconds 500
+         $outDir = Join-Path $TargetDir $profileName
+         & (Join-Path $outDir "phoenix-inject.exe") (Join-Path $outDir "phoenix.dll")
+         exit $LASTEXITCODE
+      }
+   } finally {
+      Pop-Location
    }
    exit 0
 }
