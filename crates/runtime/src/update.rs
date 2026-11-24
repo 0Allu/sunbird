@@ -6,7 +6,7 @@
 //! - Plugin-only updates download each changed `plugins/<name>.js`, verify its
 //!   CRC-32 against `version.json`, write it to `files/phoenix/plugins/`, and
 //!   hot-reload it live with zero APK reinstall.
-//! - Loader updates download `plugins/libphoenix-arm64.so`, swap it into the
+//! - Loader updates download `plugins/libphoenix-<abi>.so`, swap it into the
 //!   installed APK with [`patcher::swap_loader`], which signs it again, and
 //!   open Android's installer on it through Discord's own `FileProvider`. An
 //!   install from separate splits cannot update from one APK, so it opens the
@@ -51,6 +51,8 @@ const UPDATE_APK: &str = "phoenix-update.apk";
 
 const LOADER_ASSET: &str = if cfg!(target_arch = "x86_64") {
    "plugins/libphoenix-x86_64.so"
+} else if cfg!(target_arch = "arm") {
+   "plugins/libphoenix-armv7.so"
 } else {
    "plugins/libphoenix-arm64.so"
 };
