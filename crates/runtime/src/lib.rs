@@ -30,6 +30,7 @@ use phoenix_sigs::{
 
 #[cfg(target_os = "android")] mod bridge;
 pub mod console;
+#[cfg(windows)] mod desktop_settings;
 mod discord;
 mod fetch;
 mod gateway;
@@ -528,6 +529,7 @@ fn hook(image: &Image<'static>) -> Result<&'static GatewayRegistry, Error> {
 pub fn prepare() -> Result<(), Error> {
    let image = target()?;
    open_access_gate(&image);
+   desktop_settings::install(&image);
    let registry = hook(&image)?;
    *PREPARED
       .lock()
@@ -606,7 +608,7 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
       });
       phoenix_ui_desktop::notify(
          "Sunbird ready",
-         Some("Click here or press Ctrl+Shift+U to open Settings"),
+         Some("Open User Settings -> Sunbird, or press Ctrl+Shift+I for DevTools"),
       );
       if first_run && plugins.is_empty() {
          phoenix_ui_desktop::open_settings();

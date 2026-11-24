@@ -412,6 +412,21 @@ fn dispatch(req: &HttpRequest) -> (&'static str, &'static str, Vec<u8>) {
          "text/html; charset=utf-8",
          phoenix_ui_desktop::DASHBOARD_HTML.as_bytes().to_vec(),
       ),
+      #[cfg(not(target_os = "android"))]
+      ("POST", "/ui/close") => {
+         phoenix_ui_desktop::close_embedded_settings();
+         ok_json(&Done::Started)
+      },
+      #[cfg(not(target_os = "android"))]
+      ("POST", "/ui/popout") => {
+         phoenix_ui_desktop::open_settings();
+         ok_json(&Done::Started)
+      },
+      #[cfg(not(target_os = "android"))]
+      ("POST", "/ui/devtools") => {
+         phoenix_ui_desktop::open_devtools();
+         ok_json(&Done::Started)
+      },
       ("GET", "/favicon.ico") => ("204 No Content", "image/x-icon", Vec::new()),
       ("GET", "/" | "/status") => {
          let plugins = crate::plugins();
