@@ -62,16 +62,16 @@ impl Patches {
 const UNAVAILABLE_REASON: Pattern = Pattern::new(
    "28 90 40 39 09 01 1F 32 3F 39 00 71 ?? ?? ?? 54 68 00 80 52 E0 03 08 2A C0 03 5F D6",
 );
-/// Thumb-2 start of the same check: `push {r4-r6,lr}; mov r4,r1; mov r5,r0`,
-/// two wildcarded `bl`s, then the `0xFF` usable return.
+/// Thumb-2 start of the same check: `ldrb.w r12, [r1, #intention]`, then
+/// `orr.w r2, r12, #2; cmp r2, #14` and the `3` return for profiles.
 #[cfg(target_arch = "arm")]
 const UNAVAILABLE_REASON: Pattern =
-   Pattern::new("70 B5 0C 46 05 46 ?? ?? ?? ?? C0 B2 20 B9 20 68 ?? ?? ?? ?? FF 20 70 BD");
+   Pattern::new("91 F8 ?? C0 4C F0 02 02 0E 2A ?? D1 03 22 10 46 70 47");
 /// `EmojiContext.intention`, and its value for the message box (`CHAT`).
 #[cfg(target_arch = "aarch64")]
 const INTENTION: usize = 0x24;
 #[cfg(target_arch = "arm")]
-const INTENTION: usize = 0x14;
+const INTENTION: usize = 0x1C;
 #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
 const CHAT: u8 = 3;
 #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
