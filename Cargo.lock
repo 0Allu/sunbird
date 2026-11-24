@@ -715,6 +715,7 @@ name = "phoenix-sigs"
 version = "0.1.0"
 dependencies = [
  "flub",
+ "memchr",
  "object",
  "phoenix-hook",
 ]

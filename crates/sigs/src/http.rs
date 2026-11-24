@@ -236,7 +236,9 @@ fn find_host_alloc(image: &Image<'_>, box_future: usize) -> Option<usize> {
    None
 }
 
-/// Follows `send_fn` → request builder helper → `Method::drop` (`mov r8d, 1; jmp __rust_dealloc`).
+/// Follows `send_fn` → request builder helper → leaf `Method::drop`
+/// (`mov r8d, 1; jmp __rust_dealloc`). Leaf functions have no `.pdata` entry
+/// on Windows x64, so inner call targets are checked via `is_code`.
 fn find_host_dealloc(image: &Image<'_>, send_fn: usize, send_end: usize) -> Option<usize> {
    // `mov r8d, 1; jmp rel32` = `41 B8 01 00 00 00 E9 <rel32>`
    const TAIL_JUMP: &[u8] = &[0x41, 0xB8, 0x01, 0x00, 0x00, 0x00, 0xE9];
@@ -248,22 +250,29 @@ fn find_host_dealloc(image: &Image<'_>, send_fn: usize, send_end: usize) -> Opti
       if ce - cs > 0x400 {
          continue;
       }
-      for inner in direct_calls(image, cs, ce) {
-         let Some((is, ie)) = image.function_bounds(inner) else {
+      let Some(callee_code) = image.read(cs, ce - cs) else {
+         continue;
+      };
+      for pos in memchr_iter(0xE8, callee_code) {
+         let Some(raw) = callee_code.get(pos + 1..pos + 5) else {
             continue;
          };
-         if ie - is > 0x40 {
+         let disp = i32::from_le_bytes(raw.try_into().unwrap_or([0; 4]));
+         let Some(inner) = (cs + pos + 5).checked_add_signed(disp as isize) else {
+            continue;
+         };
+         if !image.is_code(inner) {
             continue;
          }
-         let Some(code) = image.read(is, ie - is) else {
+         let Some(code) = image.read(inner, 0x30) else {
             continue;
          };
-         if let Some(pos) = memchr::memmem::find(code, TAIL_JUMP)
-            && let Some(raw) = code.get(pos + TAIL_JUMP.len()..pos + TAIL_JUMP.len() + 4)
+         if let Some(hit) = memchr::memmem::find(code, TAIL_JUMP)
+            && let Some(jraw) = code.get(hit + TAIL_JUMP.len()..hit + TAIL_JUMP.len() + 4)
          {
-            let disp = i32::from_le_bytes(raw.try_into().ok()?);
+            let jdisp = i32::from_le_bytes(jraw.try_into().ok()?);
             if let Some(dealloc) =
-               (is + pos + TAIL_JUMP.len() + 4).checked_add_signed(disp as isize)
+               (inner + hit + TAIL_JUMP.len() + 4).checked_add_signed(jdisp as isize)
                && image.is_function(dealloc)
             {
                return Some(dealloc);
