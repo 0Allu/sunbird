@@ -45,9 +45,14 @@ use crate::desktop_gpui::{
 };
 
 const DEFAULT_MSG_ID_OFFSET: usize = 0x7d8;
+const DEFAULT_BODY_MSG_ID_OFFSET: usize = 0x1f8;
+const DEFAULT_ROW_COLORS_OFFSET: usize = 0x1e0;
+/// Offset of the pending/sending message text color inside `RowColors`
+/// (verified at `0x14a741c1f`: `mov edx, [r12 + 0x34]`).
+const ROW_COLORS_MUTED_DELTA: usize = 0x34;
 
-/// `MessageRow::render` prologue: 8 callee-saved pushes + `mov eax, imm32`
-/// (17 bytes, no RIP-relative operands; stops right before `call __chkstk`).
+/// `MessageRow::render` & `build_message_body` prologue: 8 callee-saved pushes +
+/// `mov eax, imm32` (17 bytes, no RIP-relative operands; stops right before `call __chkstk`).
 const ROW_PROLOGUE: Pattern =
    Pattern::new("55 41 57 41 56 41 55 41 54 56 57 53 B8 ?? ?? ?? ??");
 const ROW_PROLOGUE_LEN: usize = 17;
@@ -55,6 +60,15 @@ const ROW_PROLOGUE_LEN: usize = 17;
 /// `lea rax, [rcx + disp32]` loading `&row.message_id` right before formatting
 /// `message-content-{id}`.
 const MSG_ID_LEA: Pattern = Pattern::new("48 8D 81 ?? ?? ?? ??");
+
+/// `mov rcx, [rcx + disp32]` loading `msg.message_id` near the entry of
+/// `build_message_body`.
+const BODY_MSG_ID_MOV: Pattern = Pattern::new("48 8B 89 ?? ?? ?? ??");
+
+/// `mov eax, imm32; mov ecx, imm32; mov edx, imm32` loading consecutive
+/// `RowColors` field offsets (`+0x0c`, `+0x08`, `+0x04`) in `build_message_body`.
+const ROW_COLORS_TRIPLE: Pattern =
+   Pattern::new("B8 ?? ?? ?? ?? B9 ?? ?? ?? ?? BA ?? ?? ?? ??");
 
 /// Same-client optimistic delete (`Store::delete_message`) prologue:
 /// 8 callee-saved pushes + `sub rsp, imm32` (19 bytes, no RIP-relative operands).
@@ -64,6 +78,15 @@ const OPT_DEL_PROLOGUE_LEN: usize = 19;
 
 type OptimisticDeleteFn =
    unsafe extern "C" fn(store: *mut c_void, args: *const *const u64, meta: *const c_void) -> u8;
+
+type BuildMessageBodyFn = unsafe extern "C" fn(
+   msg: *const c_void,
+   config: *mut c_void,
+   a2: u64,
+   a3: u64,
+   s0: u64,
+   s1: u64,
+) -> *mut c_void;
 
 type RenderRowFn = unsafe extern "C" fn(
    sret: *mut RawAnyElement,
@@ -94,8 +117,11 @@ enum CacheEntry {
 }
 
 static ORIG_RENDER_ROW: OnceLock<RenderRowFn> = OnceLock::new();
+static ORIG_BUILD_BODY: OnceLock<BuildMessageBodyFn> = OnceLock::new();
 static ORIG_OPT_DELETE: OnceLock<OptimisticDeleteFn> = OnceLock::new();
 static MSG_ID_OFFSET: AtomicUsize = AtomicUsize::new(DEFAULT_MSG_ID_OFFSET);
+static BODY_MSG_ID_OFFSET: AtomicUsize = AtomicUsize::new(DEFAULT_BODY_MSG_ID_OFFSET);
+static ROW_COLORS_OFFSET: AtomicUsize = AtomicUsize::new(DEFAULT_ROW_COLORS_OFFSET);
 static ACTIVE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static CACHE: LazyLock<RwLock<HashMap<u64, CacheEntry>>> =
    LazyLock::new(|| RwLock::new(HashMap::new()));
@@ -203,6 +229,30 @@ fn lookup_cached(message_id: u64) -> Option<Vec<RenderedAccessory>> {
       let _ = ensure_worker().send(message_id);
    }
    None
+}
+
+/// Fast read-only tint lookup for `build_body_detour` (called inside `MessageRow::render`).
+/// Cache misses are queued right afterward by `render_row_detour`, which triggers a repaint.
+fn lookup_cached_tint(message_id: u64) -> Option<u32> {
+   let map = CACHE.read().ok()?;
+   let CacheEntry::Ready(items) = map.get(&message_id)? else {
+      return None;
+   };
+   let mut tint = None;
+   for item in items {
+      if item.tint.is_some() {
+         tint = item.tint;
+      }
+   }
+   tint
+}
+
+/// Converts plugin ARGB (`0xAARRGGBB`, with `0x00RRGGBB` treated as opaque)
+/// into Discord GPUI's packed `0xRRGGBBAA` `u32` token format.
+fn argb_to_rgba(argb: u32) -> u32 {
+   let raw_a = (argb >> 24) & 0xFF;
+   let a = if raw_a == 0 && argb != 0 { 0xFF } else { raw_a };
+   ((argb & 0x00FF_FFFF) << 8) | a
 }
 
 // ---------------------------------------------------------------------------
@@ -394,6 +444,164 @@ pub fn install(image: &Image<'static>) {
    log::info!(
       "desktop accessories: hooked MessageRow render @ {render_row:#x} (msg_id +{offset:#x})"
    );
+
+   install_body_tint(image, render_row);
+}
+
+fn decode_body_msg_id_offset(image: &Image<'_>, body_fn: usize) -> Option<usize> {
+   let bytes = image.read(body_fn, 0x100)?;
+   for at in BODY_MSG_ID_MOV.find_in(bytes) {
+      if let Some(d) = bytes.get(at + 3..at + 7) {
+         let disp = u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as usize;
+         if (0x100..=0x800).contains(&disp) {
+            return Some(disp);
+         }
+      }
+   }
+   None
+}
+
+fn decode_row_colors_offset(image: &Image<'_>, body_fn: usize) -> Option<usize> {
+   let bytes = image.read(body_fn, 0x120)?;
+   for at in ROW_COLORS_TRIPLE.find_in(bytes) {
+      let Some(a) = bytes.get(at + 1..at + 5) else {
+         continue;
+      };
+      let Some(c) = bytes.get(at + 6..at + 10) else {
+         continue;
+      };
+      let Some(d) = bytes.get(at + 11..at + 15) else {
+         continue;
+      };
+      let off_a = u32::from_le_bytes([a[0], a[1], a[2], a[3]]) as usize;
+      let off_c = u32::from_le_bytes([c[0], c[1], c[2], c[3]]) as usize;
+      let off_d = u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as usize;
+      // Consecutive `RowColors` fields `(+0x0c, +0x08, +0x04)` -> base is `off_d - 4`.
+      if off_a == off_c + 4 && off_c == off_d + 4 && (0x100..=0x400).contains(&off_d) {
+         return Some(off_d - 4);
+      }
+   }
+   None
+}
+
+/// Hooks Discord's inner message body builder (`build_message_body`, called once
+/// per row from `MessageRow::render`) so message tints also recolor the rendered
+/// message body text natively via `config.row_colors` (`0xRRGGBBAA`).
+fn install_body_tint(image: &Image<'static>, render_row: usize) {
+   let anchors = image.find_bytes(b"\x0fmessage-edited-\xc0\x00");
+   let [anchor] = anchors[..] else {
+      log::warn!(
+         "desktop accessories: message-edited template matched {} times, skipping body tint",
+         anchors.len()
+      );
+      return;
+   };
+
+   let mut candidates = Vec::new();
+   for lea in find_lea_xrefs(image, anchor) {
+      let Some((fn_start, _)) = image.function_bounds(lea) else {
+         continue;
+      };
+      if candidates.contains(&fn_start) {
+         continue;
+      }
+      let Some(head) = image.read(fn_start, ROW_PROLOGUE_LEN) else {
+         continue;
+      };
+      if ROW_PROLOGUE.find_in(head).first().copied() != Some(0) {
+         continue;
+      }
+      if find_call_parents(image, fn_start).contains(&render_row) {
+         candidates.push(fn_start);
+      }
+   }
+
+   let [body_fn] = candidates[..] else {
+      log::warn!(
+         "desktop accessories: expected 1 message body builder, found {}",
+         candidates.len()
+      );
+      return;
+   };
+
+   let msg_id_off = decode_body_msg_id_offset(image, body_fn).unwrap_or(DEFAULT_BODY_MSG_ID_OFFSET);
+   let colors_off = decode_row_colors_offset(image, body_fn).unwrap_or(DEFAULT_ROW_COLORS_OFFSET);
+   BODY_MSG_ID_OFFSET.store(msg_id_off, Ordering::Release);
+   ROW_COLORS_OFFSET.store(colors_off, Ordering::Release);
+
+   // SAFETY: runs from `DllMain` before Discord threads execute; `build_body_detour`
+   // matches `build_message_body`'s verified 6-argument ABI (4 reg + 2 stack args).
+   let trampoline = match unsafe {
+      image.hook_entry(
+         body_fn,
+         ROW_PROLOGUE,
+         ROW_PROLOGUE_LEN,
+         build_body_detour as *const () as usize,
+      )
+   } {
+      Ok(trampoline) => trampoline,
+      Err(err) => {
+         log::warn!("desktop accessories: message body tint hook failed: {err}");
+         return;
+      },
+   };
+   // SAFETY: `trampoline` replays the 17-byte prologue and jumps to `body_fn + 17`.
+   let orig = unsafe { std::mem::transmute::<usize, BuildMessageBodyFn>(trampoline) };
+   let _ = ORIG_BUILD_BODY.set(orig);
+   log::info!(
+      "desktop accessories: hooked message body tint @ {body_fn:#x} \
+       (msg_id +{msg_id_off:#x}, row_colors +{colors_off:#x})"
+   );
+}
+
+unsafe extern "C" fn build_body_detour(
+   msg: *const c_void,
+   config: *mut c_void,
+   a2: u64,
+   a3: u64,
+   s0: u64,
+   s1: u64,
+) -> *mut c_void {
+   let Some(orig) = ORIG_BUILD_BODY.get().copied() else {
+      return ptr::null_mut();
+   };
+   if ACTIVE_COUNT.load(Ordering::Relaxed) == 0 || msg.is_null() || config.is_null() {
+      // SAFETY: forwards all arguments verbatim to the original body builder.
+      return unsafe { orig(msg, config, a2, a3, s0, s1) };
+   }
+
+   let msg_off = BODY_MSG_ID_OFFSET.load(Ordering::Relaxed);
+   // SAFETY: `msg` is Discord's live `&MessageViewData` and `msg_off` was decoded
+   // from `build_message_body`'s own `message_id` read.
+   let message_id = unsafe { ptr::read(msg.cast::<u8>().add(msg_off).cast::<u64>()) };
+   let Some(argb) = (message_id != 0)
+      .then(|| lookup_cached_tint(message_id))
+      .flatten()
+   else {
+      // SAFETY: no tint for this message; forward verbatim.
+      return unsafe { orig(msg, config, a2, a3, s0, s1) };
+   };
+
+   let rgba = argb_to_rgba(argb);
+   let base_off = ROW_COLORS_OFFSET.load(Ordering::Relaxed);
+   // SAFETY: `config` lives on `MessageRow::render`'s thread-local stack frame;
+   // we temporarily override the two POD `u32` `0xRRGGBBAA` body text color slots
+   // (`row_colors + 0x00` default and `+ 0x34` pending/muted) and restore them on return.
+   unsafe {
+      let default_ptr = config.cast::<u8>().add(base_off).cast::<u32>();
+      let muted_ptr = config
+         .cast::<u8>()
+         .add(base_off + ROW_COLORS_MUTED_DELTA)
+         .cast::<u32>();
+      let saved_default = ptr::read(default_ptr);
+      let saved_muted = ptr::read(muted_ptr);
+      ptr::write(default_ptr, rgba);
+      ptr::write(muted_ptr, rgba);
+      let out = orig(msg, config, a2, a3, s0, s1);
+      ptr::write(default_ptr, saved_default);
+      ptr::write(muted_ptr, saved_muted);
+      out
+   }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -619,4 +827,17 @@ unsafe extern "C" fn optimistic_delete_detour(
    };
    // SAFETY: forwards all arguments verbatim to the original optimistic delete.
    unsafe { orig(store, args, meta) }
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[test]
+   fn argb_to_rgba_preserves_channels_and_alpha() {
+      assert_eq!(argb_to_rgba(0xfff2_3f43), 0xf23f_43ff);
+      assert_eq!(argb_to_rgba(0x8058_65f2), 0x5865_f280);
+      assert_eq!(argb_to_rgba(0x00f2_3f43), 0xf23f_43ff);
+      assert_eq!(argb_to_rgba(0), 0);
+   }
 }
