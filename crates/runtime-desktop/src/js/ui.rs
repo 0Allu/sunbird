@@ -76,12 +76,12 @@ fn parse_rendered(value: &Value<'_>, priority: i32) -> Option<RenderedAccessory>
          .get::<_, Option<f64>>("color")
          .ok()
          .flatten()
-         .map(|n| n as i64 as u32);
+         .map(to_argb);
       let tint = obj
          .get::<_, Option<f64>>("tint")
          .ok()
          .flatten()
-         .map(|n| n as i64 as u32);
+         .map(to_argb);
       if text.is_empty() && tint.is_none() {
          return None;
       }
@@ -112,7 +112,7 @@ fn evaluate_accessories_in_ctx<'js>(ctx: &Ctx<'js>, message_id: u64) -> Vec<Rend
    let _ = arg.set("messageId", id_str.as_str());
    let _ = arg.set("channelId", Value::new_null(ctx.clone()));
    let _ = arg.set("currentUserId", Value::new_null(ctx.clone()));
-   if let Ok(reply) = Function::new(ctx.clone(), || String::new()) {
+   if let Ok(reply) = Function::new(ctx.clone(), String::new) {
       let _ = arg.set("reply", reply);
    }
 
@@ -191,10 +191,19 @@ pub fn render_accessories(engine: &Engine, message_id: u64) -> Vec<RenderedAcces
    engine.with(|ctx| evaluate_accessories_in_ctx(&ctx, message_id))
 }
 
+#[expect(
+   clippy::cast_possible_truncation,
+   clippy::cast_sign_loss,
+   reason = "ARGB colors are 0..=0xFFFFFFFF, and `as` saturates the rest"
+)]
+const fn to_argb(color: f64) -> u32 {
+   color as u32
+}
+
 fn add_message_accessory<'js>(
    ctx: &Ctx<'js>,
    plugin: &str,
-   options: Object<'js>,
+   options: &Object<'js>,
 ) -> rquickjs::Result<Function<'js>> {
    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -310,7 +319,7 @@ pub fn desktop_ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<
    ui.set(
       "addMessageAccessory",
       Function::new(ctx.clone(), move |ctx: Ctx<'js>, options: Object<'js>| {
-         add_message_accessory(&ctx, &owner, options)
+         add_message_accessory(&ctx, &owner, &options)
       })?,
    )?;
 

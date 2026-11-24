@@ -345,7 +345,7 @@ fn find_edge_exe() -> Option<PathBuf> {
       .find(|path| path.is_file())
 }
 
-pub(crate) fn dashboard_url() -> Option<&'static str> {
+pub fn dashboard_url() -> Option<&'static str> {
    TRAY_CONFIG.get().map(|cfg| cfg.dashboard_url.as_str())
 }
 
@@ -382,7 +382,7 @@ pub fn open_dashboard() {
    open_app_window(url, 1020, 740);
 }
 
-/// Opens the Sunbird DevTools / Runtime Console directly (`Ctrl+Shift+I` while
+/// Opens the Sunbird `DevTools` / Runtime Console directly (`Ctrl+Shift+I` while
 /// Discord Phoenix is focused).
 pub fn open_devtools() {
    let Some(url) = dashboard_url() else {

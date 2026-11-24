@@ -555,6 +555,7 @@ impl Image<'static> {
    ///
    /// The segments borrow mapped memory. The modules stay loaded while the
    /// images live, and no thread writes the writable segments during a scan.
+   #[must_use]
    pub unsafe fn loaded() -> Vec<Self> {
       // SAFETY: GetCurrentProcess returns a valid pseudo-handle.
       let process = unsafe { win32::GetCurrentProcess() };
@@ -644,7 +645,7 @@ impl Image<'static> {
       // SAFETY: `nsec` 40-byte section headers follow the optional header.
       let raw_secs = unsafe { slice::from_raw_parts(sec_table as *const u8, nsec * 40) };
       let mut segments = Vec::with_capacity(nsec);
-      for hdr in raw_secs.chunks_exact(40) {
+      for hdr in raw_secs.as_chunks::<40>().0 {
          let vsize = usize::try_from(u32::from_le_bytes(hdr[8..12].try_into().ok()?)).ok()?;
          let va = usize::try_from(u32::from_le_bytes(hdr[12..16].try_into().ok()?)).ok()?;
          let chars = u32::from_le_bytes(hdr[36..40].try_into().ok()?);

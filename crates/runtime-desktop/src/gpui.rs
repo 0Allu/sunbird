@@ -47,7 +47,7 @@ struct SharedString {
 }
 
 impl SharedString {
-   fn from_static(s: &'static str) -> Self {
+   const fn from_static(s: &'static str) -> Self {
       Self {
          tag:  0x18,
          _pad: [0; 7],
@@ -491,6 +491,10 @@ struct Builder {
 }
 
 impl Builder {
+   #[expect(
+      clippy::cast_ptr_alignment,
+      reason = "alloc_or_oom returns memory aligned to align_of::<RcInner>()"
+   )]
    fn alloc_rc_action(&self, action: Action) -> *mut RcInner {
       let id = register_action(action);
       // SAFETY: calls Discord's own `alloc_or_oom(align=8, size=24)` so
@@ -540,8 +544,8 @@ impl Builder {
 
          self.style_div(&mut d2, |s| {
             let g = gpui_px(gap_px);
-            s.add(0x1B8).cast::<u64>().write(g);
-            s.add(0x1C0).cast::<u64>().write(g);
+            s.add(0x1B8).cast::<u64>().write_unaligned(g);
+            s.add(0x1C0).cast::<u64>().write_unaligned(g);
          });
          d2
       }
@@ -558,8 +562,8 @@ impl Builder {
 
          self.style_div(&mut d1, |s| {
             let g = gpui_px(gap_px);
-            s.add(0x1B8).cast::<u64>().write(g);
-            s.add(0x1C0).cast::<u64>().write(g);
+            s.add(0x1B8).cast::<u64>().write_unaligned(g);
+            s.add(0x1C0).cast::<u64>().write_unaligned(g);
             s.add(0x279).write(4); // align_items = Center
             if space_between {
                s.add(0x27C).write(6); // justify_content = SpaceBetween
@@ -578,22 +582,22 @@ impl Builder {
       self.style_div(&mut d, |s| unsafe {
          let bw = gpui_px(1.0);
          for off in [0x110usize, 0x118, 0x120, 0x128] {
-            s.add(off).cast::<u64>().write(bw);
+            s.add(off).cast::<u64>().write_unaligned(bw);
          }
          let r = gpui_px(radius_px);
          for off in [0x130usize, 0x138, 0x140, 0x148] {
-            s.add(off).cast::<u64>().write(r);
+            s.add(off).cast::<u64>().write_unaligned(r);
          }
          let p = gpui_px(pad_px);
          for off in [0x198usize, 0x1A0, 0x1A8, 0x1B0] {
-            s.add(off).cast::<u64>().write(p);
+            s.add(off).cast::<u64>().write_unaligned(p);
          }
          // Neutral translucent border that adapts across dark, ash, midnight,
          // and light themes.
-         s.add(0x250).cast::<u32>().write(1);
+         s.add(0x250).cast::<u32>().write_unaligned(1);
          s.add(0x254)
             .cast::<[f32; 4]>()
-            .write([0.62, 0.05, 0.55, border_alpha]);
+            .write_unaligned([0.62, 0.05, 0.55, border_alpha]);
       });
       d
    }
@@ -604,12 +608,12 @@ impl Builder {
       // SAFETY: 1px bottom border with translucent neutral color and vertical
       // margin.
       self.style_div(&mut d, |s| unsafe {
-         s.add(0x120).cast::<u64>().write(gpui_px(1.0)); // border_bottom = 1px
-         s.add(0x1F0).cast::<u64>().write(gpui_px(1.0)); // height = 1px
-         s.add(0x250).cast::<u32>().write(1);
+         s.add(0x120).cast::<u64>().write_unaligned(gpui_px(1.0)); // border_bottom = 1px
+         s.add(0x1F0).cast::<u64>().write_unaligned(gpui_px(1.0)); // height = 1px
+         s.add(0x250).cast::<u32>().write_unaligned(1);
          s.add(0x254)
             .cast::<[f32; 4]>()
-            .write([0.62, 0.05, 0.55, 0.16]);
+            .write_unaligned([0.62, 0.05, 0.55, 0.16]);
       });
       d
    }
@@ -652,11 +656,11 @@ impl Builder {
          base
             .add(layout::BUTTON_ON_CLICK)
             .cast::<*mut RcInner>()
-            .write(rc_ptr);
+            .write_unaligned(rc_ptr);
          base
             .add(layout::BUTTON_ON_CLICK + 8)
             .cast::<*const RcFnVtbl>()
-            .write(&raw const BUTTON_FN_VTBL);
+            .write_unaligned(&raw const BUTTON_FN_VTBL);
          btn
       }
    }
@@ -712,22 +716,28 @@ impl Builder {
          );
          let mut sw = sw.assume_init();
          let base = sw.0.as_mut_ptr();
-         base.add(0x98).cast::<SharedString>().write(label_ss);
+         base
+            .add(0x98)
+            .cast::<SharedString>()
+            .write_unaligned(label_ss);
          if let Some(desc) = description
             && !desc.is_empty()
          {
             let desc_ss = SharedString::from_str(desc);
-            base.add(0xB0).cast::<SharedString>().write(desc_ss);
+            base
+               .add(0xB0)
+               .cast::<SharedString>()
+               .write_unaligned(desc_ss);
          }
          let rc_ptr = self.alloc_rc_action(action);
          base
             .add(layout::SWITCH_ON_CHANGE)
             .cast::<*mut RcInner>()
-            .write(rc_ptr);
+            .write_unaligned(rc_ptr);
          base
             .add(layout::SWITCH_ON_CHANGE + 8)
             .cast::<*const RcFnVtbl>()
-            .write(&raw const SWITCH_FN_VTBL);
+            .write_unaligned(&raw const SWITCH_FN_VTBL);
 
          let mut out = MaybeUninit::<RawDiv>::uninit();
          (self.sym.switch_into_div)(out.as_mut_ptr(), &raw mut sw);
@@ -735,6 +745,7 @@ impl Builder {
       }
    }
 
+   #[expect(clippy::too_many_arguments, reason = "one per GPUI row part")]
    fn action_row(
       &self,
       id: &str,
@@ -761,7 +772,7 @@ impl Builder {
       }
    }
 
-   fn into_any(&self, mut div: RawDiv, sret: *mut RawAnyElement) {
+   fn write_any(&self, mut div: RawDiv, sret: *mut RawAnyElement) {
       // SAFETY: writes the 32-byte `gpui::AnyElement` directly to `sret`.
       unsafe {
          (self.sym.div_into_any)(sret, &raw mut div);
@@ -788,9 +799,9 @@ impl Builder {
       // +0x58 = text.font_size (AbsoluteLength::Pixels),
       // +0x88 = text.color (Option<Hsla>: u32 tag=1, [f32; 4] at +0x8c).
       self.style_div(&mut line_div, |s| unsafe {
-         s.add(0x58).cast::<u64>().write(gpui_px(font_px));
-         s.add(0x88).cast::<u32>().write(1);
-         s.add(0x8C).cast::<[f32; 4]>().write(color_hsla);
+         s.add(0x58).cast::<u64>().write_unaligned(gpui_px(font_px));
+         s.add(0x88).cast::<u32>().write_unaligned(1);
+         s.add(0x8C).cast::<[f32; 4]>().write_unaligned(color_hsla);
       });
       let mut ss = SharedString::from_str(text);
       // SAFETY: converts static `SharedString` into a 32-byte `AnyElement` and
@@ -809,16 +820,14 @@ impl Builder {
 
 /// Converts 32-bit ARGB (`0xAARRGGBB`) into GPUI's `[h, s, l, a]`
 /// (`0.0..=1.0`).
+#[expect(clippy::many_single_char_names, reason = "the HSL formula's own names")]
 fn argb_to_hsla(argb: u32) -> [f32; 4] {
-   let raw_a = ((argb >> 24) & 0xFF) as f32 / 255.0;
-   let a = if raw_a == 0.0 && argb != 0 {
+   let [alpha, r, g, b] = argb.to_be_bytes().map(|byte| f32::from(byte) / 255.0);
+   let a = if alpha == 0.0 && argb != 0 {
       1.0
    } else {
-      raw_a
+      alpha
    };
-   let r = ((argb >> 16) & 0xFF) as f32 / 255.0;
-   let g = ((argb >> 8) & 0xFF) as f32 / 255.0;
-   let b = (argb & 0xFF) as f32 / 255.0;
 
    let max = r.max(g).max(b);
    let min = r.min(g).min(b);
@@ -828,7 +837,7 @@ fn argb_to_hsla(argb: u32) -> [f32; 4] {
    let (h, s) = if delta == 0.0 {
       (0.0, 0.0)
    } else {
-      let s = delta / (1.0 - (2.0 * l - 1.0).abs());
+      let s = delta / (1.0 - 2.0f32.mul_add(l, -1.0).abs());
       let mut h = if (max - r).abs() < f32::EPSILON {
          ((g - b) / delta) % 6.0
       } else if (max - g).abs() < f32::EPSILON {
@@ -861,6 +870,8 @@ pub fn wrap_with_accessories(
    lines: &[(String, Option<u32>)],
    tint: Option<u32>,
 ) -> bool {
+   const MUTED: [f32; 4] = [0.60, 0.08, 0.62, 0.85];
+
    let Some(sym) = SYMBOLS.get() else {
       return false;
    };
@@ -881,11 +892,11 @@ pub fn wrap_with_accessories(
       // +0x88 = text.color (Option<Hsla>, inherited by child text runs),
       // +0x128 = border_left, +0x250 = border_color.
       b.style_div(&mut outer, |s| unsafe {
-         s.add(0x88).cast::<u32>().write(1);
-         s.add(0x8C).cast::<[f32; 4]>().write(hsla);
-         s.add(0x128).cast::<u64>().write(gpui_px(3.0));
-         s.add(0x250).cast::<u32>().write(1);
-         s.add(0x254).cast::<[f32; 4]>().write(hsla);
+         s.add(0x88).cast::<u32>().write_unaligned(1);
+         s.add(0x8C).cast::<[f32; 4]>().write_unaligned(hsla);
+         s.add(0x128).cast::<u64>().write_unaligned(gpui_px(3.0));
+         s.add(0x250).cast::<u32>().write_unaligned(1);
+         s.add(0x254).cast::<[f32; 4]>().write_unaligned(hsla);
       });
    }
    if !b.push_any(&mut outer, &mut orig) {
@@ -899,11 +910,10 @@ pub fn wrap_with_accessories(
       // SAFETY: indent accessories under the message text column (left=72px,
       // bottom=4px, right=16px).
       b.style_div(&mut acc_box, |s| unsafe {
-         s.add(0x1A0).cast::<u64>().write(gpui_px(16.0)); // padding_right
-         s.add(0x1A8).cast::<u64>().write(gpui_px(4.0)); // padding_bottom
-         s.add(0x1B0).cast::<u64>().write(gpui_px(72.0)); // padding_left
+         s.add(0x1A0).cast::<u64>().write_unaligned(gpui_px(16.0)); // padding_right
+         s.add(0x1A8).cast::<u64>().write_unaligned(gpui_px(4.0)); // padding_bottom
+         s.add(0x1B0).cast::<u64>().write_unaligned(gpui_px(72.0)); // padding_left
       });
-      const MUTED: [f32; 4] = [0.60, 0.08, 0.62, 0.85];
       for (text, color) in lines {
          let hsla = color.map_or(MUTED, argb_to_hsla);
          for subline in text.lines() {
@@ -918,7 +928,7 @@ pub fn wrap_with_accessories(
       outer = b.push_div(outer, acc_box);
    }
 
-   b.into_any(outer, sret);
+   b.write_any(outer, sret);
    true
 }
 
@@ -979,7 +989,7 @@ pub fn render_sunbird_page(sret: *mut RawAnyElement) -> bool {
    );
    root = b.push_div(root, b.text_block("Sunbird", &summary));
 
-   let tab_var = |t: Tab| {
+   let variant_for = |t: Tab| {
       if tab == t {
          BtnVariant::Primary
       } else {
@@ -991,7 +1001,7 @@ pub fn render_sunbird_page(sret: *mut RawAnyElement) -> bool {
       tab_bar,
       "sunbird-tab-plugins",
       &format!("Plugins ({})", plugins.len()),
-      tab_var(Tab::Plugins),
+      variant_for(Tab::Plugins),
       BtnSize::Small,
       Action::SetTab(Tab::Plugins),
    );
@@ -999,7 +1009,7 @@ pub fn render_sunbird_page(sret: *mut RawAnyElement) -> bool {
       tab_bar,
       "sunbird-tab-catalog",
       "Plugin Catalog",
-      tab_var(Tab::Catalog),
+      variant_for(Tab::Catalog),
       BtnSize::Small,
       Action::SetTab(Tab::Catalog),
    );
@@ -1007,7 +1017,7 @@ pub fn render_sunbird_page(sret: *mut RawAnyElement) -> bool {
       tab_bar,
       "sunbird-tab-general",
       "General & Updates",
-      tab_var(Tab::General),
+      variant_for(Tab::General),
       BtnSize::Small,
       Action::SetTab(Tab::General),
    );
@@ -1037,11 +1047,15 @@ pub fn render_sunbird_page(sret: *mut RawAnyElement) -> bool {
       },
    }
 
-   b.into_any(root, sret);
+   b.write_any(root, sret);
    true
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+   clippy::too_many_arguments,
+   clippy::too_many_lines,
+   reason = "one GPUI element tree, built top to bottom from the page state"
+)]
 fn render_plugins_tab(
    b: &Builder,
    mut root: RawDiv,
@@ -1125,10 +1139,10 @@ fn render_plugins_tab(
       let is_open = expanded.contains(&plugin.name);
       let mut card = b.card(10.0, 14.0, 8.0, if plugin.enabled { 0.22 } else { 0.14 });
 
-      let title = match &plugin.header.version {
-         Some(ver) => format!("{}  v{ver}", plugin.name),
-         None => plugin.name.clone(),
-      };
+      let title = plugin.header.version.as_ref().map_or_else(
+         || plugin.name.clone(),
+         |ver| format!("{}  v{ver}", plugin.name),
+      );
       let mut desc_parts = Vec::new();
       if let Some(d) = &plugin.header.description {
          desc_parts.push(d.clone());
@@ -1337,6 +1351,7 @@ fn render_plugins_tab(
    b.push_div(root, list)
 }
 
+#[expect(clippy::too_many_arguments, reason = "one per GPUI row part")]
 fn render_catalog_group(
    b: &Builder,
    mut root: RawDiv,
@@ -1402,6 +1417,10 @@ fn render_catalog_group(
    root
 }
 
+#[expect(
+   clippy::too_many_lines,
+   reason = "one GPUI element tree, built top to bottom"
+)]
 fn render_catalog_tab(
    b: &Builder,
    mut root: RawDiv,

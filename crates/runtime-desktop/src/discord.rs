@@ -353,7 +353,7 @@ unsafe extern "C" fn owned_bytes_to_mut(data: *mut (), ptr: *const u8, len: usiz
    }
 }
 
-unsafe extern "C" fn owned_bytes_is_unique(_data: &AtomicPtr<()>) -> bool {
+const unsafe extern "C" fn owned_bytes_is_unique(_data: &AtomicPtr<()>) -> bool {
    false
 }
 
@@ -450,7 +450,7 @@ unsafe fn read_str<'a>(raw: &RawVec) -> Option<&'a str> {
 /// # Safety
 ///
 /// Reads a live `RawBytes` owned by the host.
-unsafe fn read_bytes<'a>(raw: &RawBytes) -> &'a [u8] {
+const unsafe fn read_bytes<'a>(raw: &RawBytes) -> &'a [u8] {
    if raw.len == 0 || raw.ptr.is_null() {
       return &[];
    }
@@ -468,7 +468,7 @@ unsafe fn read_method(raw: &RawMethod) -> Cow<'static, str> {
    }
    if tag == 10 {
       let len = usize::from(raw.bytes[16]).min(15);
-      return Cow::Owned(String::from_utf8_lossy(&raw.bytes[1..1 + len]).into_owned());
+      return Cow::Owned(String::from_utf8_lossy(&raw.bytes[1..=len]).into_owned());
    }
    if tag == 11 {
       let ptr = usize::from_le_bytes(raw.bytes[8..16].try_into().unwrap_or([0; 8])) as *const u8;
@@ -529,8 +529,8 @@ unsafe fn send_detour(self_ptr: *const c_void, req: *mut RawTransportRequest) ->
 
    let mut watched = None;
 
-   if !req.is_null() {
-      if panic::catch_unwind(AssertUnwindSafe(|| {
+   if !req.is_null()
+      && panic::catch_unwind(AssertUnwindSafe(|| {
          // SAFETY: `req` is a live owned `TransportRequest` passed by
          // `libdiscord_http`.
          let req_ref = unsafe { &mut *req };
@@ -575,9 +575,8 @@ unsafe fn send_detour(self_ptr: *const c_void, req: *mut RawTransportRequest) ->
          watched = watch_response(&method, &url);
       }))
       .is_err()
-      {
-         log::error!("discord desktop: send_detour panicked");
-      }
+   {
+      log::error!("discord desktop: send_detour panicked");
    }
 
    // SAFETY: forward directly to the original `ReqwestTransport::send`.
@@ -698,14 +697,11 @@ fn observe(method: &str, url: &str, headers: &[(String, String)], body: &[u8]) -
    let channel = api_path(url)
       .filter(|_| method.eq_ignore_ascii_case("POST"))
       .and_then(send_channel_id);
-   let sent = match channel {
-      Some(channel) => {
-         phoenix_runtime::engine().map_or(RequestAction::Pass, |engine| {
-            crate::js::ui::intercept_send_body(&engine, channel, body)
-         })
-      },
-      None => RequestAction::Pass,
-   };
+   let sent = channel.map_or(RequestAction::Pass, |channel| {
+      phoenix_runtime::engine().map_or(RequestAction::Pass, |engine| {
+         crate::js::ui::intercept_send_body(&engine, channel, body)
+      })
+   });
    match sent {
       RequestAction::Pass => observe_request(method, url, headers, body),
       RequestAction::Drop => RequestAction::Drop,
@@ -739,7 +735,7 @@ pub fn send(
    })
 }
 
-pub fn authorize(_request: &Authorization) -> Result<String, DiscordError> {
+pub const fn authorize(_request: &Authorization) -> Result<String, DiscordError> {
    Err(DiscordError::NoBridge)
 }
 

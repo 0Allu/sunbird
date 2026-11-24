@@ -31,6 +31,9 @@ use phoenix_runtime::{
 )]
 static CONSTRUCTOR: extern "C" fn() = init;
 
+/// # Safety
+///
+/// Only the Windows loader calls this, under its loader lock.
 #[cfg(windows)]
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn DllMain(
@@ -56,7 +59,7 @@ pub unsafe extern "system" fn DllMain(
       log::info!("hooked Discord in {:?}", started.elapsed());
       let _ = std::thread::Builder::new()
          .name("sunbird-init".to_owned())
-         .spawn(|| init());
+         .spawn(init);
    }
    1
 }
@@ -136,13 +139,18 @@ fn home() -> PathBuf {
    {
       // Sits directly under `%LOCALAPPDATA%\DiscordPhoenix\sunbird` so its
       // parent matches Phoenix's `store/<account>/cache.sqlite` root.
-      let base = env::var_os("LOCALAPPDATA")
-         .map(PathBuf::from)
-         .unwrap_or_else(env::temp_dir);
+      let base = env::var_os("LOCALAPPDATA").map_or_else(env::temp_dir, PathBuf::from);
       base.join("DiscordPhoenix").join("sunbird")
    }
 }
 
+#[cfg_attr(
+   not(unix),
+   allow(
+      clippy::missing_const_for_fn,
+      reason = "only the unix body reads a bundle"
+   )
+)]
 fn bundled() -> Vec<Plugin> {
    #[cfg(unix)]
    {

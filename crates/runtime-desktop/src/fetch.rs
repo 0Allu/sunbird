@@ -135,6 +135,10 @@ fn os_err(url: &str, context: &str) -> FetchError {
    }
 }
 
+#[expect(
+   clippy::too_many_lines,
+   reason = "one WinHTTP request, opened to closed"
+)]
 pub fn send(request: &Request) -> Result<Response, FetchError> {
    let url = request.url.as_str();
    let wide_url = wide(url);

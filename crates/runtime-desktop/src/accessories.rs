@@ -113,16 +113,14 @@ pub fn clear_cache() {
 /// of Discord's window so edits/deletes appear immediately.
 pub fn set_rendered(message_id: u64, mut items: Vec<RenderedAccessory>) {
    items.sort_by_key(|a| a.priority);
-   let changed = if let Ok(mut map) = CACHE.write() {
+   let changed = CACHE.write().is_ok_and(|mut map| {
       if map.len() > MAX_CACHE_ENTRIES {
          map.clear();
       }
       let prev_same = matches!(map.get(&message_id), Some(CacheEntry::Ready(old)) if *old == items);
       map.insert(message_id, CacheEntry::Ready(items));
       !prev_same
-   } else {
-      false
-   };
+   });
    if changed {
       invalidate_discord_windows();
    }
@@ -180,19 +178,16 @@ fn lookup_cached(message_id: u64) -> Option<Vec<RenderedAccessory>> {
          CacheEntry::Ready(items) => Some(items.clone()),
       };
    }
-   let should_queue = if let Ok(mut map) = CACHE.write() {
+   let should_queue = CACHE.write().is_ok_and(|mut map| {
       if map.contains_key(&message_id) {
-         false
-      } else {
-         if map.len() > MAX_CACHE_ENTRIES {
-            map.clear();
-         }
-         map.insert(message_id, CacheEntry::Pending);
-         true
+         return false;
       }
-   } else {
-      false
-   };
+      if map.len() > MAX_CACHE_ENTRIES {
+         map.clear();
+      }
+      map.insert(message_id, CacheEntry::Pending);
+      true
+   });
    if should_queue {
       let _ = ensure_worker().send(message_id);
    }
@@ -230,7 +225,7 @@ unsafe extern "system" {
 }
 
 unsafe extern "system" fn invalidate_own_window(hwnd: isize, lparam: isize) -> i32 {
-   let want_pid = lparam as u32;
+   let want_pid = u32::try_from(lparam).unwrap_or_default();
    let mut pid = 0u32;
    // SAFETY: Win32 window query + repaint request for this process's own
    // visible windows.
@@ -249,7 +244,10 @@ pub fn invalidate_discord_windows() {
    let pid = std::process::id();
    // SAFETY: callback only queries PID/visibility and calls `InvalidateRect`.
    unsafe {
-      EnumWindows(invalidate_own_window, pid as isize);
+      EnumWindows(
+         invalidate_own_window,
+         isize::try_from(pid).unwrap_or_default(),
+      );
    }
 }
 
@@ -378,18 +376,15 @@ unsafe extern "C" fn build_body_detour(
    // slots (`row_colors + 0x00` default and `+ 0x34` pending/muted) and restore
    // them on return.
    unsafe {
-      let default_ptr = config.cast::<u8>().add(base_off).cast::<u32>();
-      let muted_ptr = config
-         .cast::<u8>()
-         .add(base_off + ROW_COLORS_MUTED_DELTA)
-         .cast::<u32>();
-      let saved_default = ptr::read(default_ptr);
-      let saved_muted = ptr::read(muted_ptr);
-      ptr::write(default_ptr, rgba);
-      ptr::write(muted_ptr, rgba);
+      let default_ptr = config.cast::<u8>().add(base_off);
+      let muted_ptr = config.cast::<u8>().add(base_off + ROW_COLORS_MUTED_DELTA);
+      let saved_default = default_ptr.cast::<u32>().read_unaligned();
+      let saved_muted = muted_ptr.cast::<u32>().read_unaligned();
+      default_ptr.cast::<u32>().write_unaligned(rgba);
+      muted_ptr.cast::<u32>().write_unaligned(rgba);
       let out = orig(msg, config, a2, a3, s0, s1);
-      ptr::write(default_ptr, saved_default);
-      ptr::write(muted_ptr, saved_muted);
+      default_ptr.cast::<u32>().write_unaligned(saved_default);
+      muted_ptr.cast::<u32>().write_unaligned(saved_muted);
       out
    }
 }
@@ -422,7 +417,7 @@ unsafe extern "C" fn render_row_detour(
    let offset = MSG_ID_OFFSET.load(Ordering::Relaxed);
    // SAFETY: `row` is Discord's live `&MessageRow` and `offset` was decoded
    // from its `message-content-{id}` formatting read.
-   let message_id = unsafe { ptr::read(row.cast::<u8>().add(offset).cast::<u64>()) };
+   let message_id = unsafe { row.cast::<u8>().add(offset).cast::<u64>().read_unaligned() };
    if message_id == 0 {
       return out;
    }
