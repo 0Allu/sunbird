@@ -39,14 +39,24 @@ pub struct GatewayEvent {
    pub rest: [u64; 4],
 }
 
-/// A 32-byte Rust `Result`, returned through x8 on arm64 and a hidden pointer
-/// on x86_64.
+/// The Rust `Result` a handler returns through a hidden pointer, 32 bytes on
+/// the 64-bit targets and 16 on armeabi-v7a, where the error half is pointer
+/// sized. The `Ok` niche is `u64::MAX` in the first word on every target.
+#[cfg(not(target_arch = "arm"))]
+pub const RESULT_WORDS: usize = 4;
+#[cfg(target_arch = "arm")]
+pub const RESULT_WORDS: usize = 2;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct HandlerResult(pub [u64; 4]);
+pub struct HandlerResult(pub [u64; RESULT_WORDS]);
 
 impl HandlerResult {
-   pub const OK: Self = Self([u64::MAX, 0, 0, 0]);
+   pub const OK: Self = {
+      let mut words = [0; RESULT_WORDS];
+      words[0] = u64::MAX;
+      Self(words)
+   };
 
    #[must_use]
    pub const fn is_ok(&self) -> bool {
