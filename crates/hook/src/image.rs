@@ -34,6 +34,18 @@ use memchr::memmem;
 
 use crate::pattern::Pattern;
 
+/// `jmp [rip]` followed by its 8-byte target.
+#[cfg(all(windows, target_arch = "x86_64"))]
+const ABSOLUTE_JUMP_LEN: usize = 14;
+
+#[cfg(all(windows, target_arch = "x86_64"))]
+fn absolute_jump(to: usize) -> [u8; ABSOLUTE_JUMP_LEN] {
+   let mut jump = [0; ABSOLUTE_JUMP_LEN];
+   jump[..2].copy_from_slice(&[0xFF, 0x25]);
+   jump[6..].copy_from_slice(&to.to_le_bytes());
+   jump
+}
+
 const NT_GNU_BUILD_ID: u32 = 3;
 #[cfg(unix)] const PF_X: u32 = 1;
 #[cfg(unix)] const PF_W: u32 = 2;
@@ -319,6 +331,7 @@ mod win32 {
    use std::ffi::c_void;
 
    pub const PAGE_EXECUTE_READWRITE: u32 = 0x40;
+   pub const MEM_COMMIT_RESERVE: u32 = 0x3000;
    pub const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
    pub const IMAGE_SCN_MEM_READ: u32 = 0x4000_0000;
    pub const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
@@ -334,6 +347,12 @@ mod win32 {
    unsafe extern "system" {
       pub fn GetCurrentProcess() -> *mut c_void;
       pub fn GetSystemInfo(info: *mut SystemInfo);
+      pub fn VirtualAlloc(
+         addr: *const c_void,
+         size: usize,
+         kind: u32,
+         protect: u32,
+      ) -> *mut c_void;
       pub fn VirtualProtect(
          addr: *mut c_void,
          size: usize,
@@ -595,6 +614,63 @@ impl Image<'static> {
       }
       // SAFETY: aligned words in this module, under the caller's guarantee.
       unsafe { self.swap_words(&writes) }.map(drop)
+   }
+
+   /// Sends calls to the function at `addr` to `detour` with an absolute jump
+   /// over its first `prologue_len` bytes, and returns a trampoline that runs
+   /// those bytes and jumps back past them: the detour calls the trampoline to
+   /// reach the original. The detour can run as soon as the jump is written,
+   /// before this returns, so hook from `DllMain` or make it cope with a
+   /// trampoline not stored yet.
+   ///
+   /// `prologue` must match at `addr`, cover whole instructions with no
+   /// RIP-relative operands, and span at least the jump's 14 bytes, so the
+   /// displaced instructions run unchanged from the trampoline.
+   ///
+   /// # Safety
+   ///
+   /// `detour` has the function's exact ABI, and no thread runs the
+   /// function's first bytes while they are written.
+   #[cfg(all(windows, target_arch = "x86_64"))]
+   pub unsafe fn hook_entry(
+      &self,
+      addr: usize,
+      prologue: Pattern,
+      prologue_len: usize,
+      detour: usize,
+   ) -> Result<usize, crate::Error> {
+      let refuse = |message: &str| {
+         crate::Error::Attach {
+            backend: "inline",
+            target:  addr,
+            message: message.to_owned(),
+         }
+      };
+      let displaced = self
+         .read(addr, prologue_len)
+         .ok_or(crate::Error::Unmapped { addr })?;
+      if prologue_len < ABSOLUTE_JUMP_LEN || prologue.find_in(displaced).first() != Some(&0) {
+         return Err(refuse("the prologue does not match"));
+      }
+      let mut code = displaced.to_vec();
+      code.extend(absolute_jump(addr + prologue_len));
+      // SAFETY: a fresh allocation, filled before anything runs it.
+      let trampoline = unsafe {
+         win32::VirtualAlloc(
+            std::ptr::null(),
+            code.len(),
+            win32::MEM_COMMIT_RESERVE,
+            win32::PAGE_EXECUTE_READWRITE,
+         )
+      };
+      if trampoline.is_null() {
+         return Err(refuse("no memory for the trampoline"));
+      }
+      // SAFETY: `trampoline` holds `code.len()` writable bytes.
+      unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), trampoline.cast::<u8>(), code.len()) };
+      // SAFETY: forwarded from the caller.
+      unsafe { self.write_code(addr, &absolute_jump(detour)) }?;
+      Ok(trampoline as usize)
    }
 }
 

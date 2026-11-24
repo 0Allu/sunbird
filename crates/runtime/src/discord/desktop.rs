@@ -379,49 +379,6 @@ const SEND_PROLOGUE: phoenix_hook::pattern::Pattern = phoenix_hook::pattern::Pat
 #[cfg(windows)]
 const SEND_PROLOGUE_LEN: usize = 19;
 
-/// `jmp [rip]` followed by its absolute target.
-#[cfg(windows)]
-fn absolute_jump(to: usize) -> [u8; 14] {
-   let mut jump = [0; 14];
-   jump[..2].copy_from_slice(&[0xFF, 0x25]);
-   jump[6..].copy_from_slice(&to.to_le_bytes());
-   jump
-}
-
-/// Copies `send`'s prologue into fresh executable memory, followed by a jump
-/// back past it.
-#[cfg(windows)]
-fn send_trampoline(image: &Image<'static>, send: usize) -> Option<usize> {
-   #[link(name = "kernel32")]
-   unsafe extern "system" {
-      fn VirtualAlloc(address: *const c_void, size: usize, kind: u32, protect: u32)
-      -> *mut c_void;
-   }
-   const MEM_COMMIT_RESERVE: u32 = 0x3000;
-   const PAGE_EXECUTE_READWRITE: u32 = 0x40;
-
-   let prologue = image.read(send, SEND_PROLOGUE_LEN)?;
-   if SEND_PROLOGUE.find_in(prologue).first() != Some(&0) {
-      return None;
-   }
-   let mut code = prologue.to_vec();
-   code.extend(absolute_jump(send + SEND_PROLOGUE_LEN));
-   // SAFETY: a fresh allocation, filled before anything runs it.
-   unsafe {
-      let memory = VirtualAlloc(
-         ptr::null(),
-         code.len(),
-         MEM_COMMIT_RESERVE,
-         PAGE_EXECUTE_READWRITE,
-      );
-      if memory.is_null() {
-         return None;
-      }
-      ptr::copy_nonoverlapping(code.as_ptr(), memory.cast::<u8>(), code.len());
-      Some(memory as usize)
-   }
-}
-
 #[cfg(windows)]
 fn install_windows(image: &Image<'static>) {
    let Some(found) = DesktopHttpTransport::locate(image) else {
@@ -430,9 +387,21 @@ fn install_windows(image: &Image<'static>) {
    };
    // Discord's API client calls `send` directly rather than through the
    // vtable, so `send` is hooked in place and the detour calls the trampoline.
-   let Some(trampoline) = send_trampoline(image, found.send_fn) else {
-      log::warn!("discord desktop: HTTP send does not open with the expected prologue");
-      return;
+   // SAFETY: runs from `DllMain` before Discord's own code, and `send_detour`
+   // matches `send`'s Rust ABI.
+   let trampoline = match unsafe {
+      image.hook_entry(
+         found.send_fn,
+         SEND_PROLOGUE,
+         SEND_PROLOGUE_LEN,
+         send_detour as *const () as usize,
+      )
+   } {
+      Ok(trampoline) => trampoline,
+      Err(err) => {
+         log::warn!("discord desktop: HTTP send not hooked: {err}");
+         return;
+      },
    };
    // SAFETY: `DesktopHttpTransport::locate` verified every target against `.pdata`,
    // and the trampoline replays `send`'s prologue.
@@ -455,17 +424,10 @@ fn install_windows(image: &Image<'static>) {
       .iter()
       .map(|&slot| (slot, poll_detour as *const () as usize))
       .collect::<Vec<_>>();
-   // SAFETY: runs from `DllMain` before Discord's own code. The jump replaces
-   // whole prologue instructions the trampoline replays, every poll slot is an
-   // aligned `.rdata` vtable entry pointing to `poll_fn`, and both detours match
-   // their exact Windows x64 ABI.
-   let hooked = unsafe {
-      image
-         .write_code(found.send_fn, &absolute_jump(send_detour as *const () as usize))
-         .and_then(|()| image.swap_words(&polls).map(drop))
-   };
-   match hooked {
-      Ok(()) => {
+   // SAFETY: every poll slot is an aligned `.rdata` vtable entry pointing to
+   // `poll_fn`, and `poll_detour` matches its exact Windows x64 ABI.
+   match unsafe { image.swap_words(&polls) } {
+      Ok(_) => {
          log::info!(
             "discord desktop: hooked HTTP send and {} poll vtable slots",
             found.poll_slots.len(),
