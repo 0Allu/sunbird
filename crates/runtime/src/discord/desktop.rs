@@ -2,9 +2,10 @@
 //!
 //! Desktop Phoenix routes all Discord REST traffic through `libdiscord/crates/http`'s
 //! `dyn Transport` (`ReqwestTransport::send(&self, req) -> Pin<Box<dyn Future>>`).
-//! [`install`] locates both the `Transport::send` and `SendFuture::poll` vtable
-//! slots in `.rdata` (build-independently via [`DesktopHttpTransport::locate`])
-//! and swaps them with [`Image::swap_words`] — zero inline code patching.
+//! [`install`] locates `Transport::send` and the `SendFuture::poll` vtable slots
+//! (build-independently via [`DesktopHttpTransport::locate`]). The API client
+//! calls `send` directly, so `send` gets an inline jump to its detour with a
+//! trampoline back, and the poll slots are swapped with [`Image::swap_words`].
 //!
 //! Captured session headers stay in memory only and `authorization` is never
 //! logged or persisted.
@@ -68,8 +69,8 @@ const PER_REQUEST: [&str; 4] = [
 ];
 
 /// Standard HTTP/1.x `http::header::StandardHeader` names in discriminant
-/// order (`0..=78`), matching `Discord.exe`'s compiled `http` crate.
-const STANDARD_HEADERS: [&str; 79] = [
+/// order (`0..=80`), matching `Discord.exe`'s compiled `http` crate.
+const STANDARD_HEADERS: [&str; 81] = [
    "accept",
    "accept-charset",
    "accept-encoding",
@@ -84,6 +85,7 @@ const STANDARD_HEADERS: [&str; 79] = [
    "access-control-request-headers",
    "access-control-request-method",
    "age",
+   "allow",
    "alt-svc",
    "authorization",
    "cache-control",
@@ -115,6 +117,7 @@ const STANDARD_HEADERS: [&str; 79] = [
    "if-unmodified-since",
    "last-modified",
    "link",
+   "location",
    "max-forwards",
    "origin",
    "pragma",
@@ -276,7 +279,10 @@ impl RawPollResult {
    }
 }
 
-type SendFn = unsafe extern "C" fn(*const c_void, *mut RawTransportRequest) -> RawPinnedFuture;
+// `send` is a Rust-ABI trait method returning `Pin<Box<dyn Future>>`, a pointer
+// pair the host returns in RAX:RDX with `self` in RCX and the request in RDX.
+// `extern "C"` would expect a hidden return pointer in RCX instead.
+type SendFn = unsafe fn(*const c_void, *mut RawTransportRequest) -> RawPinnedFuture;
 type PollFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> RawPollResult;
 type HostAllocFn = unsafe extern "C" fn(usize, usize) -> *mut u8;
 type HostDeallocFn = unsafe extern "C" fn(*mut u8, usize, usize);
@@ -403,15 +409,74 @@ pub fn install(image: &Image<'static>) {
    let _ = image;
 }
 
+/// `ReqwestTransport::send` opens with eight pushes and `sub rsp, imm32`, none
+/// RIP-relative, so they run unchanged from a trampoline.
+#[cfg(windows)]
+const SEND_PROLOGUE: phoenix_hook::pattern::Pattern = phoenix_hook::pattern::Pattern::new(
+   "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC ?? ?? ?? ??",
+);
+#[cfg(windows)]
+const SEND_PROLOGUE_LEN: usize = 19;
+
+/// `jmp [rip]` followed by its absolute target.
+#[cfg(windows)]
+fn absolute_jump(to: usize) -> [u8; 14] {
+   let mut jump = [0; 14];
+   jump[..2].copy_from_slice(&[0xFF, 0x25]);
+   jump[6..].copy_from_slice(&to.to_le_bytes());
+   jump
+}
+
+/// Copies `send`'s prologue into fresh executable memory, followed by a jump
+/// back past it.
+#[cfg(windows)]
+fn send_trampoline(image: &Image<'static>, send: usize) -> Option<usize> {
+   #[link(name = "kernel32")]
+   unsafe extern "system" {
+      fn VirtualAlloc(address: *const c_void, size: usize, kind: u32, protect: u32)
+      -> *mut c_void;
+   }
+   const MEM_COMMIT_RESERVE: u32 = 0x3000;
+   const PAGE_EXECUTE_READWRITE: u32 = 0x40;
+
+   let prologue = image.read(send, SEND_PROLOGUE_LEN)?;
+   if SEND_PROLOGUE.find_in(prologue).first() != Some(&0) {
+      return None;
+   }
+   let mut code = prologue.to_vec();
+   code.extend(absolute_jump(send + SEND_PROLOGUE_LEN));
+   // SAFETY: a fresh allocation, filled before anything runs it.
+   unsafe {
+      let memory = VirtualAlloc(
+         ptr::null(),
+         code.len(),
+         MEM_COMMIT_RESERVE,
+         PAGE_EXECUTE_READWRITE,
+      );
+      if memory.is_null() {
+         return None;
+      }
+      ptr::copy_nonoverlapping(code.as_ptr(), memory.cast::<u8>(), code.len());
+      Some(memory as usize)
+   }
+}
+
 #[cfg(windows)]
 fn install_windows(image: &Image<'static>) {
    let Some(found) = DesktopHttpTransport::locate(image) else {
       log::warn!("discord desktop: HTTP transport vtable not found");
       return;
    };
-   // SAFETY: `DesktopHttpTransport::locate` verified every target against `.pdata`.
+   // Discord's API client calls `send` directly rather than through the
+   // vtable, so `send` is hooked in place and the detour calls the trampoline.
+   let Some(trampoline) = send_trampoline(image, found.send_fn) else {
+      log::warn!("discord desktop: HTTP send does not open with the expected prologue");
+      return;
+   };
+   // SAFETY: `DesktopHttpTransport::locate` verified every target against `.pdata`,
+   // and the trampoline replays `send`'s prologue.
    let installed = Installed {
-      send:         unsafe { std::mem::transmute::<usize, SendFn>(found.send_fn) },
+      send:         unsafe { std::mem::transmute::<usize, SendFn>(trampoline) },
       poll:         unsafe { std::mem::transmute::<usize, PollFn>(found.poll_fn) },
       host_alloc:   found
          .host_alloc
@@ -424,26 +489,28 @@ fn install_windows(image: &Image<'static>) {
       return;
    }
 
-   let mut writes = Vec::with_capacity(found.send_slots.len() + found.poll_slots.len());
-   for &slot in &found.send_slots {
-      writes.push((slot, send_detour as *const () as usize));
-   }
-   for &slot in &found.poll_slots {
-      writes.push((slot, poll_detour as *const () as usize));
-   }
-   // SAFETY: every slot is an aligned `.rdata` vtable entry pointing to `send_fn`
-   // or `poll_fn`, and both detours match their exact Windows x64 ABI.
-   match unsafe { image.swap_words(&writes) } {
-      Ok(_) => {
+   let polls = found
+      .poll_slots
+      .iter()
+      .map(|&slot| (slot, poll_detour as *const () as usize))
+      .collect::<Vec<_>>();
+   // SAFETY: runs from `DllMain` before Discord's own code. The jump replaces
+   // whole prologue instructions the trampoline replays, every poll slot is an
+   // aligned `.rdata` vtable entry pointing to `poll_fn`, and both detours match
+   // their exact Windows x64 ABI.
+   let hooked = unsafe {
+      image
+         .write_code(found.send_fn, &absolute_jump(send_detour as *const () as usize))
+         .and_then(|()| image.swap_words(&polls).map(drop))
+   };
+   match hooked {
+      Ok(()) => {
          log::info!(
-            "discord desktop: hooked HTTP transport ({} send, {} poll vtable slots)",
-            found.send_slots.len(),
+            "discord desktop: hooked HTTP send and {} poll vtable slots",
             found.poll_slots.len(),
          );
       },
-      Err(err) => {
-         log::error!("discord desktop: failed to swap HTTP vtable slots: {err}");
-      },
+      Err(err) => log::error!("discord desktop: failed to hook HTTP transport: {err}"),
    }
 }
 
@@ -534,7 +601,7 @@ unsafe fn read_headers(map: &RawHeaderMap) -> Vec<(String, String)> {
 }
 
 #[cfg(windows)]
-unsafe extern "C" fn send_detour(
+unsafe fn send_detour(
    self_ptr: *const c_void,
    req: *mut RawTransportRequest,
 ) -> RawPinnedFuture {
