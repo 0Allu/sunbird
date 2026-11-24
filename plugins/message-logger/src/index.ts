@@ -61,6 +61,7 @@ interface Seen {
   attachments: Phoenix.Attachment[];
   changes: Change[];
   deletedAt?: number;
+  repainted?: boolean;
 }
 
 const EPHEMERAL = 64;
@@ -194,16 +195,18 @@ const markDeleted = (id: string, channelId?: string, guildId?: string) => {
     entry.deletedAt = Date.now();
     deleted.update?.(id);
     if (entry.changes.length) history.update?.(id);
-    if (isDesktop && channelId) {
-      try {
-        phoenix.dispatch(gateway.messageUpdate, {
-          id,
-          channel_id: channelId,
-          ...(guildId ? { guild_id: guildId } : {}),
-        });
-      } catch {
-        // Best-effort repaint trigger; accessory cache is already updated.
-      }
+  }
+  if (isDesktop && channelId && !entry.repainted) {
+    try {
+      phoenix.dispatch(gateway.messageUpdate, {
+        id,
+        channel_id: channelId,
+        ...(guildId ? { guild_id: guildId } : {}),
+      });
+      entry.repainted = true;
+    } catch {
+      // Runs outside a gateway hook during same-client optimistic delete;
+      // the follow-up MESSAGE_DELETE gateway event will trigger the repaint.
     }
   }
   return true;

@@ -544,6 +544,7 @@ pub fn prepare() -> Result<(), Error> {
    desktop_settings::install(&image);
    desktop_accessories::install(&image);
    let registry = hook(&image)?;
+   desktop_accessories::install_optimistic_delete(&image);
    *PREPARED
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((image, registry));

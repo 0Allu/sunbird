@@ -1022,8 +1022,12 @@ pub fn wrap_with_accessories(
    let mut outer = b.v_stack(2.0);
    if let Some(argb) = tint {
       let hsla = argb_to_hsla(argb);
-      // SAFETY: verified StyleRefinement offsets: +0x128 = border_left, +0x250 = border_color.
+      // SAFETY: verified StyleRefinement offsets:
+      // +0x88 = text.color (Option<Hsla>, inherited by child text runs),
+      // +0x128 = border_left, +0x250 = border_color.
       b.style_div(&mut outer, |s| unsafe {
+         s.add(0x88).cast::<u32>().write(1);
+         s.add(0x8c).cast::<[f32; 4]>().write(hsla);
          s.add(0x128).cast::<u64>().write(gpui_px(3.0));
          s.add(0x250).cast::<u32>().write(1);
          s.add(0x254).cast::<[f32; 4]>().write(hsla);

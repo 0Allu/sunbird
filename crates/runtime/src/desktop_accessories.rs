@@ -56,6 +56,15 @@ const ROW_PROLOGUE_LEN: usize = 17;
 /// `message-content-{id}`.
 const MSG_ID_LEA: Pattern = Pattern::new("48 8D 81 ?? ?? ?? ??");
 
+/// Same-client optimistic delete (`Store::delete_message`) prologue:
+/// 8 callee-saved pushes + `sub rsp, imm32` (19 bytes, no RIP-relative operands).
+const OPT_DEL_PROLOGUE: Pattern =
+   Pattern::new("55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC ?? ?? ?? ??");
+const OPT_DEL_PROLOGUE_LEN: usize = 19;
+
+type OptimisticDeleteFn =
+   unsafe extern "C" fn(store: *mut c_void, args: *const *const u64, meta: *const c_void) -> u8;
+
 type RenderRowFn = unsafe extern "C" fn(
    sret: *mut RawAnyElement,
    row: *const c_void,
@@ -85,6 +94,7 @@ enum CacheEntry {
 }
 
 static ORIG_RENDER_ROW: OnceLock<RenderRowFn> = OnceLock::new();
+static ORIG_OPT_DELETE: OnceLock<OptimisticDeleteFn> = OnceLock::new();
 static MSG_ID_OFFSET: AtomicUsize = AtomicUsize::new(DEFAULT_MSG_ID_OFFSET);
 static ACTIVE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static CACHE: LazyLock<RwLock<HashMap<u64, CacheEntry>>> =
@@ -440,4 +450,173 @@ unsafe extern "C" fn render_row_detour(
       desktop_gpui::wrap_with_accessories(sret, &lines, tint);
    });
    out
+}
+
+// ---------------------------------------------------------------------------
+// Same-Client Optimistic Delete Hook
+// ---------------------------------------------------------------------------
+
+fn calls_in_range(image: &Image<'_>, start: usize, end: usize) -> Vec<usize> {
+   let Some(bytes) = image.read(start, end.saturating_sub(start)) else {
+      return Vec::new();
+   };
+   let mut out = Vec::new();
+   for idx in 0..bytes.len().saturating_sub(4) {
+      if bytes[idx] != 0xE8 {
+         continue;
+      }
+      let disp = i32::from_le_bytes([
+         bytes[idx + 1],
+         bytes[idx + 2],
+         bytes[idx + 3],
+         bytes[idx + 4],
+      ]);
+      let target = (start + idx + 5).wrapping_add_signed(disp as isize);
+      if image.is_code(target) && !out.contains(&target) {
+         out.push(target);
+      }
+   }
+   out
+}
+
+fn find_call_parents_multi(
+   image: &Image<'_>,
+   targets: &HashSet<usize>,
+) -> HashMap<usize, HashSet<usize>> {
+   let mut out: HashMap<usize, HashSet<usize>> = HashMap::new();
+   for seg in image.segments.iter().filter(|s| s.executable) {
+      let bytes = seg.bytes.as_ref();
+      for idx in 0..bytes.len().saturating_sub(4) {
+         if bytes[idx] != 0xE8 {
+            continue;
+         }
+         let disp = i32::from_le_bytes([
+            bytes[idx + 1],
+            bytes[idx + 2],
+            bytes[idx + 3],
+            bytes[idx + 4],
+         ]);
+         let next_rip = seg.addr + idx + 5;
+         let callee = next_rip.wrapping_add_signed(disp as isize);
+         if targets.contains(&callee)
+            && let Some((parent_start, _)) = image.function_bounds(seg.addr + idx)
+         {
+            out.entry(callee).or_default().insert(parent_start);
+         }
+      }
+   }
+   out
+}
+
+/// Locates and hooks Desktop Phoenix's same-client optimistic message delete
+/// (`Store::delete_message`), so deleting a message from this client respects
+/// `MESSAGE_DELETE` `before` hooks (such as `message-logger`).
+pub fn install_optimistic_delete(image: &Image<'static>) {
+   let Some(del_fn) = crate::gateway::original_handler("MESSAGE_DELETE") else {
+      log::warn!("desktop accessories: MESSAGE_DELETE handler not found, skipping optimistic delete hook");
+      return;
+   };
+   let Some((del_start, del_end)) = image.function_bounds(del_fn) else {
+      log::warn!("desktop accessories: no .pdata bounds for MESSAGE_DELETE {del_fn:#x}");
+      return;
+   };
+
+   let del_callees: HashSet<usize> = calls_in_range(image, del_start, del_end).into_iter().collect();
+   let parents_by_callee = find_call_parents_multi(image, &del_callees);
+   let mut candidates = Vec::new();
+   for parents in parents_by_callee.values() {
+      if parents.len() != 2 || !parents.contains(&del_start) {
+         continue;
+      }
+      let Some(&other) = parents.iter().find(|&&p| p != del_start) else {
+         continue;
+      };
+      if candidates.contains(&other) {
+         continue;
+      }
+      let Some(head) = image.read(other, OPT_DEL_PROLOGUE_LEN) else {
+         continue;
+      };
+      if OPT_DEL_PROLOGUE.find_in(head).first().copied() != Some(0) {
+         continue;
+      }
+      let Some(body_head) = image.read(other, 0x80) else {
+         continue;
+      };
+      let has_lock = body_head
+         .windows(4)
+         .any(|w| w == [0xF0, 0x48, 0x0F, 0xB1]);
+      if !has_lock {
+         continue;
+      }
+      let Some((o_start, o_end)) = image.function_bounds(other) else {
+         continue;
+      };
+      let shared = calls_in_range(image, o_start, o_end)
+         .into_iter()
+         .filter(|c| del_callees.contains(c))
+         .count();
+      // Shares the in-memory map delete, secondary index delete, and cleanup helpers
+      // with MESSAGE_DELETE (6 shared callees vs <= 2 for unrelated callers).
+      if shared >= 4 {
+         candidates.push(other);
+      }
+   }
+
+   let [opt_del] = candidates[..] else {
+      log::warn!(
+         "desktop accessories: expected 1 optimistic delete candidate, found {}",
+         candidates.len()
+      );
+      return;
+   };
+
+   // SAFETY: runs from `DllMain` before Discord threads execute; `optimistic_delete_detour`
+   // matches `Store::delete_message`'s exact `(store, args, meta) -> bool` ABI.
+   let trampoline = match unsafe {
+      image.hook_entry(
+         opt_del,
+         OPT_DEL_PROLOGUE,
+         OPT_DEL_PROLOGUE_LEN,
+         optimistic_delete_detour as *const () as usize,
+      )
+   } {
+      Ok(trampoline) => trampoline,
+      Err(err) => {
+         log::warn!("desktop accessories: optimistic delete hook failed: {err}");
+         return;
+      },
+   };
+   // SAFETY: `trampoline` replays the 19-byte prologue and jumps to `opt_del + 19`.
+   let orig = unsafe { std::mem::transmute::<usize, OptimisticDeleteFn>(trampoline) };
+   let _ = ORIG_OPT_DELETE.set(orig);
+   log::info!("desktop accessories: hooked same-client optimistic delete @ {opt_del:#x}");
+}
+
+unsafe extern "C" fn optimistic_delete_detour(
+   store: *mut c_void,
+   args: *const *const u64,
+   meta: *const c_void,
+) -> u8 {
+   if !args.is_null() {
+      // SAFETY: `args` points to `[&channel_id, &message_id]` in `Command::DeleteMessage`.
+      let (ch_ptr, msg_ptr) = unsafe { (ptr::read(args), ptr::read(args.add(1))) };
+      if !ch_ptr.is_null() && !msg_ptr.is_null() {
+         let (channel_id, message_id) = unsafe { (ptr::read(ch_ptr), ptr::read(msg_ptr)) };
+         if channel_id != 0
+            && message_id != 0
+            && std::panic::catch_unwind(|| {
+               crate::gateway::check_optimistic_delete(channel_id, message_id)
+            })
+            .unwrap_or(false)
+         {
+            return 0;
+         }
+      }
+   }
+   let Some(orig) = ORIG_OPT_DELETE.get().copied() else {
+      return 0;
+   };
+   // SAFETY: forwards all arguments verbatim to the original optimistic delete.
+   unsafe { orig(store, args, meta) }
 }

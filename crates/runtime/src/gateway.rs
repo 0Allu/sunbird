@@ -161,6 +161,37 @@ pub fn event(name: &str) -> Option<EventId> {
    GATEWAY.get()?.registry.id(name)
 }
 
+/// The host's original handler address for gateway event `name`.
+#[cfg(windows)]
+pub fn original_handler(name: &str) -> Option<usize> {
+   let gateway = GATEWAY.get()?;
+   let id = gateway.registry.id(name)?;
+   Some(gateway.registry.entry(id).handler)
+}
+
+/// Runs `MESSAGE_DELETE`'s JS `before` hooks for a same-client optimistic
+/// delete. Returns `true` when a plugin requested dropping the deletion.
+#[cfg(windows)]
+pub fn check_optimistic_delete(channel_id: u64, message_id: u64) -> bool {
+   let Some(gateway) = GATEWAY.get() else {
+      return false;
+   };
+   let Some(id) = gateway.registry.id("MESSAGE_DELETE") else {
+      return false;
+   };
+   if !gateway.hooked[id.index()].load(Ordering::Acquire) || IN_JS.get() {
+      return false;
+   }
+   let Some(state) = STATE.get() else {
+      return false;
+   };
+   let json = format!("{{\"id\":\"{message_id}\",\"channel_id\":\"{channel_id}\"}}");
+   matches!(
+      run_js(state, |engine| engine.before(id, "MESSAGE_DELETE", &json)),
+      Some(Before::Drop)
+   )
+}
+
 /// Runs plugin hooks on `data` for an event Phoenix's session applies without
 /// the registry, like `READY`, and returns the replacement JSON. Its `after`
 /// hooks run before Phoenix applies it, and it cannot be dropped.
