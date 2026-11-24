@@ -24,6 +24,7 @@ use phoenix_sigs::{
    GatewayEvent,
    GatewayHandler,
    HandlerResult,
+   REST_WORDS,
    RawStr,
    registry::{
       EventId,
@@ -72,7 +73,7 @@ thread_local! {
 struct Handling {
    store: *mut c_void,
    ctx:   *mut c_void,
-   rest:  [u64; 4],
+   rest:  [u64; REST_WORDS],
 }
 
 /// Points every registry entry at [`detour`]. Phoenix looks handlers up in the
@@ -198,7 +199,7 @@ pub fn enqueue(event: EventId, data: String) {
    QUEUED.store(true, Ordering::Release);
 }
 
-fn flush(gateway: &Gateway, store: *mut c_void, ctx: *mut c_void, rest: [u64; 4]) {
+fn flush(gateway: &Gateway, store: *mut c_void, ctx: *mut c_void, rest: [u64; REST_WORDS]) {
    let queued = std::mem::take(&mut *QUEUE.lock().unwrap_or_else(PoisonError::into_inner));
    for (event, data) in queued {
       let name = &gateway.registry.entry(event).name;
