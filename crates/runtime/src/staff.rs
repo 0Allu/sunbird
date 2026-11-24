@@ -1,8 +1,9 @@
-//! Staff unlock. Phoenix checks staff as `(user.flags | flag_override) & 1`
-//! against its store state, inlined in about 30 places. Every gateway handler
-//! gets that state as its first argument, so the gateway detour sets
-//! `flag_override` there while the reducer holds it, and every copy of the
-//! check reads it.
+//! Phoenix's Staff Settings page reads a local flag computed as
+//! `(user.flags | flag_override) & 1` from its store state, inlined in about
+//! 30 places. `flag_override` is Phoenix's own client-side field. Every
+//! gateway handler gets that state as its first argument, so the gateway
+//! detour sets `flag_override` there while the reducer holds it, and every
+//! copy of the read picks it up.
 
 use std::{
    ffi::c_void,
@@ -21,9 +22,9 @@ use phoenix_hook::{
    pattern::Pattern,
 };
 
-/// The tail of a staff check: `add x8, x8, #0x8000` then the three
-/// `flag_override` loads and the `csel` that ORs the staff bit. The offsets in
-/// the first two loads are wildcarded and read back from the match, so the
+/// The tail of the flag read: `add x8, x8, #0x8000` then the three
+/// `flag_override` loads and the `csel` that ORs in the low bit. The offsets
+/// in the first two loads are wildcarded and read back from the match, so the
 /// write targets whatever field this build reads. 6 copies on 356207 and
 /// 357200, where every field offset moved.
 const STAFF_CHECK: Pattern = Pattern::new(
@@ -40,7 +41,7 @@ static UNLOCKED: AtomicBool = AtomicBool::new(true);
 static OVERRIDE: OnceLock<Option<Field>> = OnceLock::new();
 
 /// `flag_override: Option<u32>` in the store state, as byte offsets of its tag
-/// and value decoded from the staff check.
+/// and value decoded from the flag read.
 #[derive(Clone, Copy)]
 struct Field {
    tag:   usize,
@@ -65,7 +66,7 @@ pub fn start(on: bool, image: &'static Image<'static>) {
    });
 }
 
-/// The `flag_override` field decoded from a staff check, when every match
+/// The `flag_override` field decoded from the flag read, when every match
 /// agrees on the offsets.
 fn locate(image: &Image<'_>) -> Option<Field> {
    let mut field: Option<Field> = None;
@@ -78,13 +79,13 @@ fn locate(image: &Image<'_>) -> Option<Field> {
          value: add_offset(add) + ldr_offset(value),
       };
       if field.is_some_and(|seen| seen.tag != found.tag || seen.value != found.value) {
-         log::warn!("staff: staff checks disagree on flag_override, the flag stays off");
+         log::warn!("staff: flag reads disagree on flag_override, leaving it as is");
          return None;
       }
       field = Some(found);
    }
    if field.is_none() {
-      log::warn!("staff: no staff check found, the flag stays off");
+      log::warn!("staff: flag read not found, leaving flag_override as is");
    }
    field
 }
@@ -100,7 +101,7 @@ const fn ldr_offset(word: u32) -> usize {
    (((word >> 10) & 0xFFF) as usize) << 2
 }
 
-/// Sets or clears the staff bit in `flag_override`, before each gateway event
+/// Sets or clears the low bit of `flag_override`, before each gateway event
 /// so it survives Phoenix rebuilding the state.
 ///
 /// # Safety
@@ -111,7 +112,7 @@ pub unsafe fn apply(state: *mut c_void) {
    let Some(Some(field)) = OVERRIDE.get() else {
       return;
    };
-   // SAFETY: the staff check reads both fields from this state as u32s.
+   // SAFETY: the flag read loads both fields from this state as u32s.
    unsafe {
       let tag = state.byte_add(field.tag).cast::<u32>();
       let value = state.byte_add(field.value).cast::<u32>();
