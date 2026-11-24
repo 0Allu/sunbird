@@ -45,9 +45,10 @@ pub fn staff_aarch64(image: &Image<'_>) -> Found<StaffField> {
    one("staff flag_override", &found)
 }
 
-/// Start of Phoenix's armeabi-v7a staff check, `bool f(&Store, int force)`,
-/// outlined there. 19 callers on 356207. Thumb, so the hook adds bit 0. The
-/// whole `movw` of the store offset is wildcarded: its immediate moved on
+/// Start of Phoenix's armeabi-v7a staff check, `bool f(&Store, int force)`.
+///
+/// Outlined there, with 19 callers on 356207. Thumb, so the hook adds bit 0.
+/// The whole `movw` of the store offset is wildcarded: its immediate moved on
 /// 357200, which changes the encoding's second byte.
 pub fn staff_arm(image: &Image<'_>) -> Found<usize> {
    const IS_STAFF: Pattern =

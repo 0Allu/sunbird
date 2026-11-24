@@ -991,15 +991,15 @@ impl Image<'_> {
    /// `.eh_frame_hdr`.
    #[must_use]
    pub fn function_containing(&self, addr: usize) -> Option<usize> {
+      const UDATA4: u8 = 0x03;
+      const SDATA4: u8 = 0x0B;
+      const DATAREL_SDATA4: u8 = 0x3B;
+
       if let Some((image_base, base, len)) = self.pdata {
          return self
             .pdata_bounds(image_base, base, len / 12, addr)
             .map(|(start, _)| start);
       }
-
-      const UDATA4: u8 = 0x03;
-      const SDATA4: u8 = 0x0B;
-      const DATAREL_SDATA4: u8 = 0x3B;
 
       if let Some((base, len)) = self.arm_exidx {
          // Each 8-byte entry opens with a prel31 offset from it to its

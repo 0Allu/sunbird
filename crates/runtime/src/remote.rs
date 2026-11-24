@@ -261,7 +261,7 @@ fn is_allowed_origin(origin: &str, port: u16) -> bool {
       })
 }
 
-fn is_allowed_fetch_site(site: &str) -> bool {
+const fn is_allowed_fetch_site(site: &str) -> bool {
    site.eq_ignore_ascii_case("same-origin") || site.eq_ignore_ascii_case("none")
 }
 
@@ -771,7 +771,7 @@ fn catalog_install(body: &[u8]) -> Reply {
    }
 
    let Ok(req) = serde_json::from_slice::<InstallRequest>(body) else {
-      return err("400 Bad Request", "expected JSON {name} or {url}");
+      return err("400 Bad Request", "expected JSON with a name or a url");
    };
    let outcome = match (req.name, req.url) {
       (Some(name), _) => update::install_listed(&name),

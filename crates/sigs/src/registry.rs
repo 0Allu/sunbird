@@ -50,10 +50,11 @@ pub struct GatewayEntry {
    pub handler: usize,
 }
 
-/// The target's gateway registry, walked from [`SEED`] across either a flat
-/// `{name_ptr, name_len, handler}` table (Android) or `libdiscord`'s 40-byte
-/// per-domain descriptor table (Desktop), plus any separate [`DOMAIN_SEED`]
-/// slice (`READY_SUPPLEMENTAL`, etc.).
+/// The target's gateway registry, walked from [`SEED`].
+///
+/// The walk crosses either a flat `{name_ptr, name_len, handler}` table
+/// (Android) or `libdiscord`'s 40-byte per-domain descriptor table (Desktop),
+/// plus any separate [`DOMAIN_SEED`] slice (`READY_SUPPLEMENTAL`, etc.).
 pub struct GatewayRegistry {
    entries: Vec<GatewayEntry>,
    by_name: HashMap<String, EventId>,

@@ -523,25 +523,6 @@ fn emoji_pieces(text: &str) -> Vec<Piece> {
    pieces
 }
 
-#[cfg(test)]
-mod tests {
-   use crate::patches::tabs::{
-      Piece,
-      emoji_pieces,
-   };
-
-   #[test]
-   fn splits_custom_emoji() {
-      assert_eq!(emoji_pieces("hi <:wave:123> a<b <a:spin:9>"), vec![
-         Piece::Text("hi ".to_owned()),
-         Piece::Emoji("https://cdn.discordapp.com/emojis/123.webp?size=48".to_owned()),
-         Piece::Text(" a<".to_owned()),
-         Piece::Text("b ".to_owned()),
-         Piece::Emoji("https://cdn.discordapp.com/emojis/9.gif?size=48".to_owned()),
-      ]);
-   }
-}
-
 fn button(text: &str, danger: bool, colors: Palette) -> Draft {
    view(
       vec![
@@ -625,4 +606,23 @@ fn input(
       }));
    }
    root
+}
+
+#[cfg(test)]
+mod tests {
+   use crate::patches::tabs::{
+      Piece,
+      emoji_pieces,
+   };
+
+   #[test]
+   fn splits_custom_emoji() {
+      assert_eq!(emoji_pieces("hi <:wave:123> a<b <a:spin:9>"), vec![
+         Piece::Text("hi ".to_owned()),
+         Piece::Emoji("https://cdn.discordapp.com/emojis/123.webp?size=48".to_owned()),
+         Piece::Text(" a<".to_owned()),
+         Piece::Text("b ".to_owned()),
+         Piece::Emoji("https://cdn.discordapp.com/emojis/9.gif?size=48".to_owned()),
+      ]);
+   }
 }

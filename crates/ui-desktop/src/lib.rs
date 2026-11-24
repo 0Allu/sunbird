@@ -36,6 +36,10 @@ pub struct TrayConfig {
 
 /// Starts the desktop system tray icon and `Ctrl+Shift+U` global hotkey
 /// pointing at `config.dashboard_url`.
+#[cfg_attr(
+   not(windows),
+   allow(clippy::needless_pass_by_value, reason = "the body is Windows-only")
+)]
 pub fn start_tray(config: TrayConfig) {
    #[cfg(windows)]
    windows::start_tray(config);
@@ -45,19 +49,31 @@ pub fn start_tray(config: TrayConfig) {
 
 /// Opens the Sunbird Settings dashboard in a standalone chromeless app window
 /// (Microsoft Edge `--app` mode when available, else the system browser).
+#[cfg_attr(
+   not(windows),
+   allow(clippy::missing_const_for_fn, reason = "the body is Windows-only")
+)]
 pub fn open_settings() {
    #[cfg(windows)]
    windows::open_dashboard();
 }
 
-/// Opens the Sunbird DevTools / Runtime Console directly in a standalone window
-/// (`Ctrl+Shift+I` while Discord Phoenix is focused).
+/// Opens the Sunbird `DevTools` / Runtime Console directly in a standalone
+/// window (`Ctrl+Shift+I` while Discord Phoenix is focused).
+#[cfg_attr(
+   not(windows),
+   allow(clippy::missing_const_for_fn, reason = "the body is Windows-only")
+)]
 pub fn open_devtools() {
    #[cfg(windows)]
    windows::open_devtools();
 }
 
 /// Copies `text` to the system clipboard.
+#[cfg_attr(
+   not(windows),
+   allow(clippy::missing_const_for_fn, reason = "the body is Windows-only")
+)]
 pub fn copy(text: &str) -> Result<(), Error> {
    #[cfg(windows)]
    {
