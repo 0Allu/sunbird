@@ -1,6 +1,9 @@
 //! Localhost-only HTTP debug shell on `127.0.0.1:4242`, for `adb forward
 //! tcp:4242 tcp:4242` on a phone. The platform adds its own endpoints through
 //! [`crate::Platform::route`].
+//!
+//! Only requests from its own origin, or from outside a browser, get through,
+//! since `/eval` runs with the Discord session.
 
 use std::{
    collections::VecDeque,
@@ -246,17 +249,24 @@ fn is_loopback_host(host: &str) -> bool {
    name.eq_ignore_ascii_case("127.0.0.1") || name.eq_ignore_ascii_case("localhost")
 }
 
-fn is_allowed_origin(origin: &str) -> bool {
-   origin.strip_prefix("http://").is_some_and(is_loopback_host)
+/// Whether `origin` is this server's own, so another local web server's page
+/// cannot drive it.
+fn is_allowed_origin(origin: &str, port: u16) -> bool {
+   origin
+      .strip_prefix("http://")
+      .and_then(|rest| rest.rsplit_once(':'))
+      .is_some_and(|(host, at)| {
+         (host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost"))
+            && at.parse::<u16>() == Ok(port)
+      })
 }
 
 fn is_allowed_fetch_site(site: &str) -> bool {
-   site.eq_ignore_ascii_case("same-origin")
-      || site.eq_ignore_ascii_case("same-site")
-      || site.eq_ignore_ascii_case("none")
+   site.eq_ignore_ascii_case("same-origin") || site.eq_ignore_ascii_case("none")
 }
 
 fn handle(mut stream: TcpStream) {
+   let port = stream.local_addr().map_or(0, |addr| addr.port());
    let _ = stream.set_nonblocking(false);
    let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
    let _ = stream.set_write_timeout(Some(Duration::from_secs(15)));
@@ -271,7 +281,7 @@ fn handle(mut stream: TcpStream) {
       || req
          .origin
          .as_deref()
-         .is_some_and(|origin| !is_allowed_origin(origin))
+         .is_some_and(|origin| !is_allowed_origin(origin, port))
       || req
          .sec_fetch_site
          .as_deref()
@@ -802,12 +812,17 @@ mod tests {
       assert!(is_loopback_host("127.0.0.1:4242"));
       assert!(is_loopback_host("localhost:4242"));
       assert!(!is_loopback_host("evil.example:4242"));
-      assert!(is_allowed_origin("http://127.0.0.1:4242"));
-      assert!(is_allowed_origin("http://localhost:4242"));
-      assert!(!is_allowed_origin("https://evil.example"));
-      assert!(!is_allowed_origin("http://127.0.0.1.evil.example"));
+      assert!(is_allowed_origin("http://127.0.0.1:4242", 4242));
+      assert!(is_allowed_origin("http://localhost:4242", 4242));
+      assert!(!is_allowed_origin("http://localhost:3000", 4242));
+      assert!(!is_allowed_origin("https://evil.example", 4242));
+      assert!(!is_allowed_origin(
+         "http://127.0.0.1.evil.example:4242",
+         4242
+      ));
       assert!(is_allowed_fetch_site("same-origin"));
       assert!(is_allowed_fetch_site("none"));
+      assert!(!is_allowed_fetch_site("same-site"));
       assert!(!is_allowed_fetch_site("cross-site"));
    }
 
