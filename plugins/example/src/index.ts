@@ -2,6 +2,7 @@
 // @version 0.1.1
 // @author amaanq
 // @enabled false
+// @unlisted
 
 const { gateway } = phoenix;
 

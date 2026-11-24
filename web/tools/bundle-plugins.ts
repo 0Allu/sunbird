@@ -26,6 +26,8 @@ for (const name of readdirSync(`${root}plugins`).sort()) {
   if (!existsSync(entry)) continue;
   const lines = readFileSync(entry, 'utf8').split(/\r?\n/);
   const header = lines.slice(0, Math.max(0, lines.findIndex((l) => !l.startsWith('// @')))).join('\n');
+  // `// @unlisted` plugins, like the API demo, ship only in dev builds from scripts/phoenix.nu.
+  if (/^\/\/ @unlisted$/m.test(header)) continue;
   const r = spawnSync(esbuild, [entry, '--bundle', '--format=iife', '--target=es2023', '--log-level=warning', `--banner:js=${header}`, `--outfile=${out}${name}.js`],
     { stdio: 'inherit' });
   if (r.status !== 0) process.exit(r.status ?? 1);
