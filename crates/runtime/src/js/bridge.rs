@@ -54,8 +54,8 @@ fn js_to_host_wire<'js>(
          let key = if let Ok(num) = name.parse::<u16>() {
             phoenix_wire::Key::new(num)
          } else {
-            phoenix_ui::Prop::from_str(&name)
-               .map(phoenix_ui::Prop::key)
+            phoenix_ui_mobile::Prop::from_str(&name)
+               .map(phoenix_ui_mobile::Prop::key)
                .map_err(|_| {
                   Exception::throw_type(
                      ctx,

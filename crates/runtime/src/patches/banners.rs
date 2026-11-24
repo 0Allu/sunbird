@@ -12,7 +12,7 @@ use std::{
    },
 };
 
-use phoenix_ui::{
+use phoenix_ui_mobile::{
    Op,
    Prop,
    ViewKind,

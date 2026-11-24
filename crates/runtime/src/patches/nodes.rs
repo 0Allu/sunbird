@@ -2,7 +2,7 @@
 
 use std::sync::atomic::Ordering;
 
-use phoenix_ui::Props;
+use phoenix_ui_mobile::Props;
 
 use crate::patches::{
    ACTIVE,

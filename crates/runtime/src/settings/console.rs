@@ -1,6 +1,6 @@
 //! The console page and the colored log lines it shows.
 
-use phoenix_ui::{
+use phoenix_ui_mobile::{
    Prop,
    prop,
    templates,

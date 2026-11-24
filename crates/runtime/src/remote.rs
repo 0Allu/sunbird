@@ -27,7 +27,7 @@ use std::{
    time::Duration,
 };
 
-use phoenix_ui::{
+use phoenix_ui_mobile::{
    Op,
    Prop,
    inspect::WireJson,

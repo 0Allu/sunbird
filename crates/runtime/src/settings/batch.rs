@@ -7,7 +7,7 @@ use std::collections::{
 };
 
 use memchr::memmem;
-use phoenix_ui::{
+use phoenix_ui_mobile::{
    ChildEdit,
    Op,
    Prop,

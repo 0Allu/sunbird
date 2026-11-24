@@ -3,7 +3,7 @@ use std::sync::atomic::{
    Ordering,
 };
 
-use phoenix_ui::{
+use phoenix_ui_mobile::{
    Node,
    Op,
    Prop,

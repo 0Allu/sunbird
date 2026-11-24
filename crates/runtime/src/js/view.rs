@@ -78,7 +78,7 @@ impl Engine {
          let Ok(ev) = Object::new(ctx.clone()) else {
             return false;
          };
-         let event_name = phoenix_ui::PROPS
+         let event_name = phoenix_ui_mobile::PROPS
             .get(usize::from(event.get()))
             .copied()
             .unwrap_or_default();
@@ -173,7 +173,7 @@ pub fn add_view_hooks<'js>(ctx: &Ctx<'js>, plugin: &str, ui: &Object<'js>) -> rq
       Function::new(
          ctx.clone(),
          |ctx: Ctx<'js>, node: i32, event: String, payload: Opt<Value<'js>>| {
-            let prop = phoenix_ui::Prop::from_str(&event).map_err(|_| {
+            let prop = phoenix_ui_mobile::Prop::from_str(&event).map_err(|_| {
                Exception::throw_type(&ctx, &format!("unknown Phoenix event {event:?}"))
             })?;
             let wire = match payload.0 {
@@ -318,7 +318,7 @@ fn on_view_event<'js>(
 ) -> rquickjs::Result<Function<'js>> {
    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-   let prop = phoenix_ui::Prop::from_str(event)
+   let prop = phoenix_ui_mobile::Prop::from_str(event)
       .map_err(|_| Exception::throw_type(ctx, &format!("unknown Phoenix event {event:?}")))?;
    let intercept = options
       .and_then(|opts| opts.get::<_, Option<bool>>("intercept").ok().flatten())

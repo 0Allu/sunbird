@@ -51,7 +51,8 @@ Read this file before changing code. Every fact here cost someone hours to learn
 | `crates/runtime/src/install.rs` | Opens Android's installer on the self-update APK through Discord's `FileProvider`. |
 | `crates/runtime/src/update.rs` | Update checks against the site, one-tap plugin updates and the APK self-update. |
 | `crates/runtime/src/remote.rs` | The debug shell on `127.0.0.1:4242`, off by default, switched on in Settings, Phoenix Unlocker, Debug. |
-| `crates/ui` | Typed codec for Phoenix's UI-op batches. `src/props.in` is Phoenix's prop table, `templates.json` holds captured layouts, `motion.rs` drives native springs, `mirror.rs` keeps a live copy of the view tree that host tests can drive. |
+| `crates/ui-mobile` | Typed codec for mobile (Android/iOS) Phoenix UI-op batches. `src/props.in` is Phoenix's prop table, `templates.json` holds captured layouts, `motion.rs` drives native springs, `mirror.rs` keeps a live copy of the view tree that host tests can drive. |
+| `crates/ui-desktop` | Desktop UI host primitives (clipboard, URLs, notifications, GPUI surface hooks). |
 | `crates/wire` | Tagged values and bridge frames (`HostCall`, `DispatchEvent`). |
 | `crates/hook` | Image scanner, `swap_words`, ShadowHook and bytehook (linked, unused). |
 | `crates/sigs`, `crates/sigscan` | The gateway registry walk and handler ABI, and a CLI that dumps the registry of a library. |
@@ -92,7 +93,7 @@ Read this file before changing code. Every fact here cost someone hours to learn
 
 1. Look up Phoenix internals in `docs/phoenix-356207.md` or `.json` first. After a Discord update,
    regenerate them with `python scripts/extract-schema.py <dir with the splits>`.
-2. `.\scripts\dev.ps1 -Test` runs `cargo test -p phoenix-ui -p phoenix-wire` on the host in
+2. `.\scripts\dev.ps1 -Test` runs `cargo test -p phoenix-ui-mobile -p phoenix-ui-desktop -p phoenix-wire` on the host in
    under a second.
 3. Turn on the debug shell once on the phone. `dev.ps1` forwards port 4242. Then:
    - `-HotReload <plugin>` reloads a plugin in about 200 ms without rebuilding the APK.
@@ -148,7 +149,7 @@ Read the decompiled host before guessing or bisecting.
 `lib/arm64-v8a/liblibdiscord_wasm_host.so`, 97 MB and stripped, with JNI exports visible to
 `nm -D`.
 
-- Update risks. `crates/ui/src/props.in` (props are named by index, so a new prop shifts them),
+- Update risks. `crates/ui-mobile/src/props.in` (props are named by index, so a new prop shifts them),
   `GuestHost.d(byte[], Function0)` (an obfuscated name) and `templates.json`. Host module,
   method, event and field numbers are read at startup by `host.rs`, so the numbers below are
   for reading frames by hand. Everything else is found by names, strings and patterns.

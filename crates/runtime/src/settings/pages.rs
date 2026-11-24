@@ -1,6 +1,6 @@
 //! The main page, with its update and debug sections, and the install page.
 
-use phoenix_ui::Prop;
+use phoenix_ui_mobile::Prop;
 use phoenix_wire::Value;
 
 use crate::{

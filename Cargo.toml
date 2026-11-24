@@ -9,7 +9,8 @@ members  = [
   "crates/sigscan",
   "crates/stand-in",
   "crates/stand-in-demo",
-  "crates/ui",
+  "crates/ui-desktop",
+  "crates/ui-mobile",
   "crates/wire",
 ]
 resolver = "3"
@@ -35,9 +36,10 @@ object          = { default-features = false, features = [ "elf", "pe", "read_co
 patcher         = { path = "crates/patcher" }
 phoenix-hook    = { path = "crates/hook" }
 phoenix-runtime = { path = "crates/runtime" }
-phoenix-sigs    = { path = "crates/sigs" }
-phoenix-ui      = { path = "crates/ui" }
-phoenix-wire    = { path = "crates/wire" }
+phoenix-sigs       = { path = "crates/sigs" }
+phoenix-ui-desktop = { path = "crates/ui-desktop" }
+phoenix-ui-mobile  = { path = "crates/ui-mobile" }
+phoenix-wire       = { path = "crates/wire" }
 rquickjs        = { features = [ "parallel" ], version = "0.14" }
 serde           = { features = [ "derive" ], version = "1" }
 serde_json      = { features = [ "raw_value" ], version = "1" }

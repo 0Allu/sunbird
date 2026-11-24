@@ -1,6 +1,6 @@
 //! A plugin's page: its switch, settings, actions and info.
 
-use phoenix_ui::Prop;
+use phoenix_ui_mobile::Prop;
 use phoenix_wire::Value;
 
 use crate::{

@@ -1,6 +1,6 @@
 //! Sections, rows and text fields built from Phoenix's captured layouts.
 
-use phoenix_ui::{
+use phoenix_ui_mobile::{
    Prop,
    Props,
    motion::Worklet,

@@ -77,14 +77,14 @@ pub fn parse_props<'js>(
    ctx: &Ctx<'js>,
    object: &Object<'js>,
    skip: Option<&str>,
-) -> rquickjs::Result<phoenix_ui::Props> {
+) -> rquickjs::Result<phoenix_ui_mobile::Props> {
    let mut out = Vec::new();
    for entry in object.props::<String, Value<'js>>() {
       let (name, value) = entry?;
       if skip == Some(name.as_str()) || value.is_undefined() {
          continue;
       }
-      let prop = phoenix_ui::Prop::from_str(&name)
+      let prop = phoenix_ui_mobile::Prop::from_str(&name)
          .map_err(|_| Exception::throw_type(ctx, &format!("unknown Phoenix prop {name:?}")))?;
       let wire = if is_rect_prop(&name)
          && let Some(rect) = parse_rect(&value)
@@ -142,7 +142,7 @@ pub fn js_to_wire<'js>(
          if field_value.is_undefined() {
             continue;
          }
-         let prop = phoenix_ui::Prop::from_str(&name).map_err(|_| {
+         let prop = phoenix_ui_mobile::Prop::from_str(&name).map_err(|_| {
             Exception::throw_type(ctx, &format!("unknown Phoenix prop/field {name:?}"))
          })?;
          fields.push((prop.key(), js_to_wire(ctx, &field_value)?));
@@ -176,7 +176,7 @@ pub fn wire_to_js<'js>(
       phoenix_wire::Value::Obj(fields) => {
          let obj = Object::new(ctx.clone())?;
          for (key, val) in fields {
-            let name = phoenix_ui::PROPS
+            let name = phoenix_ui_mobile::PROPS
                .get(usize::from(key.get()))
                .map_or_else(|| key.get().to_string(), |name| (*name).to_owned());
             obj.set(name, wire_to_js(ctx, val)?)?;

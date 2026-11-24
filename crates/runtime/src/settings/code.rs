@@ -1,6 +1,6 @@
 //! The code editor page and its syntax colors.
 
-use phoenix_ui::{
+use phoenix_ui_mobile::{
    Prop,
    prop,
 };

@@ -1,6 +1,6 @@
 //! Builds, rerenders and closes phoenix's pages on the navigator.
 
-use phoenix_ui::{
+use phoenix_ui_mobile::{
    Op,
    Prop,
    Props,

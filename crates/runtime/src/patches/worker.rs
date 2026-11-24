@@ -5,7 +5,7 @@ use std::sync::{
    mpsc::Sender,
 };
 
-use phoenix_ui::{
+use phoenix_ui_mobile::{
    Op,
    Props,
 };

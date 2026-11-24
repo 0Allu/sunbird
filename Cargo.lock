@@ -654,7 +654,8 @@ dependencies = [
  "patcher",
  "phoenix-hook",
  "phoenix-sigs",
- "phoenix-ui",
+ "phoenix-ui-desktop",
+ "phoenix-ui-mobile",
  "phoenix-wire",
  "rquickjs",
  "serde",
@@ -671,7 +672,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "phoenix-ui"
+name = "phoenix-ui-desktop"
+version = "0.1.0"
+dependencies = [
+ "flub",
+ "log",
+]
+
+[[package]]
+name = "phoenix-ui-mobile"
 version = "0.1.0"
 dependencies = [
  "flub",

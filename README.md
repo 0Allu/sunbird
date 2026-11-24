@@ -74,7 +74,8 @@ The bundled plugins live in `plugins/*/src/index.ts`. CI bundles them with esbui
 | `crates/loader` | The injected library (`libplm.so`). |
 | `crates/runtime` | The QuickJS plugin runtime, the `phoenix` API and the Settings → Phoenix Unlocker pages. |
 | `crates/hook`, `crates/sigs`, `crates/sigscan` | Native hooks, the gateway registry walk, a registry dump CLI. |
-| `crates/ui`, `crates/wire` | Codecs for Phoenix's UI ops and bridge frames. |
+| `crates/ui-mobile`, `crates/wire` | Mobile (Android/iOS) UI-op and bridge frame codecs. |
+| `crates/ui-desktop` | Desktop UI host primitives (clipboard, URLs, notifications, GPUI hooks). |
 | `crates/patcher` | The command-line patcher. |
 | `crates/patcher-web` | The same patcher built to wasm for the site. |
 | `crates/stand-in*` | A fake Phoenix gateway library for testing hooks without Discord. |

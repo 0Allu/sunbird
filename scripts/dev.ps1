@@ -12,7 +12,7 @@ Fast build, patch, install, hot-reload, and live debug CLI for Phoenix Unlock.
 .\scripts\dev.ps1 -Events view        # Inspect recent view/host events
 .\scripts\dev.ps1 -Tree               # Dump live Phoenix view tree from root
 .\scripts\dev.ps1 -Eval "phoenix.ui.root()"
-.\scripts\dev.ps1 -Test               # Run fast desktop Rust unit tests (phoenix-ui, phoenix-wire)
+.\scripts\dev.ps1 -Test               # Run fast desktop Rust unit tests (phoenix-ui-mobile, phoenix-ui-desktop, phoenix-wire)
 #>
 [CmdletBinding()]
 param(
@@ -72,7 +72,7 @@ if ($Test) {
    Push-Location $RepoRoot
    try {
       $env:CARGO_TARGET_DIR = $TargetDir
-      cargo +stable-x86_64-pc-windows-gnu test -p phoenix-ui -p phoenix-wire
+      cargo +stable-x86_64-pc-windows-gnu test -p phoenix-ui-mobile -p phoenix-ui-desktop -p phoenix-wire
       exit $LASTEXITCODE
    } finally {
       Pop-Location

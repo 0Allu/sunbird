@@ -1,6 +1,6 @@
 //! Message author and text colors that plugins ask for.
 
-use phoenix_ui::{
+use phoenix_ui_mobile::{
    Op,
    Prop,
    Props,

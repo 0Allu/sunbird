@@ -141,13 +141,13 @@ fn parse_mount_node<'js>(
          // Automatically wire `on: ["press"]` if the caller didn't add it
          // manually.
          let has_press = props.iter().any(|(k, v)| {
-            *k == phoenix_ui::Prop::ON
+            *k == phoenix_ui_mobile::Prop::ON
                && matches!(v, phoenix_wire::Value::Arr(arr) if arr.iter().any(|x| x.as_str() == Some("press")))
          });
          if !has_press {
             let mut on = props
                .iter()
-               .find(|(k, _)| *k == phoenix_ui::Prop::ON)
+               .find(|(k, _)| *k == phoenix_ui_mobile::Prop::ON)
                .and_then(|(_, v)| {
                   match v {
                      phoenix_wire::Value::Arr(arr) => Some(arr.clone()),
@@ -156,9 +156,9 @@ fn parse_mount_node<'js>(
                })
                .unwrap_or_default();
             on.push(phoenix_wire::Value::Str("press".to_owned()));
-            phoenix_ui::set_prop(
+            phoenix_ui_mobile::set_prop(
                &mut props,
-               phoenix_ui::Prop::ON,
+               phoenix_ui_mobile::Prop::ON,
                Some(phoenix_wire::Value::Arr(on)),
             );
          }

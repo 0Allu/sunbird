@@ -1,6 +1,6 @@
 [package]
-name              = "phoenix-ui"
-description       = "Codec for Phoenix UI-op batches and view-event dispatch frames"
+name              = "phoenix-ui-mobile"
+description       = "Mobile (Android/iOS) codec for Phoenix UI-op batches and view-event dispatch frames"
 edition.workspace = true
 license.workspace = true
 version.workspace = true

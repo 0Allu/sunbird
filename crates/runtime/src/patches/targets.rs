@@ -1,4 +1,4 @@
-use phoenix_ui::{
+use phoenix_ui_mobile::{
    Node,
    Prop,
    Props,

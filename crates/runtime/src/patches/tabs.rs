@@ -12,7 +12,7 @@
 //! - Rust sizes the pager to its open page. A plugin page reports its height
 //!   with `layout`, and Rust's height comes back when one of its tabs opens.
 
-use phoenix_ui::{
+use phoenix_ui_mobile::{
    Node,
    Prop,
    Props,

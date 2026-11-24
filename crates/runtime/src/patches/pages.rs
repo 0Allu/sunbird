@@ -2,7 +2,7 @@
 
 use std::sync::atomic::Ordering;
 
-use phoenix_ui::{
+use phoenix_ui_mobile::{
    Op,
    Prop,
    ViewKind,
@@ -99,7 +99,7 @@ impl Patches {
          return Vec::new();
       };
       log::info!("open_page: pushing page {id} onto navigator {navigator}");
-      let layouts = phoenix_ui::templates();
+      let layouts = phoenix_ui_mobile::templates();
       let mut page = Draft::from_node(&layouts.page);
       page.set(Prop::PANE_TITLE, Some(Value::Str(title.to_owned())));
       if let Some(title_node) = page.find(PAGE_TITLE) {
@@ -164,7 +164,7 @@ impl Patches {
    }
 
    fn page_section(&self, id: u32, section: PageSection) -> Draft {
-      let layouts = phoenix_ui::templates();
+      let layouts = phoenix_ui_mobile::templates();
       let mut root = Draft::from_node(&layouts.section);
       let mut group = Draft::from_node(&layouts.group);
       let (heading, rows) = match section {
@@ -216,7 +216,7 @@ impl Patches {
    }
 
    fn page_button(&self, id: u32, btn: PageButton) -> Draft {
-      let mut row_root = Draft::from_node(&phoenix_ui::templates().button_row);
+      let mut row_root = Draft::from_node(&phoenix_ui_mobile::templates().button_row);
       for radius in RADII {
          row_root.set(radius, None);
       }

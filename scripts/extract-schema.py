@@ -5,7 +5,7 @@ Generates both machine-readable JSON (`docs/phoenix-<ver>.json`) and a concise
 Markdown lookup reference (`docs/phoenix-<ver>.md`) covering:
   - All ViewKinds, from the static initializer that lists them
   - All prop/event wire keys in wire order, from the static initializer that
-    lists them, compared against `crates/ui/src/props.in`
+    lists them, compared against `crates/ui-mobile/src/props.in`
   - All `hh.jb` host module IDs, method IDs (`Module.method`), and `@event` IDs
   - All `res://ic_mana_*` drawable icons in `base.apk`
   - Known `accessibilityId` patterns referenced in phoenix-unlock
