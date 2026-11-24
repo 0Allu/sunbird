@@ -5,7 +5,6 @@
 use phoenix_hook::{
    Hook,
    Inline,
-   pattern::Pattern,
 };
 use phoenix_ui_mobile::Op;
 
@@ -55,18 +54,8 @@ impl Patches {
    }
 }
 
-/// Phoenix's `getEmojiUnavailableReason`: `u8 f(&Emoji, &EmojiContext)`, where
-/// 0xFF means usable and 2 premium locked. Found by its start, which reads the
-/// context's intention and answers 3 for profiles.
-#[cfg(target_arch = "aarch64")]
-const UNAVAILABLE_REASON: Pattern = Pattern::new(
-   "28 90 40 39 09 01 1F 32 3F 39 00 71 ?? ?? ?? 54 68 00 80 52 E0 03 08 2A C0 03 5F D6",
-);
-/// Thumb-2 start of the same check: `ldrb.w r12, [r1, #intention]`, then
-/// `orr.w r2, r12, #2; cmp r2, #14` and the `3` return for profiles.
-#[cfg(target_arch = "arm")]
-const UNAVAILABLE_REASON: Pattern =
-   Pattern::new("91 F8 ?? C0 4C F0 02 02 0E 2A ?? D1 03 22 10 46 70 47");
+// Phoenix's `getEmojiUnavailableReason`, `u8 f(&Emoji, &EmojiContext)`: 0xFF
+// means usable and 2 premium locked.
 /// `EmojiContext.intention`, and its value for the message box (`CHAT`).
 #[cfg(target_arch = "aarch64")]
 const INTENTION: usize = 0x24;
@@ -106,19 +95,18 @@ pub(super) fn unlock(on: bool) {
 #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
 fn hook_check() -> Option<Inline> {
    let image = &crate::STATE.get()?.image;
-   let found = image.scan(UNAVAILABLE_REASON);
-   let [target] = found.as_slice() else {
-      log::warn!(
-         "emoji check: {} matches, Nitro-locked emojis stay locked",
-         found.len()
-      );
-      return None;
-   };
+   #[cfg(target_arch = "aarch64")]
+   let found = phoenix_sigs::mobile::emoji_aarch64(image);
+   #[cfg(target_arch = "arm")]
+   let found = phoenix_sigs::mobile::emoji_arm(image);
+   let target = found
+      .inspect_err(|err| log::warn!("emoji check: {err}, Nitro-locked emojis stay locked"))
+      .ok()?;
    // ShadowHook picks ARM or Thumb by bit 0, and the arm32 pattern is Thumb.
    let target = if cfg!(target_arch = "arm") {
-      *target | 1
+      target | 1
    } else {
-      *target
+      target
    };
    let target = std::ptr::NonNull::new(target as *mut std::ffi::c_void)?;
    let detour = std::ptr::NonNull::new(unavailable_reason as *mut std::ffi::c_void)?;

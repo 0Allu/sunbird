@@ -21,6 +21,10 @@ use std::{
 };
 
 use phoenix_hook::image::Image;
+use phoenix_sigs::desktop::{
+   self,
+   layout,
+};
 
 use crate::{
    Chosen,
@@ -75,16 +79,16 @@ fn intern(s: &str) -> &'static str {
 }
 
 #[repr(C, align(8))]
-struct RawDiv([u8; 0x88]);
+struct RawDiv([u8; layout::DIV]);
 
 #[repr(C, align(8))]
-pub struct RawAnyElement([u8; 0x20]);
+pub struct RawAnyElement([u8; layout::ANY_ELEMENT]);
 
 #[repr(C, align(8))]
-struct RawSwitch([u8; 0x248]);
+struct RawSwitch([u8; layout::SWITCH]);
 
 #[repr(C, align(8))]
-struct RawButton([u8; 0x328]);
+struct RawButton([u8; layout::BUTTON]);
 
 #[repr(C)]
 struct RcInner {
@@ -405,100 +409,6 @@ unsafe extern "C" fn button_callback(
    });
 }
 
-// ---------------------------------------------------------------------------
-// Build-independent symbol resolution from unique string anchors
-// ---------------------------------------------------------------------------
-
-fn find_lea_xrefs(image: &Image<'_>, target: usize) -> Vec<usize> {
-   let mut hits = Vec::new();
-   for seg in image.segments.iter().filter(|s| s.executable) {
-      let bytes = seg.bytes.as_ref();
-      if bytes.len() < 7 {
-         continue;
-      }
-      for idx in 1..=bytes.len() - 6 {
-         if bytes[idx] != 0x8D {
-            continue;
-         }
-         if (bytes[idx - 1] & 0xF0) != 0x40 || (bytes[idx + 1] & 0xC7) != 0x05 {
-            continue;
-         }
-         let disp = i32::from_le_bytes([
-            bytes[idx + 2],
-            bytes[idx + 3],
-            bytes[idx + 4],
-            bytes[idx + 5],
-         ]);
-         let next_rip = seg.addr + idx + 6;
-         if next_rip.wrapping_add_signed(disp as isize) == target {
-            hits.push(seg.addr + idx - 1);
-         }
-      }
-   }
-   hits
-}
-
-/// Scans `image` in `[start, start + len)` for `E8 rel32` direct calls whose
-/// destination is a `.pdata` function start or a valid leaf/thunk function
-/// entry in `.text`.
-fn calls_in(image: &Image<'_>, start: usize, len: usize) -> Vec<(usize, usize)> {
-   let Some(bytes) = image.read(start, len) else {
-      return Vec::new();
-   };
-   let mut out = Vec::new();
-   let mut idx = 0;
-   while idx + 5 <= bytes.len() {
-      if bytes[idx] == 0xE8 {
-         let disp = i32::from_le_bytes([
-            bytes[idx + 1],
-            bytes[idx + 2],
-            bytes[idx + 3],
-            bytes[idx + 4],
-         ]);
-         let call_addr = start + idx;
-         let target = (call_addr + 5).wrapping_add_signed(disp as isize);
-         let is_target = if image.is_function(target) {
-            true
-         } else if image.is_code(target) {
-            image.read(target, 1).is_some_and(|first| {
-               matches!(
-                  first[0],
-                  0xE9 | 0x48 | 0x4C | 0x40 | 0x41 | 0x55 | 0x53 | 0x56 | 0x57 | 0x89 | 0x8B | 0xB8
-                     | 0x31 | 0x33
-               )
-            })
-         } else {
-            false
-         };
-         if is_target {
-            out.push((call_addr, target));
-            idx += 5;
-            continue;
-         }
-      }
-      idx += 1;
-   }
-   out
-}
-
-fn find_rdx_lea_before(image: &Image<'_>, call_addr: usize) -> Option<usize> {
-   let start = call_addr.checked_sub(0x20)?;
-   let bytes = image.read(start, 0x20)?;
-   for idx in (0..=bytes.len().saturating_sub(7)).rev() {
-      if bytes[idx] == 0x48 && bytes[idx + 1] == 0x8D && bytes[idx + 2] == 0x15 {
-         let disp = i32::from_le_bytes([
-            bytes[idx + 3],
-            bytes[idx + 4],
-            bytes[idx + 5],
-            bytes[idx + 6],
-         ]);
-         let next_rip = start + idx + 7;
-         return Some(next_rip.wrapping_add_signed(disp as isize));
-      }
-   }
-   None
-}
-
 /// Resolves Discord's native GPUI / Mana widget builders from unique string
 /// anchors. Safe to call from `DllMain` (`prepare()`).
 pub fn locate(image: &Image<'static>) -> bool {
@@ -506,122 +416,37 @@ pub fn locate(image: &Image<'static>) -> bool {
       return true;
    }
 
-   // Anchor A: Page 16 ("Developer Mode") inside `host::section`.
-   let dev_strs = image.find_bytes(b"set-devmodeDeveloper Mode");
-   let [dev_str] = dev_strs[..] else {
-      log::warn!("desktop gpui: set-devmode matched {} times", dev_strs.len());
-      return false;
-   };
-   let dev_leas = find_lea_xrefs(image, dev_str);
-   let [lea_dev] = dev_leas[..] else {
-      log::warn!("desktop gpui: set-devmode xrefs matched {} times", dev_leas.len());
-      return false;
-   };
-
-   let before_dev = calls_in(image, lea_dev - 0x70, 0x70);
-   let after_dev = calls_in(image, lea_dev, 0x240);
-   if before_dev.len() < 3 || after_dev.len() < 9 {
-      log::warn!(
-         "desktop gpui: unexpected Page 16 call counts ({}, {})",
-         before_dev.len(),
-         after_dev.len()
-      );
-      return false;
-   }
-   let (div_new_call, div_new) = before_dev[0];
-   let div_flex = before_dev[1].1;
-   let div_flex_col = before_dev[2].1;
-   let Some(caller_loc) = find_rdx_lea_before(image, div_new_call) else {
-      log::warn!("desktop gpui: could not decode Location for div_new");
-      return false;
-   };
-   let switch_new = after_dev[0].1;
-   let switch_on_change = after_dev[7].1;
-   let switch_into_div = after_dev[8].1;
-
-   let on_change_calls = calls_in(image, switch_on_change, 0x50);
-   let Some(&(_, alloc_or_oom)) = on_change_calls.first() else {
-      log::warn!("desktop gpui: could not resolve alloc_or_oom inside Switch::on_change");
-      return false;
+   let found = desktop::gpui(image).and_then(|gpui| {
+      desktop::gpui_layouts(image, &gpui)?;
+      Ok(gpui)
+   });
+   let desktop::Gpui {
+      caller_loc,
+      div_new,
+      div_flex,
+      div_flex_col,
+      div_style_mut,
+      div_child_div,
+      div_child_button,
+      div_into_any,
+      div_push_any,
+      str_into_any,
+      text_block,
+      switch_new,
+      switch_into_div,
+      button_new,
+      action_row,
+      alloc_or_oom,
+   } = match found {
+      Ok(gpui) => gpui,
+      Err(err) => {
+         log::warn!("desktop gpui: {err}, leaving the settings page and accessories off");
+         return false;
+      },
    };
 
-   // Anchor B: `TesterUpdates` Sign In button + ActionRow.
-   let btn_strs = image.find_bytes(b"tester-updates-sign-in\0");
-   let [btn_str] = btn_strs[..] else {
-      log::warn!("desktop gpui: tester-updates-sign-in matched {} times", btn_strs.len());
-      return false;
-   };
-   let btn_leas = find_lea_xrefs(image, btn_str);
-   let [lea_btn] = btn_leas[..] else {
-      log::warn!("desktop gpui: tester-updates-sign-in xrefs matched {} times", btn_leas.len());
-      return false;
-   };
-   let after_btn = calls_in(image, lea_btn, 0x1d0);
-   if after_btn.len() < 6 {
-      log::warn!("desktop gpui: unexpected TesterUpdates call count ({})", after_btn.len());
-      return false;
-   }
-   let button_new = after_btn[0].1;
-   let action_row = after_btn[4].1;
-   let div_into_any = after_btn[5].1;
-
-   // Inside `action_row`, cross-check `div_new` and `div_flex`, then extract
-   // `div_style_mut`, `text_block`, `div_child_button`, and `div_child_div`.
-   let Some((ar_start, ar_end)) = image.function_bounds(action_row) else {
-      log::warn!("desktop gpui: no .pdata bounds for ActionRow {action_row:#x}");
-      return false;
-   };
-   let ar_calls = calls_in(image, ar_start, ar_end - ar_start);
-   if ar_calls.len() < 16 || ar_calls[0].1 != div_new || ar_calls[2].1 != div_flex {
-      log::warn!(
-         "desktop gpui: ActionRow cross-check failed (len={}, div_match={}, flex_match={})",
-         ar_calls.len(),
-         ar_calls.first().is_some_and(|c| c.1 == div_new),
-         ar_calls.get(2).is_some_and(|c| c.1 == div_flex),
-      );
-      return false;
-   }
-   let div_py = ar_calls[1].1;
-   let py_calls = calls_in(image, div_py, 0x40);
-   let Some(&(_, div_style_mut)) = py_calls.first() else {
-      log::warn!("desktop gpui: could not resolve div_style_mut inside div_py");
-      return false;
-   };
-   let text_block = ar_calls[6].1;
-   let div_child_button = ar_calls[14].1;
-   let div_child_div = ar_calls.last().expect("checked len >= 16").1;
-
-   // Resolve `SmallVec::<[AnyElement; 2]>::push` from inside `div_child_div`
-   // (`lea rcx, [rax + 0x40]; ...; call push`).
-   let div_push_any = {
-      let cdd_calls = calls_in(image, div_child_div, 0x60);
-      if cdd_calls.len() >= 2
-         && image
-            .read(div_child_div, 0x50)
-            .is_some_and(|b| b.windows(4).any(|w| w == [0x48, 0x8D, 0x48, 0x40]))
-      {
-         Some(cdd_calls[1].1)
-      } else {
-         None
-      }
-   };
-
-   // Resolve `SharedString::into_any_element` from sibling `Div::child::<SharedString>`
-   // right next to `div_child_div`, verified by its `cmp cl, 0xff; ...; cmp cl, 0x19`
-   // (`SharedString` tag) check.
-   let str_into_any = calls_in(image, div_child_div, 0x400)
-      .into_iter()
-      .map(|(_, target)| target)
-      .find(|&target| {
-         image.read(target, 0x100).is_some_and(|body| {
-            body
-               .windows(8)
-               .any(|w| w[0..3] == [0x80, 0xF9, 0xFF] && w[5..8] == [0x80, 0xF9, 0x19])
-         })
-      });
-
-   // SAFETY: every resolved address was verified via `is_function` / cross-check
-   // and matches the exact Rust-ABI signatures verified in Discord.exe.
+   // SAFETY: the builders were found by their call order and cross-checked,
+   // their layouts match `layout`, and they have these Rust-ABI signatures.
    let symbols = unsafe {
       GpuiSymbols {
          caller_loc:       caller_loc as *const c_void,
@@ -808,11 +633,11 @@ impl Builder {
          );
          let mut btn = btn.assume_init();
          let base = btn.0.as_mut_ptr();
-         base.add(0x323).write(variant as u8);
-         base.add(0x31d).write(size as u8);
+         base.add(layout::BUTTON_VARIANT).write(variant as u8);
+         base.add(layout::BUTTON_SIZE).write(size as u8);
          let rc_ptr = self.alloc_rc_action(action);
-         base.add(0x298).cast::<*mut RcInner>().write(rc_ptr);
-         base.add(0x2a0)
+         base.add(layout::BUTTON_ON_CLICK).cast::<*mut RcInner>().write(rc_ptr);
+         base.add(layout::BUTTON_ON_CLICK + 8)
             .cast::<*const RcFnVtbl>()
             .write(&raw const BUTTON_FN_VTBL);
          btn
@@ -878,8 +703,8 @@ impl Builder {
             base.add(0xb0).cast::<SharedString>().write(desc_ss);
          }
          let rc_ptr = self.alloc_rc_action(action);
-         base.add(0x230).cast::<*mut RcInner>().write(rc_ptr);
-         base.add(0x238)
+         base.add(layout::SWITCH_ON_CHANGE).cast::<*mut RcInner>().write(rc_ptr);
+         base.add(layout::SWITCH_ON_CHANGE + 8)
             .cast::<*const RcFnVtbl>()
             .write(&raw const SWITCH_FN_VTBL);
 

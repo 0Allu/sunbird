@@ -16,10 +16,7 @@
 //!    tinted left accent bar — without ever modifying `message.content`.
 
 use std::{
-   collections::{
-      HashMap,
-      HashSet,
-   },
+   collections::HashMap,
    ffi::c_void,
    ptr,
    sync::{
@@ -34,45 +31,17 @@ use std::{
    },
 };
 
-use phoenix_hook::{
-   image::Image,
-   pattern::Pattern,
-};
+use phoenix_hook::image::Image;
+use phoenix_sigs::desktop;
 
 use crate::desktop_gpui::{
    self,
    RawAnyElement,
 };
 
-const DEFAULT_MSG_ID_OFFSET: usize = 0x7d8;
 /// Offset of the pending/sending message text color inside `RowColors`
 /// (verified at `0x14a741c1f`: `mov edx, [r12 + 0x34]`).
 const ROW_COLORS_MUTED_DELTA: usize = 0x34;
-
-/// `MessageRow::render` & `build_message_body` prologue: 8 callee-saved pushes +
-/// `mov eax, imm32` (17 bytes, no RIP-relative operands; stops right before `call __chkstk`).
-const ROW_PROLOGUE: Pattern =
-   Pattern::new("55 41 57 41 56 41 55 41 54 56 57 53 B8 ?? ?? ?? ??");
-const ROW_PROLOGUE_LEN: usize = 17;
-
-/// `lea rax, [rcx + disp32]` loading `&row.message_id` right before formatting
-/// `message-content-{id}`.
-const MSG_ID_LEA: Pattern = Pattern::new("48 8D 81 ?? ?? ?? ??");
-
-/// `mov rcx, [rcx + disp32]` loading `msg.message_id` near the entry of
-/// `build_message_body`.
-const BODY_MSG_ID_MOV: Pattern = Pattern::new("48 8B 89 ?? ?? ?? ??");
-
-/// `mov eax, imm32; mov ecx, imm32; mov edx, imm32` loading consecutive
-/// `RowColors` field offsets (`+0x0c`, `+0x08`, `+0x04`) in `build_message_body`.
-const ROW_COLORS_TRIPLE: Pattern =
-   Pattern::new("B8 ?? ?? ?? ?? B9 ?? ?? ?? ?? BA ?? ?? ?? ??");
-
-/// Same-client optimistic delete (`Store::delete_message`) prologue:
-/// 8 callee-saved pushes + `sub rsp, imm32` (19 bytes, no RIP-relative operands).
-const OPT_DEL_PROLOGUE: Pattern =
-   Pattern::new("55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC ?? ?? ?? ??");
-const OPT_DEL_PROLOGUE_LEN: usize = 19;
 
 type OptimisticDeleteFn =
    unsafe extern "C" fn(store: *mut c_void, args: *const *const u64, meta: *const c_void) -> u8;
@@ -117,7 +86,7 @@ enum CacheEntry {
 static ORIG_RENDER_ROW: OnceLock<RenderRowFn> = OnceLock::new();
 static ORIG_BUILD_BODY: OnceLock<BuildMessageBodyFn> = OnceLock::new();
 static ORIG_OPT_DELETE: OnceLock<OptimisticDeleteFn> = OnceLock::new();
-static MSG_ID_OFFSET: AtomicUsize = AtomicUsize::new(DEFAULT_MSG_ID_OFFSET);
+static MSG_ID_OFFSET: AtomicUsize = AtomicUsize::new(0);
 static BODY_MSG_ID_OFFSET: AtomicUsize = AtomicUsize::new(0);
 static ROW_COLORS_OFFSET: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -288,72 +257,6 @@ pub fn invalidate_discord_windows() {
 // Anchor Locator & Inline Hook
 // ---------------------------------------------------------------------------
 
-fn find_lea_xrefs(image: &Image<'_>, target: usize) -> Vec<usize> {
-   let mut hits = Vec::new();
-   for seg in image.segments.iter().filter(|s| s.executable) {
-      let bytes = seg.bytes.as_ref();
-      for idx in 0..bytes.len().saturating_sub(6) {
-         let rex = bytes[idx];
-         if (rex != 0x48 && rex != 0x4C) || bytes[idx + 1] != 0x8D {
-            continue;
-         }
-         if (bytes[idx + 2] & 0xC7) != 0x05 {
-            continue;
-         }
-         let disp = i32::from_le_bytes([
-            bytes[idx + 3],
-            bytes[idx + 4],
-            bytes[idx + 5],
-            bytes[idx + 6],
-         ]);
-         let next_rip = seg.addr + idx + 7;
-         if next_rip.wrapping_add_signed(disp as isize) == target {
-            hits.push(seg.addr + idx);
-         }
-      }
-   }
-   hits
-}
-
-fn find_call_parents(image: &Image<'_>, callee: usize) -> HashSet<usize> {
-   let mut parents = HashSet::new();
-   for seg in image.segments.iter().filter(|s| s.executable) {
-      let bytes = seg.bytes.as_ref();
-      for idx in 0..bytes.len().saturating_sub(4) {
-         if bytes[idx] != 0xE8 {
-            continue;
-         }
-         let disp = i32::from_le_bytes([
-            bytes[idx + 1],
-            bytes[idx + 2],
-            bytes[idx + 3],
-            bytes[idx + 4],
-         ]);
-         let next_rip = seg.addr + idx + 5;
-         if next_rip.wrapping_add_signed(disp as isize) == callee
-            && let Some((parent_start, _)) = image.function_bounds(seg.addr + idx)
-         {
-            parents.insert(parent_start);
-         }
-      }
-   }
-   parents
-}
-
-fn decode_msg_id_offset(image: &Image<'_>, lea_site: usize) -> Option<usize> {
-   let window_start = lea_site.saturating_sub(0x60);
-   let bytes = image.read(window_start, lea_site - window_start)?;
-   for at in MSG_ID_LEA.find_in(bytes).into_iter().rev() {
-      if let Some(d) = bytes.get(at + 3..at + 7) {
-         let disp = u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as usize;
-         if (0x100..=0x2000).contains(&disp) {
-            return Some(disp);
-         }
-      }
-   }
-   None
-}
-
 /// Locates and hooks Discord's GPUI `MessageRow::render` from `DllMain`.
 pub fn install(image: &Image<'static>) {
    if !desktop_gpui::supports_accessories() {
@@ -361,56 +264,13 @@ pub fn install(image: &Image<'static>) {
       return;
    }
 
-   let anchors = image.find_bytes(b"\x10message-content-\xc0\x00");
-   let [anchor] = anchors[..] else {
-      log::warn!(
-         "desktop accessories: message-content template matched {} times, skipping",
-         anchors.len()
-      );
-      return;
+   let (render_row, offset) = match desktop::message_row(image) {
+      Ok(row) => (row.func, row.msg_id_offset),
+      Err(err) => {
+         log::warn!("desktop accessories: {err}, skipping");
+         return;
+      },
    };
-
-   let leas = find_lea_xrefs(image, anchor);
-   if leas.is_empty() {
-      log::warn!("desktop accessories: no xrefs to message-content template");
-      return;
-   }
-
-   let mut helper_funcs = Vec::new();
-   let mut msg_id_off: Option<usize> = None;
-   for &lea in &leas {
-      if msg_id_off.is_none() {
-         msg_id_off = decode_msg_id_offset(image, lea);
-      }
-      if let Some((fn_start, _)) = image.function_bounds(lea)
-         && !helper_funcs.contains(&fn_start)
-      {
-         helper_funcs.push(fn_start);
-      }
-   }
-
-   let mut common: Option<HashSet<usize>> = None;
-   for &helper in &helper_funcs {
-      let parents = find_call_parents(image, helper);
-      if parents.is_empty() {
-         continue;
-      }
-      common = Some(match common {
-         None => parents,
-         Some(prev) => prev.intersection(&parents).copied().collect(),
-      });
-   }
-
-   let candidates: Vec<usize> = common.into_iter().flatten().collect();
-   let [render_row] = candidates[..] else {
-      log::warn!(
-         "desktop accessories: expected 1 common MessageRow renderer, found {}",
-         candidates.len()
-      );
-      return;
-   };
-
-   let offset = msg_id_off.unwrap_or(DEFAULT_MSG_ID_OFFSET);
    MSG_ID_OFFSET.store(offset, Ordering::Release);
 
    // SAFETY: runs from `DllMain` before Discord threads execute; `render_row_detour`
@@ -418,8 +278,8 @@ pub fn install(image: &Image<'static>) {
    let trampoline = match unsafe {
       image.hook_entry(
          render_row,
-         ROW_PROLOGUE,
-         ROW_PROLOGUE_LEN,
+         desktop::ROW_PROLOGUE,
+         desktop::ROW_PROLOGUE_LEN,
          render_row_detour as *const () as usize,
       )
    } {
@@ -439,83 +299,19 @@ pub fn install(image: &Image<'static>) {
    install_body_tint(image, render_row);
 }
 
-fn decode_body_msg_id_offset(image: &Image<'_>, body_fn: usize) -> Option<usize> {
-   let bytes = image.read(body_fn, 0x100)?;
-   for at in BODY_MSG_ID_MOV.find_in(bytes) {
-      if let Some(d) = bytes.get(at + 3..at + 7) {
-         let disp = u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as usize;
-         if (0x100..=0x800).contains(&disp) {
-            return Some(disp);
-         }
-      }
-   }
-   None
-}
-
-fn decode_row_colors_offset(image: &Image<'_>, body_fn: usize) -> Option<usize> {
-   let bytes = image.read(body_fn, 0x120)?;
-   let imm = |at: usize| Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?) as usize);
-   for at in ROW_COLORS_TRIPLE.find_in(bytes) {
-      let (Some(off_a), Some(off_c), Some(off_d)) = (imm(at + 1), imm(at + 6), imm(at + 11)) else {
-         continue;
-      };
-      // Consecutive `RowColors` fields `(+0x0c, +0x08, +0x04)` -> base is `off_d - 4`.
-      if off_a == off_c + 4 && off_c == off_d + 4 && (0x100..=0x400).contains(&off_d) {
-         return Some(off_d - 4);
-      }
-   }
-   None
-}
-
 /// Hooks Discord's inner message body builder (`build_message_body`, called once
 /// per row from `MessageRow::render`) so message tints also recolor the rendered
 /// message body text natively via `config.row_colors` (`0xRRGGBBAA`).
 fn install_body_tint(image: &Image<'static>, render_row: usize) {
-   let anchors = image.find_bytes(b"\x0fmessage-edited-\xc0\x00");
-   let [anchor] = anchors[..] else {
-      log::warn!(
-         "desktop accessories: message-edited template matched {} times, skipping body tint",
-         anchors.len()
-      );
-      return;
+   let body = match desktop::message_body(image, render_row) {
+      Ok(body) => body,
+      Err(err) => {
+         log::warn!("desktop accessories: {err}, skipping body tint");
+         return;
+      },
    };
-
-   let mut candidates = Vec::new();
-   for lea in find_lea_xrefs(image, anchor) {
-      let Some((fn_start, _)) = image.function_bounds(lea) else {
-         continue;
-      };
-      if candidates.contains(&fn_start) {
-         continue;
-      }
-      let Some(head) = image.read(fn_start, ROW_PROLOGUE_LEN) else {
-         continue;
-      };
-      if ROW_PROLOGUE.find_in(head).first().copied() != Some(0) {
-         continue;
-      }
-      if find_call_parents(image, fn_start).contains(&render_row) {
-         candidates.push(fn_start);
-      }
-   }
-
-   let [body_fn] = candidates[..] else {
-      log::warn!(
-         "desktop accessories: expected 1 message body builder, found {}",
-         candidates.len()
-      );
-      return;
-   };
-
-   // A guessed offset would write into the wrong stack slot, so a build
-   // whose layout does not decode goes without body tints.
-   let (Some(msg_id_off), Some(colors_off)) = (
-      decode_body_msg_id_offset(image, body_fn),
-      decode_row_colors_offset(image, body_fn),
-   ) else {
-      log::warn!("desktop accessories: message body layout did not decode, skipping body tint");
-      return;
-   };
+   let (body_fn, msg_id_off, colors_off) =
+      (body.func, body.msg_id_offset, body.row_colors_offset);
    BODY_MSG_ID_OFFSET.store(msg_id_off, Ordering::Release);
    ROW_COLORS_OFFSET.store(colors_off, Ordering::Release);
 
@@ -524,8 +320,8 @@ fn install_body_tint(image: &Image<'static>, render_row: usize) {
    let trampoline = match unsafe {
       image.hook_entry(
          body_fn,
-         ROW_PROLOGUE,
-         ROW_PROLOGUE_LEN,
+         desktop::ROW_PROLOGUE,
+         desktop::ROW_PROLOGUE_LEN,
          build_body_detour as *const () as usize,
       )
    } {
@@ -654,58 +450,6 @@ unsafe extern "C" fn render_row_detour(
 // Same-Client Optimistic Delete Hook
 // ---------------------------------------------------------------------------
 
-fn calls_in_range(image: &Image<'_>, start: usize, end: usize) -> Vec<usize> {
-   let Some(bytes) = image.read(start, end.saturating_sub(start)) else {
-      return Vec::new();
-   };
-   let mut out = Vec::new();
-   for idx in 0..bytes.len().saturating_sub(4) {
-      if bytes[idx] != 0xE8 {
-         continue;
-      }
-      let disp = i32::from_le_bytes([
-         bytes[idx + 1],
-         bytes[idx + 2],
-         bytes[idx + 3],
-         bytes[idx + 4],
-      ]);
-      let target = (start + idx + 5).wrapping_add_signed(disp as isize);
-      if image.is_code(target) && !out.contains(&target) {
-         out.push(target);
-      }
-   }
-   out
-}
-
-fn find_call_parents_multi(
-   image: &Image<'_>,
-   targets: &HashSet<usize>,
-) -> HashMap<usize, HashSet<usize>> {
-   let mut out: HashMap<usize, HashSet<usize>> = HashMap::new();
-   for seg in image.segments.iter().filter(|s| s.executable) {
-      let bytes = seg.bytes.as_ref();
-      for idx in 0..bytes.len().saturating_sub(4) {
-         if bytes[idx] != 0xE8 {
-            continue;
-         }
-         let disp = i32::from_le_bytes([
-            bytes[idx + 1],
-            bytes[idx + 2],
-            bytes[idx + 3],
-            bytes[idx + 4],
-         ]);
-         let next_rip = seg.addr + idx + 5;
-         let callee = next_rip.wrapping_add_signed(disp as isize);
-         if targets.contains(&callee)
-            && let Some((parent_start, _)) = image.function_bounds(seg.addr + idx)
-         {
-            out.entry(callee).or_default().insert(parent_start);
-         }
-      }
-   }
-   out
-}
-
 /// Locates and hooks Desktop Phoenix's same-client optimistic message delete
 /// (`Store::delete_message`), so deleting a message from this client respects
 /// `MESSAGE_DELETE` `before` hooks (such as `message-logger`).
@@ -714,59 +458,12 @@ pub fn install_optimistic_delete(image: &Image<'static>) {
       log::warn!("desktop accessories: MESSAGE_DELETE handler not found, skipping optimistic delete hook");
       return;
    };
-   let Some((del_start, del_end)) = image.function_bounds(del_fn) else {
-      log::warn!("desktop accessories: no .pdata bounds for MESSAGE_DELETE {del_fn:#x}");
-      return;
-   };
-
-   let del_callees: HashSet<usize> = calls_in_range(image, del_start, del_end).into_iter().collect();
-   let parents_by_callee = find_call_parents_multi(image, &del_callees);
-   let mut candidates = Vec::new();
-   for parents in parents_by_callee.values() {
-      if parents.len() != 2 || !parents.contains(&del_start) {
-         continue;
-      }
-      let Some(&other) = parents.iter().find(|&&p| p != del_start) else {
-         continue;
-      };
-      if candidates.contains(&other) {
-         continue;
-      }
-      let Some(head) = image.read(other, OPT_DEL_PROLOGUE_LEN) else {
-         continue;
-      };
-      if OPT_DEL_PROLOGUE.find_in(head).first().copied() != Some(0) {
-         continue;
-      }
-      let Some(body_head) = image.read(other, 0x80) else {
-         continue;
-      };
-      let has_lock = body_head
-         .windows(4)
-         .any(|w| w == [0xF0, 0x48, 0x0F, 0xB1]);
-      if !has_lock {
-         continue;
-      }
-      let Some((o_start, o_end)) = image.function_bounds(other) else {
-         continue;
-      };
-      let shared = calls_in_range(image, o_start, o_end)
-         .into_iter()
-         .filter(|c| del_callees.contains(c))
-         .count();
-      // Shares the in-memory map delete, secondary index delete, and cleanup helpers
-      // with MESSAGE_DELETE (6 shared callees vs <= 2 for unrelated callers).
-      if shared >= 4 {
-         candidates.push(other);
-      }
-   }
-
-   let [opt_del] = candidates[..] else {
-      log::warn!(
-         "desktop accessories: expected 1 optimistic delete candidate, found {}",
-         candidates.len()
-      );
-      return;
+   let opt_del = match desktop::optimistic_delete(image, del_fn) {
+      Ok(opt_del) => opt_del,
+      Err(err) => {
+         log::warn!("desktop accessories: {err}, skipping optimistic delete hook");
+         return;
+      },
    };
 
    // SAFETY: runs from `DllMain` before Discord threads execute; `optimistic_delete_detour`
@@ -774,8 +471,8 @@ pub fn install_optimistic_delete(image: &Image<'static>) {
    let trampoline = match unsafe {
       image.hook_entry(
          opt_del,
-         OPT_DEL_PROLOGUE,
-         OPT_DEL_PROLOGUE_LEN,
+         desktop::FRAME_PROLOGUE,
+         desktop::FRAME_PROLOGUE_LEN,
          optimistic_delete_detour as *const () as usize,
       )
    } {
