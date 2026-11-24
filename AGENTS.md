@@ -74,7 +74,7 @@ Read this file before changing code. Every fact here cost someone hours to learn
 - Windows, without Nix.
   - Rust `stable-x86_64-pc-windows-gnu` with the `aarch64-linux-android` target, `cargo-ndk`, an
     NDK, a JDK and an Android SDK with a platform and build-tools in `ANDROID_SDK_ROOT`.
-  - Fetch bytedance `android-inline-hook` and `bhook` at the `flake.lock` revisions. Point
+  - Fetch `sunbird-tools/sunhook` and bytedance `bhook` at the `flake.lock` revisions. Point
     `SHADOWHOOK_SRC` at `.../shadowhook/src/main/cpp` and `BYTEHOOK_SRC` at
     `.../bytehook/src/main/cpp`.
   - Set `LIBCLANG_PATH` to an LLVM `bin` holding `libclang.dll`, and set

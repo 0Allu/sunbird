@@ -8,7 +8,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     shadowhook = {
-      url = "github:bytedance/android-inline-hook";
+      url = "github:sunbird-tools/sunhook";
       flake = false;
     };
     bytehook = {

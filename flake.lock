@@ -81,16 +81,16 @@
     "shadowhook": {
       "flake": false,
       "locked": {
-        "lastModified": 1794291640,
-        "narHash": "sha256-1ZPNoYUxfPLEwc9wosWdc+cBxzVhJYtVJ3jRNh1KUHI=",
-        "owner": "bytedance",
-        "repo": "android-inline-hook",
-        "rev": "5a3721710b088435369fd79a2bb8f5b32df82dcd",
+        "lastModified": 1795520868,
+        "narHash": "sha256-h2CZeIpjIF1etxZvU8OVr+hw1JY+ewt8USKx9G+4CdM=",
+        "owner": "sunbird-tools",
+        "repo": "sunhook",
+        "rev": "9b3c9c8f5f7162f2c006a762d8da082ce6c9fed5",
         "type": "github"
       },
       "original": {
-        "owner": "bytedance",
-        "repo": "android-inline-hook",
+        "owner": "sunbird-tools",
+        "repo": "sunhook",
         "type": "github"
       }
     }
