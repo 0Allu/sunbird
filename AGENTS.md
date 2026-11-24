@@ -68,7 +68,8 @@ Read this file before changing code. Every fact here cost someone hours to learn
 ## Building
 
 - Linux. `nix develop`, then
-  `nu scripts/phoenix.nu base.apk config.arm64_v8a.apk config.<dpi>.apk config.<lang>.apk`.
+  `nu scripts/phoenix.nu base.apk config.<abi>.apk config.<dpi>.apk config.<lang>.apk`, where the
+  ABI split is `config.arm64_v8a` or `config.armeabi_v7a` and picks the loader's target.
   The devshell pins bytehook through `flake.lock` and provides the SDK, NDK and JDK.
   `phoenix.nu` ends in a blocking `adb logcat` tail, so run it in the background from a tool.
 - Windows, without Nix.
@@ -113,8 +114,8 @@ session. Leave it off outside development.
 
 - Rust is edition 2024, three-space indent, width 100, pinned in `.rustfmt.toml`. Run
   `rustfmt --edition 2024 <files you touched>`. Never run `cargo fmt`, it reformats the whole tree.
-- Clippy must stay clean on the host and on `aarch64-linux-android`. Never widen the workspace
-  lint list. Scope an `#[expect(lint, reason = "...")]` to the one function that needs it.
+- Clippy must stay clean on the host, `aarch64-linux-android` and `armv7-linux-androideabi`.
+  Never widen the workspace lint list. Scope an `#[expect(lint, reason = "...")]` to the one function that needs it.
 - Errors use `flub` in libraries and `misstep` in binaries. Untrusted input, including anything
   read from Phoenix, returns an error and never panics. A panic inside Discord's process kills the
   app.
@@ -146,8 +147,13 @@ session. Leave it off outside development.
 Read the decompiled host before guessing or bisecting.
 `jadx -q -j 16 --no-res -d out <base apk>` decompiles the Java side. The native host is
 `lib/arm64-v8a/liblibdiscord_wasm_host.so`, 97 MB and stripped, with JNI exports visible to
-`nm -D`.
+`nm -D`. The armeabi-v7a split's copy is 68 MB of Thumb-2, and inlines differently, so an arm64
+byte pattern says nothing about arm32.
 
+- Inline hooks. ShadowHook comes from the `sunhook-sys` crate of sunbird-tools/sunhook. On arm32
+  no island fits inside the host library, so a hook rewrites the first 8 or 10 bytes of its
+  target in place. Install hooks from the loader's constructor, before any thread can be inside
+  the target, and pass Thumb targets with bit 0 set or ShadowHook writes an ARM jump.
 - Update risks. `crates/ui/src/props.in` (props are named by index, so a new prop shifts them),
   `GuestHost.d(byte[], Function0)` (an obfuscated name) and `templates.json`. Host module,
   method, event and field numbers are read at startup by `host.rs`, so the numbers below are
