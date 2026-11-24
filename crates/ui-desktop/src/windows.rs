@@ -349,18 +349,6 @@ pub(crate) fn dashboard_url() -> Option<&'static str> {
    TRAY_CONFIG.get().map(|cfg| cfg.dashboard_url.as_str())
 }
 
-pub(crate) fn webview_data_dir() -> PathBuf {
-   TRAY_CONFIG.get().map_or_else(
-      || std::env::temp_dir().join("sunbird-webview2"),
-      |cfg| {
-         cfg.plugins_dir
-            .parent()
-            .unwrap_or(&cfg.plugins_dir)
-            .join("webview2")
-      },
-   )
-}
-
 fn open_app_window(url: &str, width: u32, height: u32) {
    let Some(config) = TRAY_CONFIG.get() else {
       return;

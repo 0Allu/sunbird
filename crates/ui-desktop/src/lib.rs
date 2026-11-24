@@ -57,22 +57,6 @@ pub fn open_devtools() {
    windows::open_devtools();
 }
 
-/// Shows or hides the Sunbird Settings WebView2 pane embedded inside Discord's
-/// native User Settings modal.
-pub fn set_embedded_settings_visible(visible: bool) {
-   #[cfg(windows)]
-   webview::set_embedded_settings_visible(visible);
-   #[cfg(not(windows))]
-   let _ = visible;
-}
-
-/// Hides the embedded Sunbird Settings pane and closes Discord's User Settings
-/// modal (triggered when pressing `Escape` inside the embedded WebView2).
-pub fn close_embedded_settings() {
-   #[cfg(windows)]
-   webview::close_embedded_settings();
-}
-
 /// Copies `text` to the system clipboard.
 pub fn copy(text: &str) -> Result<(), Error> {
    #[cfg(windows)]
