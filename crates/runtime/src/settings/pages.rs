@@ -7,6 +7,7 @@ use crate::{
    PluginInfo,
    settings::{
       COLOR_ACCENT,
+      COLOR_ERROR,
       COLOR_STRING,
       COLOR_WARN,
       Field,
@@ -26,6 +27,7 @@ use crate::{
       },
       tree::Tree,
    },
+   update::Catalog,
 };
 
 /// The native hook libraries linked in: inline hooks (as `phoenix_hook::Inline`
@@ -141,6 +143,47 @@ fn update_section() -> Option<Tree> {
    })
 }
 
+/// The site's plugins, each with a switch that installs or uninstalls it.
+fn listed_rows(plugins: &[PluginInfo]) -> Vec<Tree> {
+   let listed = match crate::update::catalog() {
+      Catalog::Unfetched | Catalog::Loading => {
+         return vec![button_row(
+            "Loading the plugin list...",
+            ICON_PLUGIN,
+            None,
+            false,
+         )];
+      },
+      Catalog::Failed(err) => {
+         let mut line = log_line(&[(format!("The plugin list did not load: {err}"), COLOR_ERROR)]);
+         line.set(Prop::FONT_FAMILY, None);
+         return vec![line];
+      },
+      Catalog::Loaded(listed) => listed,
+   };
+   listed
+      .iter()
+      .enumerate()
+      .map(|(index, plugin)| {
+         let on = plugins
+            .iter()
+            .any(|other| other.name == plugin.name && (other.installed || other.enabled));
+         let subtitle = plugin.warning.as_ref().map_or_else(
+            || plugin.description.clone(),
+            |warning| format!("{} \u{26A0} {warning}", plugin.description),
+         );
+         switch_row(
+            Some(ICON_PLUGIN),
+            &plugin.name,
+            Some(&subtitle),
+            on,
+            Press::Listed(index),
+            Press::Listed(index),
+         )
+      })
+      .collect()
+}
+
 fn debug_section() -> Tree {
    let debug_rows = vec![
       switch_row(
@@ -166,8 +209,9 @@ fn debug_section() -> Tree {
    section("Debug", debug_rows)
 }
 
-pub fn install_sections(status: Option<&(String, i64)>) -> Vec<Tree> {
+pub fn install_sections(status: Option<&(String, i64)>, plugins: &[PluginInfo]) -> Vec<Tree> {
    let mut sections = vec![
+      section("From Phoenix Unlock", listed_rows(plugins)),
       section("From a URL", vec![text_field(
          Field::Install,
          Some(ICON_PLUGIN),

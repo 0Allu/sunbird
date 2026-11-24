@@ -101,6 +101,9 @@ enum Press {
    EditCode(usize),
    SaveCode(usize),
    PickFile,
+   /// Installs or uninstalls a plugin the site lists, by its index in
+   /// [`crate::update::catalog`].
+   Listed(usize),
    Toggle(usize),
    Reload(usize),
    Uninstall(usize),

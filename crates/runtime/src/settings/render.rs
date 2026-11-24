@@ -242,7 +242,9 @@ impl Settings {
          },
          Job::Submit(Field::Code(_)) | Job::Press(Press::PickFile | Press::OpenSite) => Vec::new(),
          Job::Refresh
-         | Job::Press(Press::SaveCode(_) | Press::Reload(_) | Press::ApplyUpdate)
+         | Job::Press(
+            Press::SaveCode(_) | Press::Reload(_) | Press::ApplyUpdate | Press::Listed(_),
+         )
          | Job::Picked(_)
          | Job::Submit(Field::Install | Field::Setting(..)) => self.rerender_all(None),
          Job::Press(Press::OpenMain) => self.open_page(PageKind::Main),
@@ -292,7 +294,7 @@ impl Settings {
          PageKind::Install => {
             (
                "Install plugin".to_owned(),
-               install_sections(self.install_status.as_ref()),
+               install_sections(self.install_status.as_ref(), &self.plugins),
             )
          },
          PageKind::Code(index) => {

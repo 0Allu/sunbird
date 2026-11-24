@@ -81,6 +81,8 @@ pub enum Error {
    #[cfg(target_os = "android")]
    #[error(transparent)]
    Fetch(#[from] fetch::FetchError),
+   #[error("update Phoenix Unlock to {version} first, the site's plugins need it")]
+   LoaderOutdated { version: String },
 }
 
 struct State {

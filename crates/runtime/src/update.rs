@@ -75,6 +75,25 @@ pub struct Update {
    pub plugin_crcs: BTreeMap<String, u32>,
 }
 
+/// A plugin the site offers, as `plugins/index.json` lists it.
+#[derive(Clone, serde::Deserialize)]
+pub struct Listed {
+   pub name:        String,
+   pub description: String,
+   #[serde(default)]
+   pub warning:     Option<String>,
+}
+
+/// The site's plugin list, fetched when the install page first opens.
+#[derive(Clone)]
+pub enum Catalog {
+   Unfetched,
+   Loading,
+   Loaded(Vec<Listed>),
+   Failed(String),
+}
+
+static CATALOG: Mutex<Catalog> = Mutex::new(Catalog::Unfetched);
 static FOUND: Mutex<Option<Update>> = Mutex::new(None);
 static STATUS: Mutex<Option<String>> = Mutex::new(None);
 static BUSY: AtomicBool = AtomicBool::new(false);
@@ -100,6 +119,49 @@ pub fn busy() -> bool {
 fn set_status(message: Option<String>) {
    *STATUS.lock().unwrap_or_else(PoisonError::into_inner) = message;
    crate::settings::refresh();
+}
+
+pub fn catalog() -> Catalog {
+   CATALOG
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .clone()
+}
+
+/// Fetches the site's plugin list in the background, unless it is loaded or
+/// on its way. A failed fetch is retried on the next call.
+pub fn fetch_catalog() {
+   {
+      let mut catalog = CATALOG.lock().unwrap_or_else(PoisonError::into_inner);
+      if matches!(*catalog, Catalog::Loading | Catalog::Loaded(_)) {
+         return;
+      }
+      *catalog = Catalog::Loading;
+   }
+   thread::spawn(|| {
+      let fetched = crate::fetch::get(&format!("{SITE}plugins/index.json"))
+         .map_err(|err| err.to_string())
+         .and_then(|body| {
+            serde_json::from_slice::<Vec<Listed>>(&body).map_err(|err| err.to_string())
+         });
+      *CATALOG.lock().unwrap_or_else(PoisonError::into_inner) = match fetched {
+         Ok(listed) => Catalog::Loaded(listed),
+         Err(err) => {
+            log::info!("plugin list: {err}");
+            Catalog::Failed(err)
+         },
+      };
+      crate::settings::refresh();
+   });
+}
+
+/// Installs a plugin the site lists. Site plugins can call API an older
+/// loader lacks, so they wait until the loader is current, like updates do.
+pub fn install_listed(name: &str) -> Result<String, crate::Error> {
+   if let Some(version) = found().and_then(|update| update.loader) {
+      return Err(crate::Error::LoaderOutdated { version });
+   }
+   crate::install(&format!("{SITE}plugins/{name}.js"))
 }
 
 /// Asks the site in the background. Failures (offline) are only logged.

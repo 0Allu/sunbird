@@ -16,6 +16,7 @@ use crate::{
       TITLE,
       settings,
    },
+   update::Catalog,
 };
 
 fn plugin(index: usize) -> Option<PluginInfo> {
@@ -158,6 +159,7 @@ fn press(pressed: Press) {
             );
          }
       },
+      Press::Listed(index) => listed(index),
       Press::ApplyUpdate => {
          crate::update::apply();
       },
@@ -172,11 +174,34 @@ fn press(pressed: Press) {
       Press::ToggleRemoteShell => {
          crate::set_remote_shell_enabled(!crate::remote_shell_enabled());
       },
-      Press::OpenMain
-      | Press::OpenConsole
-      | Press::OpenInstall
-      | Press::OpenPlugin(_)
-      | Press::Back => {},
+      Press::OpenInstall => crate::update::fetch_catalog(),
+      Press::OpenMain | Press::OpenConsole | Press::OpenPlugin(_) | Press::Back => {},
+   }
+}
+
+/// Flips a listed plugin's switch. An absent plugin installs, an installed one
+/// uninstalls, and one bundled in the APK, which cannot go, turns on or off.
+fn listed(index: usize) {
+   let Catalog::Loaded(listed) = crate::update::catalog() else {
+      return;
+   };
+   let Some(plugin) = listed.get(index) else {
+      return;
+   };
+   let present = settings()
+      .plugins
+      .iter()
+      .find(|other| other.name == plugin.name)
+      .cloned();
+   match present {
+      None => installed(crate::update::install_listed(&plugin.name), &plugin.name),
+      Some(info) if !info.installed => crate::set_enabled(&info.name, !info.enabled),
+      Some(info) => {
+         settings().install_status = Some(match crate::uninstall(&info.name) {
+            Ok(()) => (format!("Uninstalled {}.", info.name), COLOR_STRING),
+            Err(err) => (format!("Uninstall failed: {err}"), COLOR_ERROR),
+         });
+      },
    }
 }
 
