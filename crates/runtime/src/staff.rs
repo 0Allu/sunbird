@@ -24,10 +24,11 @@ use phoenix_hook::{
 /// The tail of a staff check: `add x8, x8, #0x8000` then the three
 /// `flag_override` loads and the `csel` that ORs the staff bit. The offsets in
 /// the first two loads are wildcarded and read back from the match, so the
-/// write targets whatever field this build reads. 5 copies on 356207.
+/// write targets whatever field this build reads. 6 copies on 356207 and
+/// 357200, where every field offset moved.
 const STAFF_CHECK: Pattern = Pattern::new(
-   "08 21 40 91 09 75 42 F9 3F 09 00 F1 61 00 00 54 F3 03 1F 2A 0D 00 00 14 0A ?? ?? B9 0B ?? ?? \
-    B9 0C F1 44 B9 5F 01 00 71 6A 11 9F 1A",
+   "08 21 40 91 09 ?? ?? F9 3F 09 00 F1 61 00 00 54 F3 03 1F 2A ?? 00 00 14 0A ?? ?? B9 0B ?? ?? \
+    B9 0C ?? ?? B9 5F 01 00 71 6A 11 9F 1A",
 );
 /// Byte offsets of the `add` and the tag and value `ldr` inside a match.
 const ADD_BASE: usize = 0;
