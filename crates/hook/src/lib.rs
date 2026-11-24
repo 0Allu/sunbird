@@ -13,17 +13,17 @@ use std::{
    ptr::NonNull,
 };
 
-#[cfg(not(any(
-   windows,
-   all(
+#[cfg(all(
+   unix,
+   not(all(
       target_os = "android",
       any(target_arch = "aarch64", target_arch = "arm")
-   )
-)))]
+   ))
+))]
 pub mod dobby;
-// On Windows only the parts the host-side patcher reads build; the rest needs
-// dl_iterate_phdr.
-#[cfg_attr(windows, allow(dead_code, unused_imports))]
+// On Windows and wasm32 only the parts the host-side patcher reads build; the
+// rest needs dl_iterate_phdr.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 pub mod image;
 pub mod pattern;
 #[cfg(target_os = "android")] pub mod plt;
@@ -33,13 +33,13 @@ pub mod pattern;
 ))]
 pub mod shadowhook;
 
-#[cfg(not(any(
-   windows,
-   all(
+#[cfg(all(
+   unix,
+   not(all(
       target_os = "android",
       any(target_arch = "aarch64", target_arch = "arm")
-   )
-)))]
+   ))
+))]
 pub type Inline = dobby::Dobby;
 #[cfg(all(
    target_os = "android",
