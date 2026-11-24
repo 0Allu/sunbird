@@ -226,9 +226,6 @@ try {
       }
       $clangVer = (Get-ChildItem "$ndk/toolchains/llvm/prebuilt/windows-x86_64/lib/clang" | Select-Object -First 1).Name
       $env:ANDROID_NDK_HOME = $ndk
-      if (-not $env:BYTEHOOK_SRC) {
-         $env:BYTEHOOK_SRC = "C:/Users/manti/AppData/Local/Temp/claude/b272d34725fa8361/6b7c63e6-8e69-4925-9a97-7ee1606662df/scratchpad/rust/bhook/bytehook/src/main/cpp"
-      }
       $env:CARGO_TARGET_DIR = $TargetDir
       if (-not $env:LIBCLANG_PATH) { $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin" }
       [Environment]::SetEnvironmentVariable(

@@ -34,7 +34,7 @@ settings, install more from a URL or a file, edit their code and use the JS cons
 - **Hooks**: gateway events are hooked by swapping handler pointers in Phoenix's event registry,
   which is found from the event names. The UI is driven through Phoenix's own UI-op bridge
   between Rust and Java. ShadowHook, through the [sunhook](https://github.com/sunbird-tools/sunhook)
-  fork, and bytehook are linked in for native hooks on arm64 and armv7.
+  fork, is linked in for native hooks on arm64 and armv7.
 - **Signing**: every build is signed with the key in `crates/patcher/keys/`, using APK Signature
   Scheme v3 with a proof of rotation from the key older builds used. The key is public; it only
   lets builds update each other.

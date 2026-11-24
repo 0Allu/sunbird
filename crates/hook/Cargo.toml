@@ -1,6 +1,6 @@
 [package]
 name              = "phoenix-hook"
-description       = "Inline and PLT hooks plus a byte-pattern scanner over loaded images"
+description       = "Inline hooks plus a byte-pattern scanner over loaded images"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -20,10 +20,6 @@ dobby-rs = { workspace = true }
 
 [target.'cfg(all(target_os = "android", any(target_arch = "aarch64", target_arch = "arm")))'.dependencies]
 sunhook-sys = { workspace = true }
-
-[build-dependencies]
-bindgen = { workspace = true }
-cc      = { workspace = true }
 
 [lints]
 workspace = true

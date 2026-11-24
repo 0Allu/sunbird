@@ -7,17 +7,12 @@
       url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    bytehook = {
-      url = "github:bytedance/bhook";
-      flake = false;
-    };
   };
 
   outputs =
     {
       nixpkgs,
       fenix,
-      bytehook,
       ...
     }:
     let
@@ -71,7 +66,6 @@
             ANDROID_NDK_ROOT = android.ndkRoot;
             ANDROID_NDK_HOME = android.ndkRoot;
             LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-            BYTEHOOK_SRC = "${bytehook}/bytehook/src/main/cpp";
           };
         }
       );

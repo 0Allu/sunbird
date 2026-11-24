@@ -30,12 +30,11 @@ use crate::settings::{
    tree::Tree,
 };
 
-/// The native hook libraries linked in: inline hooks (as `phoenix_hook::Inline`
-/// picks them) and bytehook for PLT hooks.
+/// The inline hook library linked in, as `phoenix_hook::Inline` picks it.
 const HOOK_LIBRARY: &str = if cfg!(any(target_arch = "aarch64", target_arch = "arm")) {
-   "ShadowHook + bytehook"
+   "ShadowHook"
 } else {
-   "Dobby + bytehook"
+   "Dobby"
 };
 
 pub fn main_sections(plugins: &[PluginInfo]) -> Vec<Tree> {

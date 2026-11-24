@@ -57,7 +57,7 @@ Read this file before changing code. Every fact here cost someone hours to learn
 | `crates/ui-mobile` | Typed codec for mobile (Android/iOS) Phoenix UI-op batches. `src/props.in` is Phoenix's prop table, `templates.json` holds captured layouts, `motion.rs` drives native springs, `mirror.rs` keeps a live copy of the view tree that host tests can drive. |
 | `crates/ui-desktop` | Desktop UI host primitives (clipboard, URLs, notifications, GPUI surface hooks). |
 | `crates/wire` | Tagged values and bridge frames (`HostCall`, `DispatchEvent`). |
-| `crates/hook` | Image scanner, `swap_words`, ShadowHook and bytehook (linked, unused). |
+| `crates/hook` | Image scanner, `swap_words`, ShadowHook through `sunhook-sys`, Dobby elsewhere. |
 | `crates/sigs`, `crates/sigscan` | The gateway registry walk and handler ABI, and every other locator the runtime patches from (`desktop.rs`, `mobile.rs`). `sigscan` dumps a library's registry, runs `check` (every locator for that platform, exit 1 on a miss) and looks up strings, references and disassembly in `Discord.exe`. |
 | `crates/patcher` | Patches the split APKs and signs them, as a library with a CLI. One APK merged from the splits or each split signed on its own. |
 | `crates/patcher-web` | `crates/patcher` as wasm for the site. |
@@ -74,13 +74,12 @@ Read this file before changing code. Every fact here cost someone hours to learn
 - Linux. `nix develop`, then
   `nu scripts/phoenix.nu base.apk config.<abi>.apk config.<dpi>.apk config.<lang>.apk`, where the
   ABI split is `config.arm64_v8a` or `config.armeabi_v7a` and picks the loader's target.
-  The devshell pins bytehook through `flake.lock` and provides the SDK, NDK and JDK.
+  The devshell provides the SDK, NDK and JDK.
   `phoenix.nu` ends in a blocking `adb logcat` tail, so run it in the background from a tool.
 - Windows, without Nix.
   - Rust `stable-x86_64-pc-windows-gnu` with the `aarch64-linux-android` target, `cargo-ndk`, an
     NDK, a JDK and an Android SDK with a platform and build-tools in `ANDROID_SDK_ROOT`.
-  - Fetch bytedance `bhook` at the `flake.lock` revision and point `BYTEHOOK_SRC` at
-    `.../bytehook/src/main/cpp`. Cargo fetches ShadowHook as `sunhook-sys`.
+  - Cargo fetches ShadowHook as `sunhook-sys`.
   - Set `LIBCLANG_PATH` to an LLVM `bin` holding `libclang.dll`, and set
     `BINDGEN_EXTRA_CLANG_ARGS_aarch64-linux-android="--target=aarch64-linux-android28 --sysroot=<ndk>/toolchains/llvm/prebuilt/windows-x86_64/sysroot -isystem <ndk>/.../lib/clang/<ver>/include"`
     with `env`, since the name has hyphens.

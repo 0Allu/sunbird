@@ -3,8 +3,6 @@
 //! - [`Hook`] is the inline-hook interface. [`Inline`] picks the backend for
 //!   the target, `ShadowHook` on Android ARM and Dobby everywhere else (iOS,
 //!   x86_64 Android and Linux).
-//! - [`PltHook`](plt::PltHook) rewrites GOT entries through `ByteHook` on
-//!   Android.
 //! - [`Image`](image::Image) views a loaded ELF module, scans it for
 //!   [`Pattern`](pattern::Pattern)s, and swaps pointers in its read-only data.
 
@@ -26,7 +24,6 @@ pub mod dobby;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code, unused_imports))]
 pub mod image;
 pub mod pattern;
-#[cfg(target_os = "android")] pub mod plt;
 #[cfg(target_arch = "x86_64")] pub mod x86;
 #[cfg(all(
    target_os = "android",
