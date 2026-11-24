@@ -234,6 +234,40 @@
   }
   .toast.error { border-color: var(--red); color: #fca5a5; }
   .hidden { display: none; }
+  body.embedded {
+    --bg: #1a1a1e;
+    --surface: #232428;
+    --card: #2b2d31;
+    flex-direction: column;
+  }
+  body.embedded nav {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: 10px 18px;
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    background: var(--bg);
+  }
+  body.embedded .brand { padding: 0 8px 0 0; }
+  body.embedded .nav-footer {
+    margin-top: 0;
+    margin-left: auto;
+    padding: 0;
+    border-top: none;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+  }
+  body.embedded .nav-shortcut { display: none; }
+  body.embedded main {
+    max-width: 100%;
+    padding: 20px 24px 28px;
+  }
+  #popout-btn { display: none; }
+  body.embedded #popout-btn { display: inline-flex; }
 </style>
 </head>
 <body>
@@ -254,7 +288,8 @@
         <span class="slider"></span>
       </label>
     </div>
-    <div>Shortcut: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>U</kbd></div>
+    <button class="btn" id="popout-btn" title="Open in standalone window">Pop out</button>
+    <div class="nav-shortcut">Settings: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>U</kbd> · DevTools: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd></div>
   </div>
 </nav>
 <main>
@@ -312,6 +347,8 @@
 <div id="toast" class="toast"></div>
 <script>
 const $ = (s) => document.querySelector(s);
+const IS_EMBEDDED = new URLSearchParams(location.search).get('embedded') === '1';
+if (IS_EMBEDDED) document.body.classList.add('embedded');
 let installedNames = new Set();
 let activeTab = 'plugins';
 let catalogTimer = null;
@@ -371,11 +408,28 @@ function switchTab(tab) {
   if (tab === 'plugins') loadPlugins();
   if (tab === 'catalog') loadCatalog();
   if (tab === 'updates') loadUpdates();
-  if (tab === 'console') loadLogs();
+  if (tab === 'console') {
+    loadLogs();
+    setTimeout(() => { const inp = $('#eval-input'); if (inp) inp.focus(); }, 0);
+  }
 }
 
 document.querySelectorAll('nav button').forEach((btn) => {
   btn.onclick = () => switchTab(btn.dataset.tab);
+});
+
+$('#popout-btn').onclick = () => {
+  api('/ui/popout', { method: 'POST' }).catch(() => {});
+};
+
+window.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && (e.key === 'I' || e.key === 'i')) {
+    e.preventDefault();
+    switchTab('console');
+  } else if (IS_EMBEDDED && e.key === 'Escape') {
+    e.preventDefault();
+    api('/ui/close', { method: 'POST' }).catch(() => {});
+  }
 });
 
 $('#staff-toggle').onchange = async (e) => {
@@ -789,7 +843,17 @@ $('#eval-input').addEventListener('keydown', (e) => {
   }
 });
 
-loadPlugins();
+function openTabFromHash() {
+  const hash = location.hash.replace(/^#/, '');
+  if (['plugins', 'catalog', 'updates', 'console'].includes(hash)) {
+    switchTab(hash);
+    if (hash !== 'plugins') loadPlugins();
+    return;
+  }
+  loadPlugins();
+}
+window.addEventListener('hashchange', openTabFromHash);
+openTabFromHash();
 </script>
 </body>
 </html>

@@ -6,6 +6,7 @@
 //! window, system tray + global hotkey (`Ctrl+Shift+U`) + native notifications,
 //! and the self-contained Desktop Settings dashboard served over localhost.
 
+#[cfg(windows)] mod webview;
 #[cfg(windows)] mod windows;
 
 use std::{
@@ -47,6 +48,29 @@ pub fn start_tray(config: TrayConfig) {
 pub fn open_settings() {
    #[cfg(windows)]
    windows::open_dashboard();
+}
+
+/// Opens the Sunbird DevTools / Runtime Console directly in a standalone window
+/// (`Ctrl+Shift+I` while Discord Phoenix is focused).
+pub fn open_devtools() {
+   #[cfg(windows)]
+   windows::open_devtools();
+}
+
+/// Shows or hides the Sunbird Settings WebView2 pane embedded inside Discord's
+/// native User Settings modal.
+pub fn set_embedded_settings_visible(visible: bool) {
+   #[cfg(windows)]
+   webview::set_embedded_settings_visible(visible);
+   #[cfg(not(windows))]
+   let _ = visible;
+}
+
+/// Hides the embedded Sunbird Settings pane and closes Discord's User Settings
+/// modal (triggered when pressing `Escape` inside the embedded WebView2).
+pub fn close_embedded_settings() {
+   #[cfg(windows)]
+   webview::close_embedded_settings();
 }
 
 /// Copies `text` to the system clipboard.

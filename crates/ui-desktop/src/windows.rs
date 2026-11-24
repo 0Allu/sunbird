@@ -58,6 +58,7 @@ const TPM_NONOTIFY: u32 = 0x0080;
 const TPM_RETURNCMD: u32 = 0x0100;
 
 const ID_OPEN_SETTINGS: usize = 1001;
+const ID_OPEN_DEVTOOLS: usize = 1006;
 const ID_RELOAD_ALL: usize = 1002;
 const ID_CHECK_UPDATES: usize = 1003;
 const ID_COPY_URL: usize = 1004;
@@ -228,6 +229,7 @@ unsafe extern "system" {
    fn GlobalUnlock(mem: *mut c_void) -> i32;
    fn GlobalFree(mem: *mut c_void) -> *mut c_void;
    fn GetModuleHandleW(name: *const u16) -> *mut c_void;
+   fn GetCurrentProcessId() -> u32;
 }
 
 #[link(name = "shell32")]
@@ -343,13 +345,26 @@ fn find_edge_exe() -> Option<PathBuf> {
       .find(|path| path.is_file())
 }
 
-/// Opens the Sunbird Settings dashboard in a standalone chromeless Edge app
-/// window when Edge is available, falling back to the default system browser.
-pub fn open_dashboard() {
+pub(crate) fn dashboard_url() -> Option<&'static str> {
+   TRAY_CONFIG.get().map(|cfg| cfg.dashboard_url.as_str())
+}
+
+pub(crate) fn webview_data_dir() -> PathBuf {
+   TRAY_CONFIG.get().map_or_else(
+      || std::env::temp_dir().join("sunbird-webview2"),
+      |cfg| {
+         cfg.plugins_dir
+            .parent()
+            .unwrap_or(&cfg.plugins_dir)
+            .join("webview2")
+      },
+   )
+}
+
+fn open_app_window(url: &str, width: u32, height: u32) {
    let Some(config) = TRAY_CONFIG.get() else {
       return;
    };
-   let url = &config.dashboard_url;
    if let Some(edge) = find_edge_exe() {
       let profile_dir = config
          .plugins_dir
@@ -358,7 +373,7 @@ pub fn open_dashboard() {
          .join("app-ui");
       let spawned = Command::new(edge)
          .arg(format!("--app={url}"))
-         .arg("--window-size=1020,740")
+         .arg(format!("--window-size={width},{height}"))
          .arg(format!("--user-data-dir={}", profile_dir.display()))
          .spawn();
       if spawned.is_ok() {
@@ -368,6 +383,24 @@ pub fn open_dashboard() {
    if let Err(err) = crate::open_url(url) {
       log::warn!("tray: could not open dashboard: {err}");
    }
+}
+
+/// Opens the Sunbird Settings dashboard in a standalone chromeless Edge app
+/// window when Edge is available, falling back to the default system browser.
+pub fn open_dashboard() {
+   let Some(url) = dashboard_url() else {
+      return;
+   };
+   open_app_window(url, 1020, 740);
+}
+
+/// Opens the Sunbird DevTools / Runtime Console directly (`Ctrl+Shift+I` while
+/// Discord Phoenix is focused).
+pub fn open_devtools() {
+   let Some(url) = dashboard_url() else {
+      return;
+   };
+   open_app_window(&format!("{url}#console"), 960, 680);
 }
 
 fn open_plugins_folder() {
@@ -390,13 +423,18 @@ fn open_plugins_folder() {
    }
 }
 
+fn tray_uid() -> u32 {
+   // SAFETY: GetCurrentProcessId has no preconditions.
+   TRAY_UID ^ unsafe { GetCurrentProcessId() }
+}
+
 fn empty_nid(hwnd: *mut c_void) -> NotifyIconDataW {
    #[expect(clippy::cast_possible_truncation, reason = "NOTIFYICONDATAW is 976 bytes")]
    let cb_size = size_of::<NotifyIconDataW>() as u32;
    NotifyIconDataW {
       cb_size,
       hwnd,
-      u_id: TRAY_UID,
+      u_id: tray_uid(),
       u_flags: 0,
       u_callback_message: WM_TRAY,
       h_icon: ptr::null_mut(),
@@ -423,6 +461,7 @@ unsafe fn add_tray_icon(hwnd: *mut c_void, icon: *mut c_void) -> bool {
 
 pub fn start_tray(config: TrayConfig) {
    let _ = TRAY_CONFIG.set(config);
+   crate::webview::start_window_hook();
    if TRAY_STARTED.swap(true, Ordering::AcqRel) {
       return;
    }
@@ -565,6 +604,7 @@ pub fn balloon(title: &str, body: &str) {
 fn run_menu_action(cmd: usize) {
    match cmd {
       ID_OPEN_SETTINGS => open_dashboard(),
+      ID_OPEN_DEVTOOLS => open_devtools(),
       ID_RELOAD_ALL => {
          if let Some(cb) = TRAY_CONFIG.get().and_then(|c| c.on_reload_all.as_ref()) {
             cb();
@@ -618,12 +658,14 @@ unsafe extern "system" fn tray_wnd_proc(
                   let menu = CreatePopupMenu();
                   if !menu.is_null() {
                      let open_lbl = wide("Open Sunbird Settings\tCtrl+Shift+U");
+                     let devtools_lbl = wide("Open DevTools (Console)\tCtrl+Shift+I");
                      let reload_lbl = wide("Reload All Plugins");
                      let update_lbl = wide("Check for Updates");
                      let copy_lbl = wide("Copy Dashboard URL");
                      let folder_lbl = wide("Open Plugins Folder");
 
                      AppendMenuW(menu, MF_STRING, ID_OPEN_SETTINGS, open_lbl.as_ptr());
+                     AppendMenuW(menu, MF_STRING, ID_OPEN_DEVTOOLS, devtools_lbl.as_ptr());
                      AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
                      AppendMenuW(menu, MF_STRING, ID_RELOAD_ALL, reload_lbl.as_ptr());
                      AppendMenuW(menu, MF_STRING, ID_CHECK_UPDATES, update_lbl.as_ptr());
