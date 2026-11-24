@@ -64,8 +64,8 @@ Leading `// @` lines describe the plugin. Besides gateway hooks there are `setti
 `commands`, `messages` (local-only messages, send interceptors), `stores` (Phoenix's cache),
 `fetch` and Discord API helpers.
 
-The bundled plugins live in `plugins/*/src/index.ts`. The site builds them with esbuild when it
-deploys (`web/tools/bundle-plugins.mjs`).
+The bundled plugins live in `plugins/*/src/index.ts`. CI bundles them with esbuild
+(`web/tools/bundle-plugins.mjs`) into the `site` release that sunbird.tools deploys from.
 
 ## Repository
 
@@ -79,7 +79,7 @@ deploys (`web/tools/bundle-plugins.mjs`).
 | `crates/patcher-web` | The same patcher built to wasm for the site. |
 | `crates/stand-in*` | A fake Phoenix gateway library for testing hooks without Discord. |
 | `plugins/` | The bundled plugins. |
-| `web/` | The browser patcher's page, which runs `crates/patcher-web` in a worker. |
+| `web/` | What CI publishes as the `site` release: the patcher wasm, loader libraries and plugin bundles. |
 | `frida/` | The Frida gadget bootstrap. |
 
 ## Building
@@ -94,8 +94,7 @@ nu scripts/phoenix.nu base.apk config.arm64_v8a.apk config.xxhdpi.apk config.en.
 This builds the loader and the patcher, bundles the plugins, patches the splits and installs them
 with adb. [AGENTS.md](AGENTS.md) covers building on Windows, the web patcher and testing.
 
-The site's downloads go through `web/worker/proxy.js`, a Cloudflare Worker that adds CORS headers
-to the APK tracker. Run the site locally with `node web/tools/dev-server.mjs <dir with the splits>`.
+The page itself lives in [sunbird-tools/site](https://github.com/sunbird-tools/site).
 
 ## Contributors
 

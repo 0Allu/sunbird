@@ -1,7 +1,7 @@
 # Builds what the site serves but does not commit, inside `nix develop`: the
 # loader for arm64 Android and the libshadowhook_nothing.so it needs, into
-# `web/plugins` under the names web/app.js fetches, and the patcher as wasm
-# into `web/pkg` for web/patcher.js.
+# `web/plugins` under the names sunbird-tools/site fetches, and the patcher as
+# wasm into `web/pkg`.
 
 const API = 28
 

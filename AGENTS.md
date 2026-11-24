@@ -54,11 +54,11 @@ Read this file before changing code. Every fact here cost someone hours to learn
 | `crates/hook` | Image scanner, `swap_words`, ShadowHook and bytehook (linked, unused). |
 | `crates/sigs`, `crates/sigscan` | The gateway registry walk and handler ABI, and a CLI that dumps the registry of a library. |
 | `crates/patcher` | Patches the split APKs and signs them, as a library with a CLI. One APK merged from the splits or each split signed on its own. |
-| `crates/patcher-web` | `crates/patcher` as wasm for the site, run by `web/patcher.js`. |
+| `crates/patcher-web` | `crates/patcher` as wasm for the site. |
 | `crates/stand-in*` | A fake gateway library and a demo, to test hooks without Discord. |
 | `plugins/*/src/index.ts` | Bundled plugins. Leading `// @` lines are the bundle banner and metadata, and `// @warning` shows a warning on the site. |
 | `docs/phoenix-356207.*` | Phoenix's schema pulled from the APK by `scripts/extract-schema.py`: 29 view kinds, 855 props, 79 host modules with 433 methods, 109 events, 286 `ic_mana_*` icons and the accessibility ids. Read it before decompiling. |
-| `web/` | Browser patcher (GitHub Pages). The page UI, with all patching in `crates/patcher-web`. |
+| `web/` | The `site` release that sunbird-tools/site deploys: patcher wasm, loader libraries, plugin bundles, `version.json`. Installed builds fetch the last three from sunbird.tools, so they must stay at the same paths. |
 | `frida/` | Optional Frida gadget bootstrap, for debugging on x86. |
 | `scripts/*.nu` | `phoenix.nu` builds, patches and installs on a phone. `site.nu` builds the site's native libs and wasm. |
 | `scripts/dev.ps1` | The Windows dev loop, described below. |
@@ -83,9 +83,9 @@ Read this file before changing code. Every fact here cost someone hours to learn
     its DLLs on `PATH`.
   - `cargo +stable-x86_64-pc-windows-gnu ndk -t arm64-v8a -P 28 --link-builtins build --release -p phoenix-loader`,
     then `cargo build --release -p patcher`.
-- Site. `nu scripts/site.nu web`, `node web/tools/bundle-plugins.mjs` (set `ESBUILD`
-  if esbuild is not on `PATH`), then `node web/tools/dev-server.mjs <dir with the splits> [port]`.
-  CI does the same on pushes to `main`.
+- Site. `nu scripts/site.nu web` and `node web/tools/bundle-plugins.mjs` (set `ESBUILD`
+  if esbuild is not on `PATH`), then `nu scripts/fetch.nu <this checkout>` in sunbird-tools/site.
+  CI publishes the same files as the `site` release on pushes to `main` and triggers the site's deploy.
 
 ## Fast loop
 

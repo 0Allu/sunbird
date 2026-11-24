@@ -1,0 +1,37 @@
+name: site
+on:
+  push:
+    branches: [main]
+    paths: ['web/**', 'plugins/**', 'crates/**', 'frida/**', 'Cargo.*', 'flake.*', 'nix/**', 'scripts/site.nu', '.github/workflows/site.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: site
+  cancel-in-progress: true
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - run: nix develop --command nu scripts/site.nu web
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The plugins stay TypeScript in plugins/*/src; the site serves them bundled.
+      - run: npm install --no-save --no-package-lock esbuild@0.25.12
+      - run: node web/tools/bundle-plugins.mjs
+        env:
+          ESBUILD: node_modules/.bin/esbuild
+      - run: tar czf site.tar.gz -C web pkg plugins version.json
+      # One rolling release that sunbird-tools/site deploys from.
+      - run: |
+          gh release view site >/dev/null 2>&1 || gh release create site --prerelease --title site --notes 'What sunbird.tools serves, rebuilt on every push to main.'
+          gh release upload site site.tar.gz --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+      # SITE_DISPATCH is a token with Contents write on sunbird-tools/site.
+      - run: gh api repos/sunbird-tools/site/dispatches -f event_type=artifacts
+        env:
+          GH_TOKEN: ${{ secrets.SITE_DISPATCH }}

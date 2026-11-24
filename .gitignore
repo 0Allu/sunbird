@@ -62,13 +62,9 @@
 !scripts/*.py
 
 !web/
-!web/*.html
-!web/*.js
 !web/signing-key.json
 !web/tools/
 !web/tools/*.mjs
-!web/worker/
-!web/worker/*.js
 !web/plugins/
 !web/plugins/frida-*.js
 !web/plugins/frida-gadget-*.so.gz
