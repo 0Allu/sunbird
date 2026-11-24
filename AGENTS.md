@@ -57,7 +57,7 @@ Read this file before changing code. Every fact here cost someone hours to learn
 | `crates/ui-mobile` | Typed codec for mobile (Android/iOS) Phoenix UI-op batches. `src/props.in` is Phoenix's prop table, `templates.json` holds captured layouts, `motion.rs` drives native springs, `mirror.rs` keeps a live copy of the view tree that host tests can drive. |
 | `crates/ui-desktop` | Desktop UI host primitives (clipboard, URLs, notifications, GPUI surface hooks). |
 | `crates/wire` | Tagged values and bridge frames (`HostCall`, `DispatchEvent`). |
-| `crates/hook` | Image scanner, `swap_words`, ShadowHook through `sunhook-sys`, Dobby elsewhere. |
+| `crates/hook` | Image scanner, `swap_words`, ShadowHook through `sunhook-sys` on Android ARM. |
 | `crates/sigs`, `crates/sigscan` | The gateway registry walk and handler ABI, and every other locator the runtime patches from (`desktop.rs`, `mobile.rs`). `sigscan` dumps a library's registry, runs `check` (every locator for that platform, exit 1 on a miss) and looks up strings, references and disassembly in `Discord.exe`. |
 | `crates/patcher` | Patches the split APKs and signs them, as a library with a CLI. One APK merged from the splits or each split signed on its own. |
 | `crates/patcher-web` | `crates/patcher` as wasm for the site. |

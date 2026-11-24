@@ -30,13 +30,6 @@ use crate::settings::{
    tree::Tree,
 };
 
-/// The inline hook library linked in, as `phoenix_hook::Inline` picks it.
-const HOOK_LIBRARY: &str = if cfg!(any(target_arch = "aarch64", target_arch = "arm")) {
-   "ShadowHook"
-} else {
-   "Dobby"
-};
-
 pub fn main_sections(plugins: &[PluginInfo]) -> Vec<Tree> {
    let rows = if plugins.is_empty() {
       vec![button_row("No plugins found", ICON_PLUGIN, None, false)]
@@ -75,7 +68,7 @@ pub fn main_sections(plugins: &[PluginInfo]) -> Vec<Tree> {
             value_row("Version", phoenix_runtime::update::VERSION),
             value_row("Runtime", "rquickjs"),
             value_row("Gateway hooks", "registry pointer swap"),
-            value_row("Hook library", HOOK_LIBRARY),
+            value_row("Hook library", "ShadowHook"),
             value_row("Enabled", &format!("{enabled} of {}", plugins.len())),
          ]),
       ])

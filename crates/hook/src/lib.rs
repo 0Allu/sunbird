@@ -1,9 +1,7 @@
 //! Function hooks and signature scanning for phoenix.
 //!
-//! - [`Hook`] is the inline-hook interface. [`Inline`] picks the backend for
-//!   the target, `ShadowHook` on Android ARM and Dobby on x86_64 Android and
-//!   Linux. Apple platforms have none, since stock iOS never maps patched code
-//!   executable.
+//! - [`Hook`] is the inline-hook interface, and [`Inline`] is `ShadowHook` on
+//!   Android ARM, the one target that hooks code.
 //! - [`Image`](image::Image) views a loaded ELF module, scans it for
 //!   [`Pattern`](pattern::Pattern)s, and swaps pointers in its read-only data.
 
@@ -12,15 +10,6 @@ use std::{
    ptr::NonNull,
 };
 
-#[cfg(all(
-   unix,
-   not(target_vendor = "apple"),
-   not(all(
-      target_os = "android",
-      any(target_arch = "aarch64", target_arch = "arm")
-   ))
-))]
-pub mod dobby;
 // On wasm32 only the parts the host-side patcher reads build; live process
 // scanning uses dl_iterate_phdr on Unix and PE module enumeration on Windows.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code, unused_imports))]
@@ -33,15 +22,6 @@ pub mod pattern;
 ))]
 pub mod shadowhook;
 
-#[cfg(all(
-   unix,
-   not(target_vendor = "apple"),
-   not(all(
-      target_os = "android",
-      any(target_arch = "aarch64", target_arch = "arm")
-   ))
-))]
-pub type Inline = dobby::Dobby;
 #[cfg(all(
    target_os = "android",
    any(target_arch = "aarch64", target_arch = "arm")

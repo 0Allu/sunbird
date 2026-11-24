@@ -2,6 +2,7 @@
 //! `phoenix.messages.onEmojiPick`, and Phoenix's emoji check, which while a
 //! handler exists stops locking emojis that need Nitro in the message box.
 
+#[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
 use phoenix_hook::{
    Hook,
    Inline,
