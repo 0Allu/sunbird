@@ -14,6 +14,10 @@ use object::{
       FileHeader32,
       FileHeader64,
    },
+   macho::{
+      self,
+      MachHeader64,
+   },
    pe::{
       self,
       IMAGE_DIRECTORY_ENTRY_EXCEPTION,
@@ -28,6 +32,13 @@ use object::{
          ProgramHeader,
          SectionHeader,
          SectionTable,
+      },
+      macho::{
+         Fixup,
+         LoadCommandVariant,
+         MachHeader,
+         Section as _,
+         Segment as _,
       },
       pe::{
          ImageNtHeaders,
@@ -216,6 +227,139 @@ impl<'a> ElfFile<'a> {
    }
 }
 
+/// A Mach-O image viewed at its link addresses with its chained fixups applied,
+/// for offline tools.
+pub struct MachOFile<'a> {
+   pub image: Image<'a>,
+}
+
+impl<'a> MachOFile<'a> {
+   #[expect(
+      clippy::too_many_lines,
+      reason = "one pass over the load commands, then one over the fixup chains"
+   )]
+   pub fn parse(path: &str, data: &'a [u8]) -> Result<Self, FileError> {
+      let parse = |source| {
+         FileError::Parse {
+            path: path.to_owned(),
+            source,
+         }
+      };
+      let truncated = || {
+         FileError::Truncated {
+            path: path.to_owned(),
+         }
+      };
+      let address = |source| {
+         FileError::Address {
+            path: path.to_owned(),
+            source,
+         }
+      };
+
+      let header = MachHeader64::<Endianness>::parse(data, 0).map_err(parse)?;
+      let endian = header.endian().map_err(parse)?;
+      let mut image = Image {
+         path:          path.to_owned(),
+         build_id:      None,
+         segments:      Vec::new(),
+         eh_frame_hdr:  None,
+         arm_exidx:     None,
+         pdata:         None,
+         pointer_width: 8,
+      };
+
+      // Fixup chains name segments by load-command order, `__PAGEZERO`
+      // included.
+      let mut by_index = Vec::new();
+      let mut text = 0;
+      let mut fixups = None;
+      for command in header.load_commands(endian, data, 0).map_err(parse)? {
+         match command.map_err(parse)?.variant().map_err(parse)? {
+            LoadCommandVariant::Segment64(segment, sections) => {
+               let vmaddr = segment.vmaddr(endian);
+               if segment.name() == b"__TEXT" {
+                  text = vmaddr;
+               }
+               if segment.filesize(endian) == 0 {
+                  by_index.push(None);
+                  continue;
+               }
+               // `__TEXT` maps strings and constants executable beside the
+               // code, so only instruction sections count as code.
+               if segment.initprot(endian).0 & macho::VM_PROT_EXECUTE.0 != 0 {
+                  by_index.push(None);
+                  for section in segment.sections(endian, sections).map_err(parse)? {
+                     let start = section.offset(endian) as usize;
+                     let length = usize::try_from(section.size(endian)).map_err(address)?;
+                     let instructions =
+                        macho::S_ATTR_PURE_INSTRUCTIONS.0 | macho::S_ATTR_SOME_INSTRUCTIONS.0;
+                     image.segments.push(Segment {
+                        addr:       usize::try_from(section.addr(endian)).map_err(address)?,
+                        bytes:      Cow::Borrowed(
+                           data.get(start..start + length).ok_or_else(truncated)?,
+                        ),
+                        executable: section.flags(endian).0 & instructions != 0,
+                        writable:   false,
+                     });
+                  }
+                  continue;
+               }
+               let bytes = segment.data(endian, data).map_err(|()| truncated())?;
+               let mut owned = bytes.to_vec();
+               owned.resize(usize::try_from(segment.vmsize(endian)).map_err(address)?, 0);
+               let initprot = segment.initprot(endian).0;
+               by_index.push(Some((image.segments.len(), bytes)));
+               image.segments.push(Segment {
+                  addr:       usize::try_from(vmaddr).map_err(address)?,
+                  bytes:      Cow::Owned(owned),
+                  executable: initprot & macho::VM_PROT_EXECUTE.0 != 0,
+                  writable:   initprot & macho::VM_PROT_WRITE.0 != 0,
+               });
+            },
+            LoadCommandVariant::LinkeditData(command)
+               if command.cmd.get(endian) == macho::LC_DYLD_CHAINED_FIXUPS =>
+            {
+               fixups = Some(command.chained_fixups(endian, data).map_err(parse)?);
+            },
+            LoadCommandVariant::Uuid(uuid) if image.build_id.is_none() => {
+               image.build_id = BuildId::from_bytes(&uuid.uuid);
+            },
+            _ => {},
+         }
+      }
+
+      // Pointers on disk are chain links. Rebases become link addresses, and
+      // binds to other images become 0 since their targets are not loaded.
+      for chain in fixups
+         .iter()
+         .flat_map(|fixups| fixups.segments(endian))
+         .flatten()
+      {
+         let chain = chain.map_err(parse)?;
+         let Some(&Some((slot, on_disk))) = by_index.get(chain.index() as usize) else {
+            continue;
+         };
+         let Cow::Owned(bytes) = &mut image.segments[slot].bytes else {
+            continue;
+         };
+         for link in chain.fixups(endian, text, on_disk) {
+            let (offset, fixup) = link.map_err(parse)?;
+            let value = match fixup {
+               Fixup::Rebase(rebase) => text + rebase.target_offset,
+               _ => 0,
+            };
+            let at = usize::try_from(offset).map_err(address)?;
+            bytes
+               .get_mut(at..at + 8)
+               .ok_or_else(truncated)?
+               .copy_from_slice(&value.to_le_bytes());
+         }
+      }
+      Ok(Self { image })
+   }
+}
+
 /// A PE64 image mapped at its preferred image base, for offline desktop tools.
 pub struct PeFile<'a> {
    pub image:   Image<'a>,
@@ -247,7 +391,8 @@ impl<'a> PeFile<'a> {
             });
          },
       };
-      let image_base = usize::try_from(pe.nt_headers().optional_header().image_base()).map_err(address)?;
+      let image_base =
+         usize::try_from(pe.nt_headers().optional_header().image_base()).map_err(address)?;
       let pdata = pe
          .data_directory(IMAGE_DIRECTORY_ENTRY_EXCEPTION)
          .and_then(|dir| {
@@ -274,9 +419,11 @@ impl<'a> PeFile<'a> {
          });
       }
 
-      let build_id = pe.pdb_info().ok().flatten().and_then(|info| {
-         BuildId::from_bytes(&info.guid())
-      });
+      let build_id = pe
+         .pdb_info()
+         .ok()
+         .flatten()
+         .and_then(|info| BuildId::from_bytes(&info.guid()));
 
       Ok(Self {
          image: Image {
@@ -293,16 +440,19 @@ impl<'a> PeFile<'a> {
    }
 }
 
-/// Either an ELF or PE64 binary parsed from disk.
+/// An ELF, PE64 or 64-bit Mach-O binary parsed from disk.
 pub enum BinaryFile<'a> {
    Elf(ElfFile<'a>),
    Pe(PeFile<'a>),
+   MachO(MachOFile<'a>),
 }
 
 impl<'a> BinaryFile<'a> {
    pub fn parse(path: &str, data: &'a [u8]) -> Result<Self, FileError> {
       if data.starts_with(&pe::IMAGE_DOS_SIGNATURE.to_le_bytes()) {
          Ok(Self::Pe(PeFile::parse(path, data)?))
+      } else if data.starts_with(&macho::MH_MAGIC_64.to_le_bytes()) {
+         Ok(Self::MachO(MachOFile::parse(path, data)?))
       } else {
          Ok(Self::Elf(ElfFile::parse(path, data)?))
       }
@@ -313,6 +463,7 @@ impl<'a> BinaryFile<'a> {
       match self {
          Self::Elf(file) => file.machine,
          Self::Pe(file) => file.machine,
+         Self::MachO(_) => Machine::Aarch64,
       }
    }
 
@@ -321,6 +472,7 @@ impl<'a> BinaryFile<'a> {
       match self {
          Self::Elf(file) => &file.image,
          Self::Pe(file) => &file.image,
+         Self::MachO(file) => &file.image,
       }
    }
 }

@@ -38,6 +38,7 @@ use phoenix_sigs::{
       Machine,
    },
    http::DesktopHttpTransport,
+   ios,
    mobile,
    registry::GatewayRegistry,
 };
@@ -62,7 +63,13 @@ fn main() -> misstep::Result<()> {
    let tools = Tools { image, base };
    match args.get(1).map(String::as_str) {
       None => dump(image),
-      Some("check") => check(image, parsed.machine()),
+      Some("check") => {
+         check(
+            image,
+            parsed.machine(),
+            matches!(parsed, BinaryFile::MachO(_)),
+         )
+      },
       Some("strings") => tools.strings(args.get(2).context(USAGE)?),
       Some("refs") => {
          tools.refs(addr(2)?);
@@ -82,7 +89,7 @@ fn main() -> misstep::Result<()> {
 
 /// Runs every locator for `machine` and prints what each found.
 #[expect(clippy::too_many_lines, reason = "one report per locator")]
-fn check(image: &Image<'_>, machine: Machine) -> misstep::Result<()> {
+fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()> {
    let mut missed = 0;
    let mut report = |name: &str, found: Found<String>| {
       match found {
@@ -181,6 +188,7 @@ fn check(image: &Image<'_>, machine: Machine) -> misstep::Result<()> {
                .map(at),
          );
       },
+      Machine::Aarch64 if macho => report("guest bridge", ios::bridge(image).map(at)),
       Machine::Aarch64 => {
          report(
             "staff flag",

@@ -38,6 +38,8 @@ pub enum DiscordError {
    Path { path: String },
    #[error("Phoenix's bridge is not up yet")]
    NoBridge,
+   #[error("this platform cannot reach Phoenix's session yet")]
+   Unsupported,
    #[error("Phoenix's host names are not read yet")]
    NoHostNames,
    #[error("{path}: no answer in {} seconds", TIMEOUT.as_secs())]

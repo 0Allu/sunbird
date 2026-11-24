@@ -24,6 +24,9 @@ zip          = { workspace = true }
 android_logger         = { workspace = true }
 phoenix-runtime-mobile = { workspace = true }
 
+[target.'cfg(target_os = "ios")'.dependencies]
+phoenix-runtime-ios = { workspace = true }
+
 [target."cfg(windows)".dependencies]
 phoenix-runtime-desktop = { workspace = true }
 

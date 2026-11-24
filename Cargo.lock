@@ -680,6 +680,7 @@ dependencies = [
  "misstep",
  "phoenix-runtime",
  "phoenix-runtime-desktop",
+ "phoenix-runtime-ios",
  "phoenix-runtime-mobile",
  "phoenix-sigs",
  "serde_json",
@@ -698,6 +699,7 @@ dependencies = [
  "phoenix-hook",
  "phoenix-sigs",
  "rquickjs",
+ "rusqlite",
  "serde",
  "serde_json",
 ]
@@ -713,9 +715,21 @@ dependencies = [
  "phoenix-sigs",
  "phoenix-ui-desktop",
  "rquickjs",
- "rusqlite",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "phoenix-runtime-ios"
+version = "0.1.0"
+dependencies = [
+ "flub",
+ "log",
+ "phoenix-hook",
+ "phoenix-runtime",
+ "phoenix-sigs",
+ "rquickjs",
+ "serde",
 ]
 
 [[package]]

@@ -3,6 +3,7 @@
 //! Every Phoenix shares the `(k TEXT PRIMARY KEY NOT NULL, v BLOB NOT NULL)
 //! WITHOUT ROWID` schema, and the platform runs the query.
 
+#[cfg(feature = "sqlite")] use std::time::Duration;
 use std::{
    fs,
    path::{
@@ -11,6 +12,13 @@ use std::{
    },
 };
 
+#[cfg(feature = "sqlite")]
+use rusqlite::{
+   Connection,
+   OpenFlags,
+   params_from_iter,
+   types::ValueRef,
+};
 use serde::{
    Serialize,
    Serializer,
@@ -125,4 +133,51 @@ pub fn query(database: &Path, sql: &str, args: &[String]) -> Result<Rows, StoreE
    crate::platform()
       .ok_or(StoreError::NotStarted)?
       .query(database, sql, args)
+}
+
+/// [`query`] over a bundled SQLite, for platforms that have no SQLite of their
+/// own to reach.
+#[cfg(feature = "sqlite")]
+pub fn sqlite(database: &Path, sql: &str, args: &[String]) -> Result<Rows, StoreError> {
+   let conn = Connection::open_with_flags(
+      database,
+      OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+   )?;
+   let _ = conn.busy_timeout(Duration::from_secs(3));
+   let mut stmt = conn.prepare(sql)?;
+   let columns = stmt
+      .column_names()
+      .into_iter()
+      .map(str::to_owned)
+      .collect::<Vec<_>>();
+   let col_count = columns.len();
+
+   let mut cursor = stmt.query(params_from_iter(args.iter().map(String::as_str)))?;
+   let mut rows = Vec::new();
+   while rows.len() < ROW_LIMIT
+      && let Some(row) = cursor.next()?
+   {
+      let mut cells = Vec::with_capacity(col_count);
+      for index in 0..col_count {
+         let cell = match row.get_ref(index)? {
+            ValueRef::Null => Cell::Null,
+            ValueRef::Integer(value) => Cell::Integer(value),
+            ValueRef::Real(value) => Cell::Float(value),
+            ValueRef::Text(bytes) => Cell::Text(String::from_utf8_lossy(bytes).into_owned()),
+            ValueRef::Blob(bytes) => Cell::Blob(bytes.to_vec()),
+         };
+         cells.push(cell);
+      }
+      rows.push(cells);
+   }
+   Ok(Rows { columns, rows })
+}
+
+#[cfg(feature = "sqlite")]
+impl From<rusqlite::Error> for StoreError {
+   fn from(err: rusqlite::Error) -> Self {
+      Self::Sql {
+         message: err.to_string(),
+      }
+   }
 }

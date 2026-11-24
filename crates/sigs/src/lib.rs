@@ -10,6 +10,7 @@ use std::ffi::c_void;
 pub mod desktop;
 #[cfg(feature = "file")] pub mod file;
 pub mod http;
+pub mod ios;
 pub mod mobile;
 pub mod registry;
 
@@ -33,8 +34,10 @@ pub struct StaffField {
 }
 
 /// Libraries that carry the gateway registry, Phoenix's and the stand-in's.
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "ios")))]
 pub const LIBRARIES: &[&str] = &["liblibdiscord_wasm_host.so", "libstand_in.so"];
+#[cfg(target_os = "ios")]
+pub const LIBRARIES: &[&str] = &["PhoenixFatClient"];
 #[cfg(target_os = "windows")]
 pub const LIBRARIES: &[&str] = &["Discord.exe", "stand_in.dll"];
 

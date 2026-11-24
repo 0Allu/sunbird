@@ -63,6 +63,13 @@ pub unsafe extern "system" fn DllMain(
 
 extern "C" fn init() {
    logging();
+   #[cfg(target_os = "ios")]
+   ios::start_with_phoenix();
+   #[cfg(not(target_os = "ios"))]
+   run();
+}
+
+fn run() {
    // Unwinding out of a constructor aborts the host, so a bug here costs
    // plugins, not the app.
    match panic::catch_unwind(AssertUnwindSafe(|| start(home(), bundled()))) {
@@ -91,7 +98,12 @@ fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    phoenix_runtime_desktop::start(home, bundled)
 }
 
-#[cfg(not(any(target_os = "android", windows)))]
+#[cfg(target_os = "ios")]
+fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
+   phoenix_runtime_ios::start(home, bundled)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios", windows)))]
 fn start(_home: PathBuf, _bundled: Vec<Plugin>) -> Result<Started, Error> {
    Err(Error::NoTarget)
 }
@@ -100,7 +112,14 @@ fn home() -> PathBuf {
    if let Some(home) = env::var_os("PHOENIX_HOME") {
       return PathBuf::from(home);
    }
-   #[cfg(unix)]
+   #[cfg(target_os = "ios")]
+   {
+      // The app's sandbox, where Files and backups see `Documents`.
+      env::var_os("HOME")
+         .map_or_else(env::temp_dir, PathBuf::from)
+         .join("Documents/phoenix")
+   }
+   #[cfg(all(unix, not(target_os = "ios")))]
    {
       // /proc/self/cmdline starts with the package name, plus `:process` for
       // secondary processes.
@@ -215,6 +234,94 @@ mod unix {
    }
 }
 
+#[cfg(target_os = "ios")]
+mod ios {
+   use std::{
+      ffi::{
+         CStr,
+         c_void,
+      },
+      sync::atomic::{
+         AtomicBool,
+         Ordering,
+      },
+   };
+
+   unsafe extern "C" {
+      fn _dyld_register_func_for_add_image(added: extern "C" fn(*const c_void, isize));
+   }
+
+   static STARTED: AtomicBool = AtomicBool::new(false);
+
+   /// The loader is a dependency of the app's executable, so its constructor
+   /// can run before dyld maps `PhoenixFatClient`. dyld calls `added` for
+   /// every image already mapped and for each one mapped later.
+   pub fn start_with_phoenix() {
+      // SAFETY: `added` lives as long as the process.
+      unsafe { _dyld_register_func_for_add_image(added) };
+   }
+
+   extern "C" fn added(header: *const c_void, _slide: isize) {
+      let mut info = libc::Dl_info {
+         dli_fname: std::ptr::null(),
+         dli_fbase: std::ptr::null_mut(),
+         dli_sname: std::ptr::null(),
+         dli_saddr: std::ptr::null_mut(),
+      };
+      // SAFETY: `header` is the Mach-O header of an image dyld just added.
+      if unsafe { libc::dladdr(header, &raw mut info) } == 0 || info.dli_fname.is_null() {
+         return;
+      }
+      // SAFETY: dli_fname is NUL-terminated and lives as long as the image.
+      let path = unsafe { CStr::from_ptr(info.dli_fname) };
+      if !path.to_bytes().ends_with(b"/PhoenixFatClient") || STARTED.swap(true, Ordering::AcqRel) {
+         return;
+      }
+      // dyld holds its lock while it runs this, and starting walks its image
+      // list.
+      if let Err(err) = std::thread::Builder::new()
+         .name("phoenix-start".to_owned())
+         .spawn(super::run)
+      {
+         log::error!("phoenix could not start a thread: {err}");
+      }
+   }
+}
+
+#[cfg(target_os = "ios")]
+fn logging() {
+   struct Syslog;
+
+   impl log::Log for Syslog {
+      fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+         metadata.level() <= log::Level::Info
+      }
+
+      fn log(&self, record: &log::Record<'_>) {
+         if !self.enabled(record.metadata()) {
+            return;
+         }
+         let priority = match record.level() {
+            log::Level::Error => libc::LOG_ERR,
+            log::Level::Warn => libc::LOG_WARNING,
+            _ => libc::LOG_NOTICE,
+         };
+         let line = format!("phoenix: {}", record.args()).replace('\0', " ");
+         let Ok(line) = std::ffi::CString::new(line) else {
+            return;
+         };
+         // SAFETY: a `%s` format with one NUL-terminated argument.
+         unsafe { libc::syslog(priority, c"%s".as_ptr(), line.as_ptr()) };
+      }
+
+      fn flush(&self) {}
+   }
+
+   if log::set_logger(&Tee(Syslog)).is_ok() {
+      log::set_max_level(log::LevelFilter::Info);
+   }
+}
+
 #[cfg(target_os = "android")]
 fn logging() {
    let config = android_logger::Config::default()
@@ -226,7 +333,7 @@ fn logging() {
    }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn logging() {
    struct Stderr;
 

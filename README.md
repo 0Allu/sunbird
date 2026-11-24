@@ -78,6 +78,7 @@ The bundled plugins live in `plugins/*/src/index.ts`. CI bundles them with esbui
 | `crates/runtime` | The QuickJS plugin runtime and the `phoenix` API, shared by every platform. |
 | `crates/runtime-mobile` | The runtime's Android side: Phoenix's UI-op bridge, the Settings → Phoenix Unlocker pages and the UI patches. |
 | `crates/runtime-desktop` | The runtime's Desktop Phoenix side. |
+| `crates/runtime-ios` | The runtime's iOS side. |
 | `crates/hook`, `crates/sigs`, `crates/sigscan` | Native hooks, the gateway registry walk, a registry dump CLI. |
 | `crates/ui-mobile`, `crates/wire` | Mobile (Android/iOS) UI-op and bridge frame codecs. |
 | `crates/ui-desktop` | Desktop UI host primitives (clipboard, URLs, notifications, GPUI hooks). |

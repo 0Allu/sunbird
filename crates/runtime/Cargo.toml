@@ -13,6 +13,7 @@ memchr       = { workspace = true }
 phoenix-hook = { workspace = true }
 phoenix-sigs = { workspace = true }
 rquickjs     = { workspace = true }
+rusqlite     = { optional = true, workspace = true }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
 
@@ -22,6 +23,9 @@ rquickjs = { features = [ "bindgen" ], workspace = true }
 
 [target."cfg(unix)".dependencies]
 libc = { workspace = true }
+
+[features]
+sqlite = [ "dep:rusqlite" ]
 
 [lints]
 workspace = true

@@ -10,7 +10,6 @@ mod gpui;
 mod js;
 mod settings;
 mod staff;
-mod store;
 
 use std::{
    ffi::c_void,
@@ -128,7 +127,7 @@ impl Platform for Desktop {
    }
 
    fn query(&self, database: &Path, sql: &str, args: &[String]) -> Result<Rows, StoreError> {
-      store::query(database, sql, args)
+      phoenix_runtime::store::sqlite(database, sql, args)
    }
 
    fn discord(

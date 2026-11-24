@@ -53,6 +53,7 @@ Read this file before changing code. Every fact here cost someone hours to learn
 | `crates/runtime-mobile/src/host.rs` | Phoenix's host call, event and field numbers, read at startup from the name table in the installed APK's dex. `host::send` and `host::ask` call host modules. |
 | `crates/runtime-mobile/src/picker.rs`, `java/phx/` | File picker, toasts, clipboard and links through Phoenix's host modules, and the dialogs through a small in-memory dex. |
 | `crates/runtime-mobile/src/install.rs`, `loader.rs` | The APK self-update, and Android's installer opened on it through Discord's `FileProvider`. |
+| `crates/runtime-ios` | phoenix on iOS Phoenix, `PhoenixFatClient.framework`: gateway hooks, Foundation HTTP, and the guest's view-event bridge logged to the debug shell. No settings pages or Discord session yet. |
 | `crates/runtime-desktop` | phoenix on Desktop Phoenix (`Discord.exe`): the access gate, the HTTP transport hooks, the Sunbird pages in User Settings, message accessories and the tray. |
 | `crates/ui-mobile` | Typed codec for mobile (Android/iOS) Phoenix UI-op batches. `src/props.in` is Phoenix's prop table, `templates.json` holds captured layouts, `motion.rs` drives native springs, `mirror.rs` keeps a live copy of the view tree that host tests can drive. |
 | `crates/ui-desktop` | Desktop UI host primitives (clipboard, URLs, notifications, GPUI surface hooks). |
@@ -88,6 +89,8 @@ Read this file before changing code. Every fact here cost someone hours to learn
     its DLLs on `PATH`.
   - `cargo +stable-x86_64-pc-windows-gnu ndk -t arm64-v8a -P 28 --link-builtins build --release -p phoenix-loader`,
     then `cargo build --release -p patcher`.
+- iOS. `.github/workflows/ios.yml` builds `libphoenix.dylib` for `aarch64-apple-ios` on macOS,
+  since the SDK ships only with Xcode.
 - Site. `nu scripts/site.nu web` and `node web/tools/bundle-plugins.ts` (set `ESBUILD`
   if esbuild is not on `PATH`), then `nu scripts/fetch.nu <this checkout>` in sunbird-tools/site.
   CI deploys the same files to assets.sunbird.tools on pushes to `main`, and the site picks them up within 10 minutes.

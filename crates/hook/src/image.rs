@@ -47,10 +47,22 @@ pub(crate) fn absolute_jump(to: usize) -> [u8; ABSOLUTE_JUMP_LEN] {
 }
 
 const NT_GNU_BUILD_ID: u32 = 3;
-#[cfg(unix)] const PF_X: u32 = 1;
-#[cfg(unix)] const PF_W: u32 = 2;
-#[cfg(unix)] const PF_R: u32 = 4;
-#[cfg(unix)] const PT_ARM_EXIDX: u32 = 0x7000_0001;
+#[cfg(all(unix, not(target_vendor = "apple")))]
+const PF_X: u32 = 1;
+#[cfg(all(unix, not(target_vendor = "apple")))]
+const PF_W: u32 = 2;
+#[cfg(all(unix, not(target_vendor = "apple")))]
+const PF_R: u32 = 4;
+#[cfg(all(unix, not(target_vendor = "apple")))]
+const PT_ARM_EXIDX: u32 = 0x7000_0001;
+
+#[cfg(target_vendor = "apple")]
+unsafe extern "C" {
+   fn _dyld_image_count() -> u32;
+   fn _dyld_get_image_header(index: u32) -> *const c_void;
+   fn _dyld_get_image_name(index: u32) -> *const std::ffi::c_char;
+   fn _dyld_get_image_slide(header: *const c_void) -> isize;
+}
 
 /// The `NT_GNU_BUILD_ID` note of an ELF module, 1 to 32 bytes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -150,7 +162,165 @@ pub struct Image<'a> {
    pub pointer_width: usize,
 }
 
-#[cfg(unix)]
+#[cfg(target_vendor = "apple")]
+impl Image<'static> {
+   /// Every image dyld has loaded. `__TEXT` is split into its sections, since
+   /// it maps strings and constants executable beside the code, and
+   /// `__DATA_CONST`, which dyld makes read-only after fixups, reads as not
+   /// writable.
+   ///
+   /// # Safety
+   ///
+   /// The segments borrow mapped memory, which dyld keeps mapped while an image
+   /// is loaded.
+   #[must_use]
+   pub unsafe fn loaded() -> Vec<Self> {
+      const MH_MAGIC_64: u32 = 0xFEED_FACF;
+      const LC_SEGMENT_64: u32 = 0x19;
+      const LC_UUID: u32 = 0x1B;
+      const SEGMENT_COMMAND_SIZE: usize = 72;
+      const SECTION_SIZE: usize = 80;
+      const INSTRUCTIONS: u32 = 0x8000_0400;
+      const READ_ONLY_AFTER_FIXUPS: [&[u8]; 2] = [b"__DATA_CONST", b"__AUTH_CONST"];
+
+      // SAFETY: every read below is inside the header and load commands of an
+      // image dyld reported, which stay mapped.
+      let u32_at = |at: usize| unsafe { std::ptr::read_unaligned(at as *const u32) };
+      let word_at = |at: usize| unsafe { std::ptr::read_unaligned(at as *const usize) };
+      let name_at = |at: usize| {
+         // SAFETY: as above, a 16-byte name field.
+         let name = unsafe { slice::from_raw_parts(at as *const u8, 16) };
+         &name[..name.iter().position(|&byte| byte == 0).unwrap_or(16)]
+      };
+
+      // SAFETY: a plain query.
+      let count = unsafe { _dyld_image_count() };
+      (0..count)
+         .filter_map(|index| {
+            // SAFETY: index is below the count dyld reported.
+            let header = unsafe { _dyld_get_image_header(index) };
+            if header.is_null() || u32_at(header as usize) != MH_MAGIC_64 {
+               return None;
+            }
+            // SAFETY: a header dyld reported.
+            let slide = unsafe { _dyld_get_image_slide(header) };
+            // SAFETY: index is below the count dyld reported.
+            let name = unsafe { _dyld_get_image_name(index) };
+            let path = if name.is_null() {
+               String::new()
+            } else {
+               // SAFETY: dyld returns a NUL-terminated path.
+               unsafe { CStr::from_ptr(name) }
+                  .to_string_lossy()
+                  .into_owned()
+            };
+            let mut build_id = None;
+            let mut segments = Vec::new();
+            let mut push = |addr: usize, len: usize, executable: bool, writable: bool| {
+               let addr = addr.wrapping_add_signed(slide);
+               // SAFETY: dyld maps the segment for the image's lifetime.
+               let bytes = unsafe { slice::from_raw_parts(addr as *const u8, len) };
+               segments.push(Segment {
+                  addr,
+                  bytes: Cow::Borrowed(bytes),
+                  executable,
+                  writable,
+               });
+            };
+
+            let base = header as usize;
+            let mut command = base + 32;
+            for _ in 0..u32_at(base + 16) {
+               let kind = u32_at(command);
+               if kind == LC_SEGMENT_64 {
+                  let (vmaddr, vmsize) = (word_at(command + 24), word_at(command + 32));
+                  let initprot = u32_at(command + 60).cast_signed();
+                  let readable = vmsize != 0 && initprot & libc::PROT_READ != 0;
+                  if readable && initprot & libc::PROT_EXEC != 0 {
+                     for at in 0..u32_at(command + 64) as usize {
+                        let section = command + SEGMENT_COMMAND_SIZE + at * SECTION_SIZE;
+                        let flags = u32_at(section + 64);
+                        let (addr, size) = (word_at(section + 32), word_at(section + 40));
+                        push(addr, size, flags & INSTRUCTIONS != 0, false);
+                     }
+                  } else if readable {
+                     let writable = initprot & libc::PROT_WRITE != 0
+                        && !READ_ONLY_AFTER_FIXUPS.contains(&name_at(command + 8));
+                     push(vmaddr, vmsize, false, writable);
+                  }
+               } else if kind == LC_UUID && build_id.is_none() {
+                  // SAFETY: LC_UUID carries a 16-byte UUID at offset 8.
+                  let uuid = unsafe { slice::from_raw_parts((command + 8) as *const u8, 16) };
+                  build_id = BuildId::from_bytes(uuid);
+               }
+               command += u32_at(command + 4) as usize;
+            }
+            Some(Image {
+               path,
+               build_id,
+               segments,
+               eh_frame_hdr: None,
+               arm_exidx: None,
+               pdata: None,
+               pointer_width: size_of::<usize>(),
+            })
+         })
+         .collect()
+   }
+
+   /// Atomically swaps each `(slot, value)` pair in this image and returns the
+   /// values the slots held. Pages of a read-only segment are made writable for
+   /// the write and read-only again afterwards.
+   ///
+   /// # Safety
+   ///
+   /// Every slot is a pointer-aligned word in this image, and code that reads
+   /// it accepts either value.
+   pub unsafe fn swap_words(&self, writes: &[(usize, usize)]) -> Result<Vec<usize>, crate::Error> {
+      // SAFETY: sysconf has no preconditions.
+      let page_size =
+         usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap_or(16384);
+      let mut pages = writes
+         .iter()
+         .filter(|&&(slot, _)| {
+            !self
+               .segments
+               .iter()
+               .any(|segment| segment.writable && segment.contains(slot))
+         })
+         .map(|&(slot, _)| slot & !(page_size - 1))
+         .collect::<Vec<usize>>();
+      pages.sort_unstable();
+      pages.dedup();
+      let protect = |page: usize, prot: c_int| {
+         // SAFETY: `page` is the page base of a mapped slot.
+         if unsafe { libc::mprotect(page as *mut c_void, page_size, prot) } == 0 {
+            Ok(())
+         } else {
+            Err(crate::Error::Protect {
+               addr:   page,
+               source: std::io::Error::last_os_error(),
+            })
+         }
+      };
+      for &page in &pages {
+         protect(page, libc::PROT_READ | libc::PROT_WRITE)?;
+      }
+      let previous = writes
+         .iter()
+         .map(|&(slot, value)| {
+            // SAFETY: the caller guarantees aligned slots, now writable.
+            unsafe { AtomicUsize::from_ptr(slot as *mut usize) }.swap(value, Ordering::AcqRel)
+         })
+         .collect();
+      for &page in &pages {
+         protect(page, libc::PROT_READ)?;
+      }
+      Ok(previous)
+   }
+}
+
+#[cfg(all(unix, not(target_vendor = "apple")))]
 impl Image<'static> {
    /// Every module `dl_iterate_phdr` reports.
    ///
@@ -230,7 +400,7 @@ impl Image<'static> {
    }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_vendor = "apple")))]
 impl Image<'static> {
    /// Writes each `(slot, value)` pair into this module's mapped memory and
    /// returns the values the slots held. Pages under `PT_GNU_RELRO` are made
@@ -246,7 +416,7 @@ impl Image<'static> {
    }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_vendor = "apple")))]
 /// Atomically swaps each `(slot, value)` pair in mapped memory and returns the
 /// values the slots held. Read-only pages are made writable for the write and
 /// get their protection back afterwards.
@@ -304,7 +474,7 @@ pub unsafe fn swap_words(writes: &[(usize, usize)]) -> Result<Vec<usize>, crate:
    Ok(previous)
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_vendor = "apple")))]
 /// Protection of the mapping holding `addr`, from `/proc/self/maps`.
 fn protection(maps: &str, addr: usize) -> Option<c_int> {
    maps.lines().find_map(|line| {
@@ -354,12 +524,8 @@ pub(crate) mod win32 {
          read: *mut usize,
       ) -> i32;
       pub fn GetSystemInfo(info: *mut SystemInfo);
-      pub fn VirtualAlloc(
-         addr: *const c_void,
-         size: usize,
-         kind: u32,
-         protect: u32,
-      ) -> *mut c_void;
+      pub fn VirtualAlloc(addr: *const c_void, size: usize, kind: u32, protect: u32)
+      -> *mut c_void;
       pub fn VirtualProtect(
          addr: *mut c_void,
          size: usize,
@@ -442,7 +608,8 @@ impl Image<'static> {
          .to_string_lossy()
          .into_owned();
 
-      // SAFETY: a valid PE module starts with an IMAGE_DOS_HEADER (at least 64 bytes).
+      // SAFETY: a valid PE module starts with an IMAGE_DOS_HEADER (at least 64
+      // bytes).
       let dos = unsafe { slice::from_raw_parts(base as *const u8, 64) };
       if &dos[0..2] != b"MZ" {
          return None;
@@ -460,7 +627,8 @@ impl Image<'static> {
       let magic = u16::from_le_bytes(opt.get(0..2)?.try_into().ok()?);
       let (pointer_width, pdata) = match magic {
          0x020B => {
-            // PE32+: Exception directory is data directory index 3 at optional header offset 112 + 3*8.
+            // PE32+: Exception directory is data directory index 3 at optional
+            // header offset 112 + 3*8.
             let pdata = opt.get(136..144).and_then(|dir| {
                let rva = usize::try_from(u32::from_le_bytes(dir[0..4].try_into().ok()?)).ok()?;
                let len = usize::try_from(u32::from_le_bytes(dir[4..8].try_into().ok()?)).ok()?;
@@ -867,8 +1035,9 @@ impl Image<'_> {
       self.pdata_bounds(image_base, base, len / 12, addr)
    }
 
-   /// Binary search over PE64 `.pdata`, whose `count` `RUNTIME_FUNCTION` entries
-   /// are 12 bytes (`begin_rva`, `end_rva`, `unwind_rva`), sorted by `begin_rva`.
+   /// Binary search over PE64 `.pdata`, whose `count` `RUNTIME_FUNCTION`
+   /// entries are 12 bytes (`begin_rva`, `end_rva`, `unwind_rva`), sorted by
+   /// `begin_rva`.
    fn pdata_bounds(
       &self,
       image_base: usize,
