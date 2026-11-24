@@ -55,7 +55,7 @@ Read this file before changing code. Every fact here cost someone hours to learn
 | `crates/ui-desktop` | Desktop UI host primitives (clipboard, URLs, notifications, GPUI surface hooks). |
 | `crates/wire` | Tagged values and bridge frames (`HostCall`, `DispatchEvent`). |
 | `crates/hook` | Image scanner, `swap_words`, ShadowHook and bytehook (linked, unused). |
-| `crates/sigs`, `crates/sigscan` | The gateway registry walk and handler ABI, and a CLI that dumps the registry of a library. |
+| `crates/sigs`, `crates/sigscan` | The gateway registry walk and handler ABI, and a CLI that dumps the registry of a library and looks up strings, references, functions and disassembly in `Discord.exe`. |
 | `crates/patcher` | Patches the split APKs and signs them, as a library with a CLI. One APK merged from the splits or each split signed on its own. |
 | `crates/patcher-web` | `crates/patcher` as wasm for the site. |
 | `crates/stand-in*` | A fake gateway library and a demo, to test hooks without Discord. |
@@ -107,6 +107,16 @@ Read this file before changing code. Every fact here cost someone hours to learn
 4. `.\scripts\dev.ps1` builds with the `dev-fast` profile (about 15 s incremental), patches,
    installs and launches. `-SkipBuild` only rebundles plugins and repatches. `-Release` makes a
    release build.
+5. Desktop Phoenix. `.\scripts\dev.ps1 -Desktop` builds the DLL, copies the plugins and restarts
+   Discord through the injector. Every debug-shell switch above takes `-Desktop` and skips adb.
+   Desktop has no UI-op stream, so `-Ops` and `-Tree` stay Android-only. Reverse it with:
+   - `.\scripts\dev.ps1 -Sigscan strings|refs|dis ...` on the `Discord.exe` file. A panic
+     message or event name usually leads to the function that uses it.
+   - `phoenix.native` in `-Eval` (the console only, never plugins): `strings`, `refs`, `fn`, `dis`,
+     `scan`, `read`, `readU64`, `readStr`, and `hook(addr, limit)` / `unhook(id)` / `hooks()`.
+     A hook logs each call's `rcx rdx r8 r9`, the bytes behind them and the caller to `-Events`.
+     Addresses print as RVAs like `+0x7711630`, the same `sigscan` prints.
+   - `-Events` also shows every gateway event by name and size and Discord's API requests by path.
 
 The debug shell answers anyone on the phone's loopback, and `/eval` runs JS with the Discord
 session. Leave it off outside development.

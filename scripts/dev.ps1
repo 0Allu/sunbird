@@ -15,6 +15,9 @@ Fast build, patch, install, hot-reload, and live debug CLI for Phoenix Unlock.
 .\scripts\dev.ps1 -Test               # Run fast desktop Rust unit tests (phoenix-ui-mobile, phoenix-ui-desktop, phoenix-wire)
 .\scripts\dev.ps1 -Desktop            # Same loop for Desktop Phoenix: build, copy plugins, restart Discord through the injector
 .\scripts\dev.ps1 -Desktop -Logs      # Any debug-shell command above, against Desktop Phoenix (no adb)
+.\scripts\dev.ps1 -Desktop -Events MESSAGE  # Gateway events, Discord's API requests and native hook hits on desktop
+.\scripts\dev.ps1 -Desktop -Eval "phoenix.native.strings('MESSAGE_CREATE')"
+.\scripts\dev.ps1 -Sigscan strings "some text"   # Offline Discord.exe lookups: strings, refs, dis
 #>
 [CmdletBinding()]
 param(
@@ -31,8 +34,11 @@ param(
    [switch]$Events,
    [switch]$Tree,
    [switch]$Clear,
+   [switch]$Sigscan,
    [Parameter(Position = 0)]
-   [string]$Arg
+   [string]$Arg,
+   [Parameter(Position = 1, ValueFromRemainingArguments = $true)]
+   [string[]]$Rest
 )
 
 $ErrorActionPreference = "Stop"
@@ -93,6 +99,19 @@ if ($Clear) {
 if ($Logs) {
    Invoke-DebugGet "/logs"
    exit 0
+}
+if ($Sigscan) {
+   $tools = Join-Path (Split-Path $TargetDir -Parent) "wintools"
+   if (Test-Path $tools) { $env:PATH = "$tools;$env:PATH" }
+   $env:CARGO_TARGET_DIR = $TargetDir
+   & cargo +stable-x86_64-pc-windows-gnu build -q --release -p sigscan
+   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+   $exe = Join-Path $env:LOCALAPPDATA "DiscordPhoenix\app\Discord.exe"
+   $sigscanArgs = @($exe)
+   if ($Arg) { $sigscanArgs += $Arg }
+   if ($Rest) { $sigscanArgs += $Rest }
+   & (Join-Path $TargetDir "release\sigscan.exe") @sigscanArgs
+   exit $LASTEXITCODE
 }
 if ($Eval) {
    Invoke-DebugPost "/eval" $Eval
