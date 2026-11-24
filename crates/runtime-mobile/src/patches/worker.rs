@@ -103,8 +103,8 @@ pub enum Job {
       place:        Place,
       index:        u32,
    },
-   /// Show a menu sheet; the chosen row's index, or -1, goes to `answer`,
-   /// and -2 when no sheet can be drawn.
+   /// Show a menu sheet. The chosen row's index, or -1, goes to `answer`,
+   /// which is dropped unanswered when no sheet can be drawn.
    Menu {
       title:  Option<String>,
       body:   Option<SheetBody>,

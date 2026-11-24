@@ -413,9 +413,6 @@ struct Patches {
    tab_parts:              HashMap<i32, (i32, i32)>,
    /// Open menu sheets and who waits for them.
    menus:                  HashMap<u32, Sender<i32>>,
-   /// Last seen parent container that hosts sheets, kept so sheets can open
-   /// even after a message action sheet dismisses.
-   sheet_host:             Option<i32>,
    /// Pagers whose own tab labels we color, since a plugin tab was opened:
    /// their animation stops at Phoenix's last tab and would light it up.
    static_tabs:            HashSet<i32>,

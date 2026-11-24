@@ -24,9 +24,6 @@
 !crates/*/src/
 !crates/*/src/**/
 !crates/*/src/**/*.rs
-!crates/runtime-mobile/java/
-!crates/runtime-mobile/java/phx/
-!crates/runtime-mobile/java/phx/*.java
 !crates/runtime/phoenix.d.ts
 !crates/ui-desktop/src/dashboard.html
 !crates/ui-mobile/src/props.in

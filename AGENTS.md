@@ -29,9 +29,8 @@ Read this file before changing code. Every fact here cost someone hours to learn
 - Typed boundaries. Plugins get opaque handles (`phoenix.gateway.messageCreate`), not strings
   like `"MESSAGE_CREATE"`. Read lists of events, props and handlers live from the binary. Never
   add a hand-maintained list file.
-- No committed build output. `picker.dex` is built by `crates/runtime-mobile/build.rs`,
-  `web/plugins/lib*.so` and `web/pkg/` by `scripts/site.nu`, plugin bundles by
-  `web/tools/bundle-plugins.ts`.
+- No committed build output. `web/plugins/lib*.so` and `web/pkg/` are built by
+  `scripts/site.nu`, plugin bundles by `web/tools/bundle-plugins.ts`.
   The Frida gadgets in `web/plugins/frida-*` are the one exception, kept for x86 WSA debugging.
 - Test on a device before pushing. A clean build proves nothing about the bridge.
 
@@ -51,7 +50,7 @@ Read this file before changing code. Every fact here cost someone hours to learn
 | `crates/runtime-mobile/src/patches/` | UI patch targets, slash commands, profile tabs, emoji picker. |
 | `crates/runtime-mobile/src/discord.rs` | Plugin requests to Discord through Phoenix's own `Networking` module. |
 | `crates/runtime-mobile/src/host.rs` | Phoenix's host call, event and field numbers, read at startup from the name table in the installed APK's dex. `host::send` and `host::ask` call host modules. |
-| `crates/runtime-mobile/src/picker.rs`, `java/phx/` | File picker, toasts, clipboard and links through Phoenix's host modules, and the dialogs through a small in-memory dex. |
+| `crates/runtime-mobile/src/picker.rs` | File picker, toasts, clipboard and links through Phoenix's host modules. |
 | `crates/runtime-mobile/src/install.rs`, `loader.rs` | The APK self-update, and Android's installer opened on it through Discord's `FileProvider`. |
 | `crates/runtime-ios` | phoenix on iOS Phoenix, `PhoenixFatClient.framework`: gateway hooks, Foundation HTTP, and the guest's view-event bridge logged to the debug shell. No settings pages or Discord session yet. |
 | `crates/runtime-desktop` | phoenix on Desktop Phoenix (`Discord.exe`): the access gate, the HTTP transport hooks, the Sunbird pages in User Settings, message accessories and the tray. |

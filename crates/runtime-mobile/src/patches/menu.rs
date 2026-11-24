@@ -41,40 +41,23 @@ pub struct SheetBody {
    pub highlight: bool,
 }
 
-/// Shows a menu sheet like the message long-press one and waits for the
-/// choice: the row's index, -1 when it was swiped away, or `None` when no
-/// such sheet can be drawn yet.
-pub fn menu(title: Option<String>, items: Vec<MenuItem>) -> Option<i32> {
+/// Shows a menu sheet like the message long-press one, with `body` over the
+/// rows when given, and waits for the choice: the row's index, -1 when it was
+/// swiped away, or `None` before Phoenix's view tree is up.
+pub fn show(title: Option<String>, body: Option<SheetBody>, items: Vec<MenuItem>) -> Option<i32> {
    let (answer, receiver) = channel();
    queue(Job::Menu {
       title,
-      body: None,
+      body,
       items,
       answer,
    });
-   match receiver.recv() {
-      Ok(-2) | Err(_) => None,
-      Ok(index) => Some(index),
-   }
-}
-
-/// Shows a scrollable text/code viewer sheet with optional action rows.
-pub fn sheet(title: Option<String>, body: SheetBody, items: Vec<MenuItem>) -> Option<i32> {
-   let (answer, receiver) = channel();
-   queue(Job::Menu {
-      title,
-      body: Some(body),
-      items,
-      answer,
-   });
-   match receiver.recv() {
-      Ok(-2) | Err(_) => None,
-      Ok(index) => Some(index),
-   }
+   receiver.recv().ok()
 }
 
 impl Patches {
-   /// Shows a menu sheet over the top sheet, like the message long-press one.
+   /// Shows a menu sheet over everything, like the message long-press one.
+   /// Phoenix stacks a sheet under the root above every other sheet.
    pub fn open_menu(
       &mut self,
       title: Option<&str>,
@@ -85,12 +68,9 @@ impl Patches {
       static NEXT: AtomicU64 = AtomicU64::new(1);
       #[expect(clippy::cast_possible_truncation, reason = "menus are few")]
       let menu = NEXT.fetch_add(1, Ordering::Relaxed) as u32;
-      let host = self
-         .mirror
-         .newest_sheet()
-         .and_then(|sheet| self.mirror.parent(sheet))
-         .and_then(|outer| self.mirror.parent(outer))
-         .or_else(|| self.sheet_host.filter(|host| self.mirror.has_kids(*host)));
+      let Some(host) = self.mirror.root() else {
+         return Vec::new();
+      };
       let rows = items
          .into_iter()
          .enumerate()
@@ -110,10 +90,6 @@ impl Patches {
       let draft = self
          .templates
          .menu(title, body, rows, &Handler::Choice { menu, index: -1 });
-      let (Some(host), Some(draft)) = (host, draft) else {
-         let _ = answer.send(-2);
-         return Vec::new();
-      };
       let mut out = Vec::new();
       let mut all = Vec::new();
       let root = self.emit(draft, None, &mut out, &mut all);

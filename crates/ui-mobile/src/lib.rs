@@ -474,7 +474,8 @@ pub struct Node {
    pub src:   Option<u32>,
 }
 
-/// Phoenix's own settings layouts, captured from versionCode 356207.
+/// Phoenix's own settings layouts, captured from versionCode 356207, and the
+/// message menu's sheet down to its groups, captured from 357200.
 #[derive(Debug)]
 pub struct Templates {
    pub section:       Node,
@@ -486,6 +487,7 @@ pub struct Templates {
    pub value_row:     Node,
    pub input:         Node,
    pub page:          Node,
+   pub sheet:         Node,
    pub track_off:     Props,
    pub knob_off:      Props,
    pub track_worklet: Worklet,
@@ -504,6 +506,7 @@ struct RawTemplates {
    value_row:     RawNode,
    input:         RawNode,
    page:          RawNode,
+   sheet:         RawNode,
    track_off:     Vec<RawEntry>,
    knob_off:      Vec<RawEntry>,
    track_worklet: Vec<i32>,
@@ -636,6 +639,7 @@ pub fn templates() -> &'static Templates {
          value_row:     raw.value_row.into(),
          input:         raw.input.into(),
          page:          raw.page.into(),
+         sheet:         raw.sheet.into(),
          track_off:     props(raw.track_off),
          knob_off:      props(raw.knob_off),
          track_worklet: Worklet::try_from(raw.track_worklet)

@@ -373,22 +373,14 @@ fn add_sheets<'js>(ctx: &Ctx<'js>, ui: &Object<'js>) -> rquickjs::Result<()> {
             ));
          }
          in_background(&ctx, move || {
-            let labels = items
-               .iter()
-               .map(|item| item.label.clone())
-               .collect::<Vec<_>>();
-            // A list goes in a sheet like Discord's own menus when one can be
-            // drawn.
-            if message.is_none()
-               && let Some(index) = patches::menu::menu(title.clone(), items)
-            {
-               return Settlement::Int(Ok(index));
-            }
-            Settlement::Int(crate::picker::choose(
-               title.as_deref(),
-               message.as_deref(),
-               &labels,
-            ))
+            let body = message.map(|text| {
+               patches::menu::SheetBody {
+                  text,
+                  monospace: false,
+                  highlight: false,
+               }
+            });
+            Settlement::Int(patches::menu::show(title, body, items).ok_or_else(not_drawn))
          })
       })?,
    )?;
@@ -405,28 +397,20 @@ fn add_sheets<'js>(ctx: &Ctx<'js>, ui: &Object<'js>) -> rquickjs::Result<()> {
             .unwrap_or_default();
          let items = parse_menu_items(&options)?;
          in_background(&ctx, move || {
-            let labels = items
-               .iter()
-               .map(|item| item.label.clone())
-               .collect::<Vec<_>>();
             let body = patches::menu::SheetBody {
-               text: text.clone(),
+               text,
                monospace,
                highlight,
             };
-            if let Some(index) = patches::menu::sheet(title.clone(), body, items) {
-               return Settlement::Int(Ok(index));
-            }
-            Settlement::Int(crate::picker::view(
-               title.as_deref(),
-               &text,
-               monospace,
-               &labels,
-            ))
+            Settlement::Int(patches::menu::show(title, Some(body), items).ok_or_else(not_drawn))
          })
       })?,
    )?;
    Ok(())
+}
+
+fn not_drawn() -> String {
+   "Phoenix's view tree is not up yet".to_owned()
 }
 
 fn add_notify<'js>(ctx: &Ctx<'js>, plugin: &str, ui: &Object<'js>) -> rquickjs::Result<()> {

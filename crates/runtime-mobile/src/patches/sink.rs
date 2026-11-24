@@ -358,14 +358,6 @@ impl Patches {
             self.seen.profile_user = profile_user(ops);
          }
       }
-      if let Some(host) = self
-         .mirror
-         .newest_sheet()
-         .and_then(|sheet| self.mirror.parent(sheet))
-         .and_then(|outer| self.mirror.parent(outer))
-      {
-         self.sheet_host = Some(host);
-      }
       if self.suggestions.scroll.is_some() {
          self.learn_suggestion_row(created);
       }

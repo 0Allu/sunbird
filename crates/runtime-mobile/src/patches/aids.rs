@@ -10,15 +10,6 @@ pub const SUGGESTIONS: &str = "suggestions";
 pub const AVATAR: &str = "Avatar";
 /// The emoji picker under the message box. Reactions open a sheet of their own.
 pub const EMOJI_SHEET: &str = "xp-sheet";
-/// Rows of the message long-press sheet whose layout plugin rows copy.
-pub const MESSAGE_ROWS: [&str; 6] = [
-   "message.actions.reply",
-   "message.actions.copy_text",
-   "message.actions.copy_id",
-   "message.actions.mark_unread",
-   "message.actions.copy_link",
-   "message.actions.mention",
-];
 pub const MESSAGE_ROW_PREFIX: &str = "message.actions.";
 
 /// The part of a message a `message.<part>:<id>` id names.

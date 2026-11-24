@@ -9,6 +9,7 @@ use phoenix_ui_mobile::{
       Mirror,
    },
    prop,
+   templates,
 };
 use phoenix_wire::Value;
 
@@ -205,9 +206,6 @@ pub struct Templates {
    header:     Option<Node>,
    composer:   Option<Node>,
    timestamp:  Option<Node>,
-   row:        Option<Node>,
-   group:      Option<(ViewKind, Props)>,
-   divider:    Option<Node>,
    profile:    Option<Node>,
    /// A profile tab that is not selected, and the page width.
    tab:        Option<Node>,
@@ -216,9 +214,6 @@ pub struct Templates {
    page_text:  Option<i64>,
    /// The selected tab's text color.
    tab_color:  Option<i64>,
-   /// The message long-press sheet from its outer view down to the node
-   /// holding its groups, without animation or ids, for plugin menus.
-   sheet:      Option<Vec<(ViewKind, Props)>>,
    /// The icons of the message menu's rows, by their accessibility id.
    icons:      std::collections::HashMap<String, String>,
 }
@@ -231,15 +226,6 @@ pub(super) struct MenuRow {
    pub(super) press:  Handler,
    pub(super) id:     Option<String>,
 }
-
-/// Props that tie a node to Phoenix's own animations or to its identity.
-const BOUND: [&str; 5] = [
-   "viewMotion",
-   "worklet",
-   "portalSlot",
-   "accessibilityId",
-   "accessibilityLabel",
-];
 
 impl Templates {
    pub fn learn(&mut self, mirror: &Mirror, id: i32, aid: &str, created: &Created<'_>) {
@@ -255,11 +241,7 @@ impl Templates {
          {
             self.timestamp = mirror.snapshot(id, created);
          },
-         aids::MESSAGE_ACTIONS => self.learn_sheet(mirror, id, created),
          _ if aid.starts_with(aids::MESSAGE_ROW_PREFIX) => {
-            if aids::MESSAGE_ROWS.contains(&aid) {
-               self.learn_row(mirror, id, created);
-            }
             if let Some(icon) = mirror.snapshot(id, created).as_ref().and_then(first_image) {
                self.icons.insert(aid.to_owned(), icon);
             }
@@ -268,81 +250,22 @@ impl Templates {
       }
    }
 
-   fn learn_row(&mut self, mirror: &Mirror, id: i32, created: &Created<'_>) {
-      let Some(row) = mirror.snapshot(id, created) else {
-         return;
-      };
-      if row.kids.first().is_none_or(|inner| inner.kids.len() < 2) {
-         return;
-      }
-      let group = mirror.parent(id);
-      let siblings = group.map_or(&[][..], |group| mirror.kids(group));
-      let next = siblings
-         .iter()
-         .position(|sibling| *sibling == id)
-         .and_then(|at| siblings.get(at + 1))
-         .copied();
-      if let Some(divider) = next
-         .filter(|next| mirror.accessibility_id(*next).is_none())
-         .and_then(|next| mirror.snapshot(next, created))
-      {
-         self.divider = Some(divider);
-      }
-      if let Some((kind, props)) = group.and_then(|group| created.get(&group)) {
-         self.group = Some(((*kind).clone(), (*props).clone()));
-      }
-      self.row = Some(row);
-   }
-
-   fn learn_sheet(&mut self, mirror: &Mirror, root: i32, created: &Created<'_>) {
-      let Some(&groups) = mirror.kids(root).last() else {
-         return;
-      };
-      let Some(sheet) = mirror.sheet_of(root) else {
-         return;
-      };
-      let top = mirror.parent(sheet).unwrap_or(sheet);
-      let mut path = vec![groups];
-      let mut node = groups;
-      while node != top && path.len() < 24 {
-         let Some(parent) = mirror.parent(node) else {
-            return;
-         };
-         path.push(parent);
-         node = parent;
-      }
-      path.reverse();
-      let chain = path
-         .iter()
-         .map(|node| {
-            let (kind, props) = created.get(node)?;
-            let props = props
-               .iter()
-               .filter(|(key, _)| !key.name().is_some_and(|name| BOUND.contains(&name)))
-               .cloned()
-               .collect();
-            Some(((*kind).clone(), props))
-         })
-         .collect::<Option<Vec<_>>>();
-      if chain.is_some() {
-         self.sheet = chain;
-      }
-   }
-
    /// A menu sheet like the message long-press one: `title` over optional
-   /// `body` and `rows`. `None` until that sheet was seen.
+   /// `body` and `rows`.
    pub(super) fn menu(
       &self,
       title: Option<&str>,
       body: Option<&SheetBody>,
       rows: Vec<MenuRow>,
       dismiss: &Handler,
-   ) -> Option<Draft> {
-      let chain = self.sheet.as_ref()?;
+   ) -> Draft {
       let mut kids = Vec::new();
       if let Some(title) = title
-         && let Some(row) = &self.row
-         && let Some(sample) = row.kids.first().and_then(|inner| inner.kids.get(1))
+         && let Some(sample) = templates()
+            .button_row
+            .kids
+            .first()
+            .and_then(|inner| inner.kids.get(1))
       {
          let mut head = text(&sample.props, &Rendered {
             text:  title.to_owned(),
@@ -415,23 +338,14 @@ impl Templates {
          kids.push(box_view);
       }
       kids.extend(self.group(rows));
-      let mut node: Option<Draft> = None;
-      for (kind, props) in chain.iter().rev() {
-         let mut draft = Draft {
-            kind:  kind.clone(),
-            props: props.clone(),
-            kids:  node
-               .take()
-               .map_or_else(|| std::mem::take(&mut kids), |inner| vec![inner]),
-            press: None,
-            src:   None,
-         };
-         if *kind == ViewKind::Sheet {
-            draft.press = Some(dismiss.clone());
-         }
-         node = Some(draft);
+      let mut sheet = Draft::from_node(&templates().sheet);
+      sheet.press = Some(dismiss.clone());
+      let mut groups = &mut sheet;
+      while !groups.kids.is_empty() {
+         groups = &mut groups.kids[0];
       }
-      node
+      groups.kids = kids;
+      sheet
    }
 
    fn learn_tabs(&mut self, mirror: &Mirror, pager: i32, created: &Created<'_>) {
@@ -667,13 +581,11 @@ impl Templates {
 
    /// `rows` in one rounded group, styled like the message menu's rows.
    fn group(&self, rows: Vec<MenuRow>) -> Vec<Draft> {
-      let (Some(row), Some((group_kind, group_props))) = (&self.row, &self.group) else {
-         return Vec::new();
-      };
+      let layouts = templates();
       let count = rows.len();
       let mut kids = Vec::new();
       for (index, entry) in rows.into_iter().enumerate() {
-         let mut draft = Draft::from_node(row);
+         let mut draft = Draft::from_node(&layouts.button_row);
          for corner in [
             Prop::RADIUS,
             Prop::RADIUS_TOP_LEFT,
@@ -699,6 +611,8 @@ impl Templates {
             Some(Value::Str(entry.label.clone())),
          );
          let inner = &mut draft.kids[0];
+         // The settings row ends in a chevron that menu rows lack.
+         inner.kids.truncate(2);
          // An icon without a scheme names a message menu row to borrow it from.
          let icon = match entry.icon.as_deref() {
             Some(icon) if !icon.contains("://") => {
@@ -714,23 +628,17 @@ impl Templates {
             inner.kids[0].set(Prop::TINT, Some(Value::I64(DANGER)));
          }
          draft.press = Some(entry.press);
-         if index > 0
-            && let Some(divider) = &self.divider
-         {
-            kids.push(Draft::from_node(divider));
+         if index > 0 {
+            kids.push(Draft::from_node(&layouts.divider));
          }
          kids.push(draft);
       }
       if kids.is_empty() {
          return Vec::new();
       }
-      vec![Draft {
-         kind: group_kind.clone(),
-         props: group_props.clone(),
-         kids,
-         press: None,
-         src: None,
-      }]
+      let mut group = Draft::from_node(&layouts.group);
+      group.kids = kids;
+      vec![group]
    }
 
    /// Resolves a menu icon name: a URI with `://` passes through; an

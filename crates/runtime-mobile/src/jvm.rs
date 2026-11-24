@@ -156,7 +156,6 @@ macro_rules! class {
 }
 
 pub const STRING: Class = class!(java::lang::String);
-pub const OBJECT: Class = class!(java::lang::Object);
 pub const CLASS: Class = class!(java::lang::Class);
 pub const CLASS_LOADER: Class = class!(java::lang::ClassLoader);
 

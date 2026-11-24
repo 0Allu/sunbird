@@ -293,12 +293,6 @@ impl Mirror {
          .find_map(|kid| self.find_down(*kid, test, depth - 1))
    }
 
-   /// The sheet created last, which is on top.
-   #[must_use]
-   pub fn newest_sheet(&self) -> Option<i32> {
-      self.sheets.iter().max().copied()
-   }
-
    /// The outermost live `Navigator` (not inside a sheet) that currently holds
    /// pages — Phoenix's root navigator above `main-tabs` and chat.
    #[must_use]
