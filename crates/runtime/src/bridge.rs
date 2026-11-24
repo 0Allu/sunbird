@@ -351,7 +351,7 @@ unsafe fn method_kind(env: *mut JNIEnv, obj: jobject, method: jmethodID) -> Meth
             env,
             jni!(env, CallObjectMethodA, reflected, method_name, ptr::null()),
          )?;
-         let class_class = CLASS.find(env);
+         let class_class = CLASS.find(env).ok()?;
          let class_name = jni!(env, GetMethodID, class_class, get_name, signature);
          if class_name.is_null() {
             return None;
@@ -681,7 +681,7 @@ unsafe fn load_class(env: *mut JNIEnv, anchor: jobject, class: Class) -> Option<
    // call that uses it.
    unsafe {
       let anchor_class = jni!(env, GetObjectClass, anchor);
-      let class_class = CLASS.find(env);
+      let class_class = CLASS.find(env).ok()?;
       let get_loader = jni!(
          env,
          GetMethodID,
@@ -704,7 +704,7 @@ unsafe fn load_class(env: *mut JNIEnv, anchor: jobject, class: Class) -> Option<
          clear_exception(env);
          return None;
       }
-      let loader_class = CLASS_LOADER.find(env);
+      let loader_class = CLASS_LOADER.find(env).ok()?;
       let load = jni!(
          env,
          GetMethodID,

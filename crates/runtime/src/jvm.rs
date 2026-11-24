@@ -77,14 +77,20 @@ impl Class {
    }
 
    /// The class through `FindClass`, which only sees the boot and system
-   /// class loaders. Null with an exception pending when it is missing.
+   /// class loaders.
    ///
    /// # Safety
    ///
    /// `env` is the current thread's `JNIEnv`.
-   pub unsafe fn find(self, env: *mut JNIEnv) -> jclass {
+   pub unsafe fn find(self, env: *mut JNIEnv) -> Result<jclass, Missing> {
       // SAFETY: forwarded from the caller, and the name is NUL-terminated.
-      unsafe { jni!(env, FindClass, self.slashed.as_ptr()) }
+      let class = unsafe { jni!(env, FindClass, self.slashed.as_ptr()) };
+      if class.is_null() {
+         // SAFETY: forwarded from the caller.
+         unsafe { clear_exception(env) };
+         return Err(Missing(self.dotted.to_string_lossy().into_owned()));
+      }
+      Ok(class)
    }
 }
 
@@ -366,17 +372,73 @@ pub unsafe fn read_string(env: *mut JNIEnv, string: jstring) -> Option<String> {
    }
 }
 
+/// A class or method this process does not have, which a calling JNI would
+/// abort the app on.
+#[derive(Debug, flub::Error)]
+#[error("this app has no {0}")]
+pub struct Missing(String);
+
+impl From<Missing> for String {
+   fn from(missing: Missing) -> Self {
+      missing.to_string()
+   }
+}
+
 /// # Safety
 ///
 /// `env` is the current thread's `JNIEnv`, and `class` a live class.
-pub unsafe fn method(env: *mut JNIEnv, class: jclass, name: &CStr, signature: &CStr) -> jmethodID {
+pub unsafe fn method(
+   env: *mut JNIEnv,
+   class: jclass,
+   name: &CStr,
+   signature: &CStr,
+) -> Result<jmethodID, Missing> {
    // SAFETY: forwarded from the caller, and both strings are NUL-terminated.
-   unsafe { jni!(env, GetMethodID, class, name.as_ptr(), signature.as_ptr()) }
+   let method = unsafe { jni!(env, GetMethodID, class, name.as_ptr(), signature.as_ptr()) };
+   checked_method(env, method, name, signature)
 }
 
-/// The pending exception as `Throwable.toString()`, cleared. None when nothing
-/// was thrown or the message could not be read.
+/// # Safety
 ///
+/// As [`method`].
+pub unsafe fn static_method(
+   env: *mut JNIEnv,
+   class: jclass,
+   name: &CStr,
+   signature: &CStr,
+) -> Result<jmethodID, Missing> {
+   // SAFETY: forwarded from the caller, and both strings are NUL-terminated.
+   let method = unsafe {
+      jni!(
+         env,
+         GetStaticMethodID,
+         class,
+         name.as_ptr(),
+         signature.as_ptr()
+      )
+   };
+   checked_method(env, method, name, signature)
+}
+
+fn checked_method(
+   env: *mut JNIEnv,
+   method: jmethodID,
+   name: &CStr,
+   signature: &CStr,
+) -> Result<jmethodID, Missing> {
+   if !method.is_null() {
+      return Ok(method);
+   }
+   // SAFETY: `env` is the caller's, and the failed lookup left a
+   // `NoSuchMethodError` pending.
+   unsafe { clear_exception(env) };
+   Err(Missing(format!(
+      "method {}{}",
+      name.to_string_lossy(),
+      signature.to_string_lossy()
+   )))
+}
+
 /// # Safety
 ///
 /// `env` is the current thread's `JNIEnv`.
@@ -390,7 +452,7 @@ pub unsafe fn take_exception(env: *mut JNIEnv) -> Option<String> {
          return None;
       }
       let class = jni!(env, GetObjectClass, thrown);
-      let to_string = method(env, class, c"toString", signature!(() -> STRING));
+      let to_string = method(env, class, c"toString", signature!(() -> STRING)).ok()?;
       let text = jni!(env, CallObjectMethodA, thrown, to_string, ptr::null());
       jni!(env, ExceptionClear);
       read_string(env, text)

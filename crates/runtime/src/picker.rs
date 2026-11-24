@@ -94,7 +94,7 @@ pub fn choose(
    let shown = call_static(c"choose", |env| {
       // SAFETY: `env` is this thread's, inside the caller's local frame.
       unsafe {
-         let string_class = STRING.find(env);
+         let string_class = STRING.find(env)?;
          let array = jni!(
             env,
             NewObjectArray,
@@ -112,7 +112,7 @@ pub fn choose(
                option
             );
          }
-         (
+         Ok((
             signature!((OBJECT, int, STRING, STRING, [STRING]) -> void),
             vec![
                jvalue {
@@ -127,7 +127,7 @@ pub fn choose(
                },
                jvalue { l: array },
             ],
-         )
+         ))
       }
    });
    let forget = || {
@@ -183,7 +183,7 @@ pub fn view(
    let shown = call_static(c"view", |env| {
       // SAFETY: `env` is this thread's, inside the caller's local frame.
       unsafe {
-         let string_class = STRING.find(env);
+         let string_class = STRING.find(env)?;
          let array = jni!(
             env,
             NewObjectArray,
@@ -201,7 +201,7 @@ pub fn view(
                option
             );
          }
-         (
+         Ok((
             signature!((OBJECT, int, STRING, STRING, boolean, [STRING]) -> void),
             vec![
                jvalue {
@@ -217,7 +217,7 @@ pub fn view(
                jvalue { z: monospace },
                jvalue { l: array },
             ],
-         )
+         ))
       }
    });
    let forget = || {
@@ -249,7 +249,7 @@ unsafe fn jstring_of(env: *mut JNIEnv, text: &str) -> jobject {
 /// makes, in a local frame.
 fn call_static(
    name: &core::ffi::CStr,
-   args: impl FnOnce(*mut JNIEnv) -> (&'static core::ffi::CStr, Vec<jvalue>),
+   args: impl FnOnce(*mut JNIEnv) -> Result<(&'static core::ffi::CStr, Vec<jvalue>), String>,
 ) -> Result<(), String> {
    let env = jvm::env().ok_or("no JNI env")?;
    // SAFETY: as in `pick`; every reference made here is local to the frame.
@@ -259,20 +259,8 @@ fn call_static(
       }
       let result = (|| {
          let class = class(env)?;
-         let (signature, args) = args(env);
-         let method = jni!(
-            env,
-            GetStaticMethodID,
-            class,
-            name.as_ptr(),
-            signature.as_ptr()
-         );
-         if method.is_null() {
-            return Err(failure(
-               env,
-               &format!("phx.Picker.{} is missing", name.to_string_lossy()),
-            ));
-         }
+         let (signature, args) = args(env)?;
+         let method = jvm::static_method(env, class, name, signature)?;
          jni!(env, CallStaticVoidMethodA, class, method, args.as_ptr());
          if jni!(env, ExceptionCheck) {
             return Err(failure(
@@ -366,13 +354,13 @@ unsafe fn class(env: *mut JNIEnv) -> Result<jclass, String> {
    // SAFETY: forwarded from `pick`; `owner` is the live GuestHost global
    // reference and `DEX` is static, so the direct buffer never dangles.
    unsafe {
-      let class_class = CLASS.find(env);
+      let class_class = CLASS.find(env)?;
       let get_loader = jvm::method(
          env,
          class_class,
          c"getClassLoader",
          signature!(() -> CLASS_LOADER),
-      );
+      )?;
       let owner_class = jni!(env, GetObjectClass, owner);
       let parent = jni!(env, CallObjectMethodA, owner_class, get_loader, ptr::null());
       let buffer = jni!(
@@ -381,20 +369,20 @@ unsafe fn class(env: *mut JNIEnv) -> Result<jclass, String> {
          DEX.as_ptr().cast_mut().cast::<c_void>(),
          jlong::try_from(DEX.len()).expect("the picker dex is a few KB"),
       );
-      let loader_class = IN_MEMORY_DEX_CLASS_LOADER.find(env);
+      let loader_class = IN_MEMORY_DEX_CLASS_LOADER.find(env)?;
       let init = jvm::method(
          env,
          loader_class,
          c"<init>",
          signature!((BYTE_BUFFER, CLASS_LOADER) -> void),
-      );
+      )?;
       let args = [jvalue { l: buffer }, jvalue { l: parent }];
       let loader = jni!(env, NewObjectA, loader_class, init, args.as_ptr());
       if loader.is_null() || jni!(env, ExceptionCheck) {
          return Err(failure(env, "could not load the picker dex"));
       }
-      let base = CLASS_LOADER.find(env);
-      let load = jvm::method(env, base, c"loadClass", signature!((STRING) -> CLASS));
+      let base = CLASS_LOADER.find(env)?;
+      let load = jvm::method(env, base, c"loadClass", signature!((STRING) -> CLASS))?;
       let name = jni!(env, NewStringUTF, PICKER.dotted().as_ptr());
       let class = jni!(
          env,
