@@ -605,11 +605,12 @@ impl Image<'static> {
    /// No thread runs or reads the bytes while they are written, which spans
    /// more than one atomic write when they cross a word boundary.
    pub unsafe fn write_code(&self, addr: usize, bytes: &[u8]) -> Result<(), crate::Error> {
+      const WORD: usize = size_of::<usize>();
       let span = addr..addr + bytes.len();
       let mut writes = Vec::new();
-      for word in (span.start & !7..span.end).step_by(8) {
-         let mut current: [u8; 8] = self
-            .read(word, 8)
+      for word in (span.start & !(WORD - 1)..span.end).step_by(WORD) {
+         let mut current: [u8; WORD] = self
+            .read(word, WORD)
             .and_then(|current| current.try_into().ok())
             .ok_or(crate::Error::Unmapped { addr: word })?;
          for (at, byte) in (word..).zip(&mut current) {
