@@ -240,11 +240,11 @@ impl RawPollResult {
    }
 }
 
-// `send` is a Rust-ABI trait method returning `Pin<Box<dyn Future>>`, a pointer
-// pair the host returns in RAX:RDX with `self` in RCX and the request in RDX.
-// `extern "C"` would expect a hidden return pointer in RCX instead.
+// `send` and `poll` are Rust-ABI trait methods. `send` returns a pointer pair
+// (`Pin<Box<dyn Future>>`) in RAX:RDX with `self` in RCX and the request in RDX;
+// `poll` returns the 128-byte `RawPollResult` via indirect sret in RCX.
 type SendFn = unsafe fn(*const c_void, *mut RawTransportRequest) -> RawPinnedFuture;
-type PollFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> RawPollResult;
+type PollFn = unsafe fn(*mut c_void, *mut c_void) -> RawPollResult;
 type HostAllocFn = unsafe extern "C" fn(usize, usize) -> *mut u8;
 type HostDeallocFn = unsafe extern "C" fn(*mut u8, usize, usize);
 
@@ -535,7 +535,8 @@ unsafe fn read_headers(map: &RawHeaderMap) -> Vec<(String, String)> {
    let buckets = unsafe { slice::from_raw_parts(map.entries_ptr, map.entries_len) };
    let mut out = Vec::with_capacity(buckets.len());
    for bucket in buckets {
-      if bucket.tag == 2 {
+      // `Option<Links>` stores its discriminant in the low byte; upper bytes may be padding.
+      if (bucket.tag & 0xFF) == 2 {
          continue;
       }
       let name = if bucket.name.vtable.is_null() {
@@ -807,11 +808,13 @@ mod tests {
    #[test]
    fn standard_header_indices_match_http_crate() {
       assert_eq!(STANDARD_HEADERS[0], "accept");
-      assert_eq!(STANDARD_HEADERS[15], "authorization");
-      assert_eq!(STANDARD_HEADERS[28], "content-type");
-      assert_eq!(STANDARD_HEADERS[29], "cookie");
-      assert_eq!(STANDARD_HEADERS[68], "user-agent");
-      assert_eq!(STANDARD_HEADERS[78], "x-xss-protection");
+      assert_eq!(STANDARD_HEADERS[14], "allow");
+      assert_eq!(STANDARD_HEADERS[16], "authorization");
+      assert_eq!(STANDARD_HEADERS[29], "content-type");
+      assert_eq!(STANDARD_HEADERS[30], "cookie");
+      assert_eq!(STANDARD_HEADERS[46], "location");
+      assert_eq!(STANDARD_HEADERS[70], "user-agent");
+      assert_eq!(STANDARD_HEADERS[80], "x-xss-protection");
    }
 
    #[test]
