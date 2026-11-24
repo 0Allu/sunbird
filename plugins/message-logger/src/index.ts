@@ -120,9 +120,11 @@ const deleted = phoenix.ui.addMessageAccessory({
   },
 });
 
+const isDesktop = typeof (phoenix as { bridge?: unknown }).bridge === "undefined";
+
 // Hydrate seen messages from channel history fetches on desktop so edits and
 // deletes of messages sent before startup are also captured cleanly.
-if (typeof (phoenix as { bridge?: unknown }).bridge === "undefined") {
+if (isDesktop) {
   phoenix.discord.onResponse(
     { method: "GET", pathPrefix: "/channels/", pathSuffix: "/messages" },
     (res) => {
@@ -170,29 +172,55 @@ phoenix.hook(gateway.messageUpdate, {
   },
 });
 
-// Messages from before the app started are unknown, so their deletes pass
-// through. Known ones stay, marked.
-const markDeleted = (id: string) => {
-  const entry = seen.get(id);
-  if (!entry) return false;
+// Keep deleted messages marked. On desktop, also handle messages loaded from
+// local cache before startup (absent from `seen`) as long as their channel and
+// server aren't ignored, and trigger a content-free MESSAGE_UPDATE so GPUI
+// repaints the row immediately with its native accessory.
+const markDeleted = (id: string, channelId?: string, guildId?: string) => {
+  let entry = seen.get(id);
+  if (!entry) {
+    if (!isDesktop) return false;
+    if (
+      (channelId && ids(settings.ignoreChannels).includes(channelId)) ||
+      (guildId && ids(settings.ignoreGuilds).includes(guildId))
+    ) {
+      return false;
+    }
+    entry = { content: "", attachments: [], changes: [] };
+    seen.set(id, entry);
+    if (seen.size > limit) seen.delete(seen.keys().next().value!);
+  }
   if (entry.deletedAt === undefined) {
     entry.deletedAt = Date.now();
     deleted.update?.(id);
     if (entry.changes.length) history.update?.(id);
+    if (isDesktop && channelId) {
+      try {
+        phoenix.dispatch(gateway.messageUpdate, {
+          id,
+          channel_id: channelId,
+          ...(guildId ? { guild_id: guildId } : {}),
+        });
+      } catch {
+        // Best-effort repaint trigger; accessory cache is already updated.
+      }
+    }
   }
   return true;
 };
 
 phoenix.hook(gateway.messageDelete, {
   before(message) {
-    if (settings.keepDeleted && markDeleted(message.id)) return false;
+    if (settings.keepDeleted && markDeleted(message.id, message.channel_id, message.guild_id)) {
+      return false;
+    }
   },
 });
 
 phoenix.hook(gateway.messageDeleteBulk, {
   before(bulk) {
     if (!settings.keepDeleted) return;
-    bulk.ids = bulk.ids.filter((id) => !markDeleted(id));
+    bulk.ids = bulk.ids.filter((id) => !markDeleted(id, bulk.channel_id, bulk.guild_id));
     if (!bulk.ids.length) return false;
   },
 });
