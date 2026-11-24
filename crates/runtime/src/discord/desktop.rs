@@ -12,7 +12,6 @@
 
 use std::{
    borrow::Cow,
-   collections::HashMap,
    ffi::c_void,
    panic::{
       self,
@@ -23,20 +22,11 @@ use std::{
    str,
    sync::{
       Arc,
-      LazyLock,
-      Mutex,
       OnceLock,
-      PoisonError,
       atomic::{
          AtomicPtr,
-         AtomicUsize,
          Ordering,
       },
-      mpsc,
-   },
-   time::{
-      Duration,
-      Instant,
    },
 };
 
@@ -46,27 +36,14 @@ use phoenix_hook::image::Image;
 use super::{
    Authorization,
    DiscordError,
-   REQUEST_HOOK_COUNT,
-   RESPONSE_HOOK_COUNT,
    RequestAction,
-   api_base,
    api_path,
-   matching_request_hooks,
-   matching_response_hooks,
 };
 use crate::fetch::{
    self,
    Request,
    Response,
 };
-
-/// Headers set per-request by Discord that plugin API calls must not inherit.
-const PER_REQUEST: [&str; 4] = [
-   "content-type",
-   "content-length",
-   "x-context-properties",
-   "x-audit-log-reason",
-];
 
 /// Standard HTTP/1.x `http::header::StandardHeader` names in discriminant
 /// order (`0..=80`), matching `Discord.exe`'s compiled `http` crate.
@@ -158,22 +135,6 @@ const STANDARD_METHODS: [&str; 10] = [
    "OPTIONS", "GET", "POST", "PUT", "DELETE", "HEAD", "TRACE", "CONNECT", "PATCH", "QUERY",
 ];
 
-#[derive(Clone)]
-struct Session {
-   base:    String,
-   headers: Vec<(String, String)>,
-}
-
-struct InFlight {
-   method: String,
-   path:   String,
-   hooks:  Vec<u64>,
-   at:     Instant,
-}
-
-static SESSION: Mutex<Option<Session>> = Mutex::new(None);
-static IN_FLIGHT: LazyLock<Mutex<HashMap<usize, InFlight>>> = LazyLock::new(Mutex::default);
-static IN_FLIGHT_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 // ---------------------------------------------------------------------------
 // ABI mirror of Desktop Phoenix's `libdiscord/crates/http` transport types
@@ -609,10 +570,10 @@ unsafe fn send_detour(
       .get()
       .expect("send_detour only runs after INSTALLED is set");
 
-   let mut response_track: Option<(String, String, Vec<u64>)> = None;
+   let mut watched = None;
 
    if !req.is_null() {
-      let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+      if panic::catch_unwind(AssertUnwindSafe(|| {
          // SAFETY: `req` is a live owned `TransportRequest` passed by `libdiscord_http`.
          let req_ref = unsafe { &mut *req };
          // SAFETY: reading live fields of `req_ref`.
@@ -626,7 +587,7 @@ unsafe fn send_detour(
             &[]
          };
 
-         match observe_request(&method, &url, &headers, body) {
+         match observe(&method, &url, &headers, body) {
             RequestAction::Pass => {},
             RequestAction::Drop => {
                // Zeroing `url.len` keeps the host's `String` capacity/pointer
@@ -651,62 +612,41 @@ unsafe fn send_detour(
             },
          }
 
-         if RESPONSE_HOOK_COUNT.load(Ordering::Relaxed) > 0
-            && let Some(path) = api_path(&url)
-         {
-            let matched = matching_response_hooks(&method, path);
-            if !matched.is_empty() {
-               response_track = Some((method, path.to_owned(), matched));
-            }
-         }
-      }));
+         watched = super::watch_response(&method, &url);
+      }))
+      .is_err()
+      {
+         log::error!("discord desktop: send_detour panicked");
+      }
    }
 
    // SAFETY: forward directly to the original `ReqwestTransport::send`.
    let future = unsafe { (installed.send)(self_ptr, req) };
 
-   if let Some((method, path, hooks)) = response_track
+   if let Some(in_flight) = watched
       && !future.data.is_null()
    {
-      let mut in_flight = IN_FLIGHT.lock().unwrap_or_else(PoisonError::into_inner);
-      if in_flight.len() >= 64 {
-         in_flight.retain(|_, entry| entry.at.elapsed() < Duration::from_secs(60));
-      }
-      in_flight.insert(future.data as usize, InFlight {
-         method,
-         path,
-         hooks,
-         at: Instant::now(),
-      });
-      IN_FLIGHT_COUNT.store(in_flight.len(), Ordering::Relaxed);
+      super::track_response(future.data.addr() as u64, in_flight);
    }
 
    future
 }
 
 #[cfg(windows)]
-unsafe extern "C" fn poll_detour(future: *mut c_void, cx: *mut c_void) -> RawPollResult {
+unsafe fn poll_detour(future: *mut c_void, cx: *mut c_void) -> RawPollResult {
    let installed = INSTALLED
       .get()
       .expect("poll_detour only runs after INSTALLED is set");
    // SAFETY: forward to original `SendFuture::poll`.
    let mut result = unsafe { (installed.poll)(future, cx) };
 
-   if result.is_pending() || IN_FLIGHT_COUNT.load(Ordering::Relaxed) == 0 {
+   if result.is_pending() {
       return result;
    }
 
-   let tracked = {
-      let mut in_flight = IN_FLIGHT.lock().unwrap_or_else(PoisonError::into_inner);
-      let entry = in_flight.remove(&(future as usize));
-      IN_FLIGHT_COUNT.store(in_flight.len(), Ordering::Relaxed);
-      entry
-   };
-
-   if let Some(in_flight) = tracked
+   if let Some(in_flight) = super::take_response(future.addr() as u64)
       && result.is_ok()
-   {
-      let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+      && panic::catch_unwind(AssertUnwindSafe(|| {
          let old_body = if result.body.len == 0 || result.body.ptr.is_null() {
             Vec::new()
          } else {
@@ -714,16 +654,16 @@ unsafe extern "C" fn poll_detour(future: *mut c_void, cx: *mut c_void) -> RawPol
             unsafe { slice::from_raw_parts(result.body.ptr, result.body.len) }.to_vec()
          };
          let orig_len = old_body.len();
-         let new_body = run_response_hooks_sync(
-            in_flight,
-            i32::from(result.status),
-            old_body,
-         );
+         let new_body =
+            super::run_response_hooks(in_flight, i32::from(result.status), old_body);
          // SAFETY: `result.body` is owned by the Ready response being returned.
          unsafe {
             replace_host_vec(&mut result.body, orig_len, &new_body, installed);
          }
-      }));
+      }))
+      .is_err()
+   {
+      log::error!("discord desktop: poll_detour panicked");
    }
 
    result
@@ -780,30 +720,6 @@ unsafe fn replace_host_vec(
    vec.len = new_len;
 }
 
-#[cfg(windows)]
-fn run_response_hooks_sync(in_flight: InFlight, status: i32, body: Vec<u8>) -> Vec<u8> {
-   let fallback = body.clone();
-   let (sender, receiver) = mpsc::channel::<Vec<u8>>();
-   crate::intercept_response(
-      in_flight.hooks,
-      in_flight.method.clone(),
-      in_flight.path.clone(),
-      status,
-      body,
-      sender,
-   );
-   receiver
-      .recv_timeout(Duration::from_secs(4))
-      .unwrap_or_else(|_| {
-         log::warn!(
-            "discord onResponse: {} {} timed out, delivering original",
-            in_flight.method,
-            in_flight.path
-         );
-         fallback
-      })
-}
-
 // ---------------------------------------------------------------------------
 // High-level session capture, hook dispatch & `phoenix.discord.*` transport
 // ---------------------------------------------------------------------------
@@ -818,74 +734,26 @@ pub fn send_channel_id(path: &str) -> Option<&str> {
    (!id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit())).then_some(id)
 }
 
-/// Records Discord's API base and session headers from an observed desktop
-/// request, in memory only. Never logs `authorization`.
-pub fn record_session(url: &str, headers: &[(String, String)]) {
-   let Some(base) = api_base(url) else {
-      return;
+/// Desktop has no composer hook, so `phoenix.messages.onSend` runs on the
+/// request that posts a message, before the shared request hooks.
+fn observe(method: &str, url: &str, headers: &[(String, String)], body: &[u8]) -> RequestAction {
+   let channel = api_path(url)
+      .filter(|_| method.eq_ignore_ascii_case("POST"))
+      .and_then(send_channel_id);
+   let sent = match channel {
+      Some(channel) => crate::intercept_send_body(channel, body),
+      None => RequestAction::Pass,
    };
-   let filtered = headers
-      .iter()
-      .filter(|(name, _)| !PER_REQUEST.contains(&name.to_ascii_lowercase().as_str()))
-      .cloned()
-      .collect::<Vec<_>>();
-   if !filtered
-      .iter()
-      .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
-   {
-      return;
-   }
-   let mut session = SESSION.lock().unwrap_or_else(PoisonError::into_inner);
-   if session.is_none() {
-      log::info!("discord: API session found at {base}");
-   }
-   *session = Some(Session {
-      base:    base.to_owned(),
-      headers: filtered,
-   });
-}
-
-/// Runs matching `phoenix.messages.onSend` and `phoenix.discord.onRequest`
-/// hooks on an outgoing desktop Discord API request.
-pub fn observe_request(
-   method: &str,
-   url: &str,
-   headers: &[(String, String)],
-   body: &[u8],
-) -> RequestAction {
-   record_session(url, headers);
-   let Some(path) = api_path(url) else {
-      return RequestAction::Pass;
-   };
-
-   let mut current = body;
-   let mut rewritten: Option<Vec<u8>> = None;
-
-   if method.eq_ignore_ascii_case("POST")
-      && let Some(channel_id) = send_channel_id(path)
-   {
-      match crate::intercept_send_body(channel_id, current) {
-         RequestAction::Pass => {},
-         RequestAction::Drop => return RequestAction::Drop,
-         RequestAction::Replace(next) => {
-            rewritten = Some(next);
-            current = rewritten.as_deref().unwrap_or(body);
-         },
-      }
-   }
-
-   if REQUEST_HOOK_COUNT.load(Ordering::Relaxed) > 0 {
-      let matched = matching_request_hooks(method, path);
-      if !matched.is_empty() {
-         match crate::intercept_request(&matched, method, path, current) {
-            RequestAction::Pass => {},
-            RequestAction::Drop => return RequestAction::Drop,
-            RequestAction::Replace(next) => return RequestAction::Replace(next),
+   match sent {
+      RequestAction::Pass => super::observe_request(method, url, headers, body),
+      RequestAction::Drop => RequestAction::Drop,
+      RequestAction::Replace(sent) => {
+         match super::observe_request(method, url, headers, &sent) {
+            RequestAction::Pass => RequestAction::Replace(sent),
+            hooked => hooked,
          }
-      }
+      },
    }
-
-   rewritten.map_or(RequestAction::Pass, RequestAction::Replace)
 }
 
 pub fn send(
@@ -894,29 +762,9 @@ pub fn send(
    headers: Vec<(String, String)>,
    body: Vec<u8>,
 ) -> Result<Response, DiscordError> {
-   if !path.starts_with('/') {
-      return Err(DiscordError::Path {
-         path: path.to_owned(),
-      });
-   }
-   let Session {
-      base,
-      headers: mut merged,
-   } = SESSION
-      .lock()
-      .unwrap_or_else(PoisonError::into_inner)
-      .clone()
-      .ok_or(DiscordError::NoSession)?;
-
-   merged.retain(|(name, _)| {
-      !headers
-         .iter()
-         .any(|(own, _)| own.eq_ignore_ascii_case(name))
-   });
-   merged.extend(headers);
-
+   let (url, merged) = super::session_request(path, headers)?;
    let request = Request {
-      url:     format!("{base}{path}"),
+      url,
       method:  method.to_owned(),
       headers: merged,
       body:    (!body.is_empty()).then_some(body),
