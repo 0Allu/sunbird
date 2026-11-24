@@ -5,12 +5,14 @@ on:
     paths: ['web/**', 'plugins/**', 'crates/**', 'frida/**', 'Cargo.*', 'flake.*', 'nix/**', 'scripts/site.nu', '.github/workflows/site.yml']
   workflow_dispatch:
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
 concurrency:
   group: site
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,15 +21,24 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      # The plugins stay TypeScript in plugins/*/src; the site serves them bundled.
+      # The plugins stay TypeScript in plugins/*/src; assets.sunbird.tools serves them bundled.
       - run: npm install --no-save --no-package-lock esbuild@0.25.12
       - run: node web/tools/bundle-plugins.ts
         env:
           ESBUILD: node_modules/.bin/esbuild
-      - run: tar czf site.tar.gz -C web pkg plugins version.json
-      # One rolling release, which sunbird-tools/site polls and deploys.
       - run: |
-          gh release view site >/dev/null 2>&1 || gh release create site --prerelease --title site --notes 'What sunbird.tools serves, rebuilt on every push to main.'
-          gh release upload site site.tar.gz --clobber
-        env:
-          GH_TOKEN: ${{ github.token }}
+          mkdir -p dist
+          touch dist/.nojekyll
+          cp -r web/pkg web/plugins web/version.json dist/
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: dist
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v5

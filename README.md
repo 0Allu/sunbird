@@ -65,7 +65,7 @@ Leading `// @` lines describe the plugin. Besides gateway hooks there are `setti
 `fetch` and Discord API helpers.
 
 The bundled plugins live in `plugins/*/src/index.ts`. CI bundles them with esbuild
-(`web/tools/bundle-plugins.ts`) into the `site` release that sunbird.tools deploys from.
+(`web/tools/bundle-plugins.ts`) and publishes them to https://assets.sunbird.tools/.
 
 ## Repository
 

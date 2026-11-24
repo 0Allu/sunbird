@@ -30,6 +30,7 @@ use memchr::memmem;
 /// This build's version, `<UTC commit date>-<short hash>` (`build.rs`).
 pub const VERSION: &str = env!("PHOENIX_VERSION");
 pub const SITE: &str = "https://sunbird.tools/";
+pub const ASSETS: &str = "https://assets.sunbird.tools/";
 
 /// Where `bundle-plugins.ts` reads the version from the loader the site ships.
 #[used]
@@ -139,7 +140,7 @@ pub fn fetch_catalog() {
       *catalog = Catalog::Loading;
    }
    thread::spawn(|| {
-      let fetched = crate::fetch::get(&format!("{SITE}plugins/index.json"))
+      let fetched = crate::fetch::get(&format!("{ASSETS}plugins/index.json"))
          .map_err(|err| err.to_string())
          .and_then(|body| {
             serde_json::from_slice::<Vec<Listed>>(&body).map_err(|err| err.to_string())
@@ -161,13 +162,13 @@ pub fn install_listed(name: &str) -> Result<String, crate::Error> {
    if let Some(version) = found().and_then(|update| update.loader) {
       return Err(crate::Error::LoaderOutdated { version });
    }
-   crate::install(&format!("{SITE}plugins/{name}.js"))
+   crate::install(&format!("{ASSETS}plugins/{name}.js"))
 }
 
 /// Asks the site in the background. Failures (offline) are only logged.
 pub fn check() {
    thread::spawn(|| {
-      let site = match crate::fetch::get(&format!("{SITE}version.json")) {
+      let site = match crate::fetch::get(&format!("{ASSETS}version.json")) {
          Ok(body) => serde_json::from_slice::<Site>(&body),
          Err(err) => {
             log::info!("update check: {err}");
@@ -326,7 +327,7 @@ pub fn self_update_from_site() {
 }
 
 fn update_plugin(name: &str, expected_crc: Option<u32>) -> Result<(), String> {
-   let url = format!("{SITE}plugins/{name}.js");
+   let url = format!("{ASSETS}plugins/{name}.js");
    let bytes = crate::fetch::get(&url).map_err(|err| format!("fetch: {err}"))?;
    if let Some(expected) = expected_crc {
       let actual = crc32fast::hash(&bytes);
@@ -344,7 +345,7 @@ fn run_loader_self_update() {
    set_status(Some("Downloading loader...".to_owned()));
    let _ = crate::picker::toast("Downloading Phoenix Unlock update...");
 
-   let url = format!("{SITE}{LOADER_ASSET}");
+   let url = format!("{ASSETS}{LOADER_ASSET}");
    let bytes = match crate::fetch::get(&url) {
       Ok(bytes) => bytes,
       Err(err) => {
