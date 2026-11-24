@@ -46,10 +46,12 @@ pub fn staff_aarch64(image: &Image<'_>) -> Found<StaffField> {
 }
 
 /// Start of Phoenix's armeabi-v7a staff check, `bool f(&Store, int force)`,
-/// outlined there. 19 callers on 356207. Thumb, so the hook adds bit 0.
+/// outlined there. 19 callers on 356207. Thumb, so the hook adds bit 0. The
+/// whole `movw` of the store offset is wildcarded: its immediate moved on
+/// 357200, which changes the encoding's second byte.
 pub fn staff_arm(image: &Image<'_>) -> Found<usize> {
    const IS_STAFF: Pattern =
-      Pattern::new("10 B5 84 B0 39 B9 03 46 00 68 ?? F6 ?? ?? 40 58 90 F8 ?? ?? 08 B1 01 24");
+      Pattern::new("10 B5 84 B0 39 B9 03 46 00 68 ?? ?? ?? ?? 40 58 90 F8 ?? ?? 08 B1 01 24");
    one("staff check", &image.scan(IS_STAFF))
 }
 
