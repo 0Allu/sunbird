@@ -45,8 +45,6 @@ use crate::desktop_gpui::{
 };
 
 const DEFAULT_MSG_ID_OFFSET: usize = 0x7d8;
-const DEFAULT_BODY_MSG_ID_OFFSET: usize = 0x1f8;
-const DEFAULT_ROW_COLORS_OFFSET: usize = 0x1e0;
 /// Offset of the pending/sending message text color inside `RowColors`
 /// (verified at `0x14a741c1f`: `mov edx, [r12 + 0x34]`).
 const ROW_COLORS_MUTED_DELTA: usize = 0x34;
@@ -120,8 +118,8 @@ static ORIG_RENDER_ROW: OnceLock<RenderRowFn> = OnceLock::new();
 static ORIG_BUILD_BODY: OnceLock<BuildMessageBodyFn> = OnceLock::new();
 static ORIG_OPT_DELETE: OnceLock<OptimisticDeleteFn> = OnceLock::new();
 static MSG_ID_OFFSET: AtomicUsize = AtomicUsize::new(DEFAULT_MSG_ID_OFFSET);
-static BODY_MSG_ID_OFFSET: AtomicUsize = AtomicUsize::new(DEFAULT_BODY_MSG_ID_OFFSET);
-static ROW_COLORS_OFFSET: AtomicUsize = AtomicUsize::new(DEFAULT_ROW_COLORS_OFFSET);
+static BODY_MSG_ID_OFFSET: AtomicUsize = AtomicUsize::new(0);
+static ROW_COLORS_OFFSET: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static CACHE: LazyLock<RwLock<HashMap<u64, CacheEntry>>> =
    LazyLock::new(|| RwLock::new(HashMap::new()));
@@ -234,22 +232,15 @@ fn lookup_cached(message_id: u64) -> Option<Vec<RenderedAccessory>> {
 /// Fast read-only tint lookup for `build_body_detour` (called inside `MessageRow::render`).
 /// Cache misses are queued right afterward by `render_row_detour`, which triggers a repaint.
 fn lookup_cached_tint(message_id: u64) -> Option<u32> {
-   let map = CACHE.read().ok()?;
-   let CacheEntry::Ready(items) = map.get(&message_id)? else {
-      return None;
-   };
-   let mut tint = None;
-   for item in items {
-      if item.tint.is_some() {
-         tint = item.tint;
-      }
+   match CACHE.read().ok()?.get(&message_id)? {
+      CacheEntry::Ready(items) => items.iter().rev().find_map(|item| item.tint),
+      CacheEntry::Pending => None,
    }
-   tint
 }
 
 /// Converts plugin ARGB (`0xAARRGGBB`, with `0x00RRGGBB` treated as opaque)
 /// into Discord GPUI's packed `0xRRGGBBAA` `u32` token format.
-fn argb_to_rgba(argb: u32) -> u32 {
+const fn argb_to_rgba(argb: u32) -> u32 {
    let raw_a = (argb >> 24) & 0xFF;
    let a = if raw_a == 0 && argb != 0 { 0xFF } else { raw_a };
    ((argb & 0x00FF_FFFF) << 8) | a
@@ -463,19 +454,11 @@ fn decode_body_msg_id_offset(image: &Image<'_>, body_fn: usize) -> Option<usize>
 
 fn decode_row_colors_offset(image: &Image<'_>, body_fn: usize) -> Option<usize> {
    let bytes = image.read(body_fn, 0x120)?;
+   let imm = |at: usize| Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?) as usize);
    for at in ROW_COLORS_TRIPLE.find_in(bytes) {
-      let Some(a) = bytes.get(at + 1..at + 5) else {
+      let (Some(off_a), Some(off_c), Some(off_d)) = (imm(at + 1), imm(at + 6), imm(at + 11)) else {
          continue;
       };
-      let Some(c) = bytes.get(at + 6..at + 10) else {
-         continue;
-      };
-      let Some(d) = bytes.get(at + 11..at + 15) else {
-         continue;
-      };
-      let off_a = u32::from_le_bytes([a[0], a[1], a[2], a[3]]) as usize;
-      let off_c = u32::from_le_bytes([c[0], c[1], c[2], c[3]]) as usize;
-      let off_d = u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as usize;
       // Consecutive `RowColors` fields `(+0x0c, +0x08, +0x04)` -> base is `off_d - 4`.
       if off_a == off_c + 4 && off_c == off_d + 4 && (0x100..=0x400).contains(&off_d) {
          return Some(off_d - 4);
@@ -524,8 +507,15 @@ fn install_body_tint(image: &Image<'static>, render_row: usize) {
       return;
    };
 
-   let msg_id_off = decode_body_msg_id_offset(image, body_fn).unwrap_or(DEFAULT_BODY_MSG_ID_OFFSET);
-   let colors_off = decode_row_colors_offset(image, body_fn).unwrap_or(DEFAULT_ROW_COLORS_OFFSET);
+   // A guessed offset would write into the wrong stack slot, so a build
+   // whose layout does not decode goes without body tints.
+   let (Some(msg_id_off), Some(colors_off)) = (
+      decode_body_msg_id_offset(image, body_fn),
+      decode_row_colors_offset(image, body_fn),
+   ) else {
+      log::warn!("desktop accessories: message body layout did not decode, skipping body tint");
+      return;
+   };
    BODY_MSG_ID_OFFSET.store(msg_id_off, Ordering::Release);
    ROW_COLORS_OFFSET.store(colors_off, Ordering::Release);
 
@@ -573,7 +563,7 @@ unsafe extern "C" fn build_body_detour(
    let msg_off = BODY_MSG_ID_OFFSET.load(Ordering::Relaxed);
    // SAFETY: `msg` is Discord's live `&MessageViewData` and `msg_off` was decoded
    // from `build_message_body`'s own `message_id` read.
-   let message_id = unsafe { ptr::read(msg.cast::<u8>().add(msg_off).cast::<u64>()) };
+   let message_id = unsafe { ptr::read_unaligned(msg.cast::<u8>().add(msg_off).cast::<u64>()) };
    let Some(argb) = (message_id != 0)
       .then(|| lookup_cached_tint(message_id))
       .flatten()
