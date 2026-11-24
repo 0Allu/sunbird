@@ -159,9 +159,11 @@ pub fn fetch_catalog() {
    });
 }
 
-/// Installs a plugin the site lists. Site plugins can call API an older
-/// loader lacks, so they wait until the loader is current, like updates do.
+/// Installs a plugin the site lists. On Android, site plugins can call API an
+/// older loader lacks, so they wait until the loader is current; Desktop tracks
+/// its own build separately from Android's `libphoenix-arm64.so`.
 pub fn install_listed(name: &str) -> Result<String, crate::Error> {
+   #[cfg(target_os = "android")]
    if let Some(version) = found().and_then(|update| update.loader) {
       return Err(crate::Error::LoaderOutdated { version });
    }
@@ -218,12 +220,25 @@ pub fn check() {
          update.plugins
       );
       let body = match &update.loader {
-         Some(version) => format!("Build {version} — tap to update in-app"),
+         Some(version) => {
+            if cfg!(target_os = "android") {
+               format!("Build {version} — tap to update in-app")
+            } else {
+               format!("Build {version} available")
+            }
+         },
          None => {
-            format!(
-               "Updated plugins: {} — tap to update now",
-               update.plugins.join(", ")
-            )
+            if cfg!(target_os = "android") {
+               format!(
+                  "Updated plugins: {} — tap to update now",
+                  update.plugins.join(", ")
+               )
+            } else {
+               format!(
+                  "Updated plugins: {} — click to open Settings",
+                  update.plugins.join(", ")
+               )
+            }
          },
       };
       *FOUND.lock().unwrap_or_else(PoisonError::into_inner) = Some(update);
@@ -322,10 +337,12 @@ pub fn apply() {
          crate::patches::banners::BannerAction::None,
       );
       #[cfg(not(target_os = "android"))]
-      phoenix_ui_desktop::notify(
-         "Plugins updated",
-         Some(&format!("Reloaded: {}", updated_plugins.join(", "))),
-      );
+      if !updated_plugins.is_empty() {
+         phoenix_ui_desktop::notify(
+            "Plugins updated",
+            Some(&format!("Reloaded: {}", updated_plugins.join(", "))),
+         );
+      }
    });
 }
 

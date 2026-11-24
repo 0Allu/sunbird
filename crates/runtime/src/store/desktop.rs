@@ -1,6 +1,9 @@
 //! Read-only SQLite access over Desktop Phoenix's `cache.sqlite` via `rusqlite`.
 
-use std::path::Path;
+use std::{
+   path::Path,
+   time::Duration,
+};
 
 use rusqlite::{
    Connection,
@@ -28,6 +31,7 @@ pub fn query(database: &Path, sql: &str, args: &[String]) -> Result<Rows, StoreE
       OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
    )
    .map_err(sql_err)?;
+   let _ = conn.busy_timeout(Duration::from_secs(3));
    let mut stmt = conn.prepare(sql).map_err(sql_err)?;
    let columns = stmt
       .column_names()

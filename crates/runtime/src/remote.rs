@@ -10,12 +10,16 @@ use std::{
       Write,
    },
    net::{
+      SocketAddr,
       TcpListener,
       TcpStream,
    },
-   sync::atomic::{
-      AtomicBool,
-      Ordering,
+   sync::{
+      OnceLock,
+      atomic::{
+         AtomicBool,
+         Ordering,
+      },
    },
    thread,
    time::Duration,
@@ -54,6 +58,7 @@ use crate::{
    },
 };
 
+#[cfg_attr(target_os = "android", allow(dead_code))]
 pub const ADDR: &str = "127.0.0.1:4242";
 const MAX_BODY: usize = 4 << 20;
 #[cfg(target_os = "android")] const MAX_OPS_LOG: usize = 64;
@@ -61,6 +66,7 @@ const MAX_BODY: usize = 4 << 20;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static RUNNING: AtomicBool = AtomicBool::new(false);
+static BOUND_ADDR: OnceLock<String> = OnceLock::new();
 #[cfg(target_os = "android")]
 static OPS_LOG: LazyLock<Mutex<VecDeque<Box<RawValue>>>> =
    LazyLock::new(|| Mutex::new(VecDeque::with_capacity(MAX_OPS_LOG)));
@@ -150,6 +156,27 @@ pub fn set_enabled(on: bool) {
    }
 }
 
+/// Returns the actual bound `host:port` of the localhost server, falling back
+/// to [`ADDR`] if not started yet.
+#[cfg_attr(target_os = "android", allow(dead_code))]
+#[must_use]
+pub fn bound_addr() -> &'static str {
+   BOUND_ADDR.get().map_or(ADDR, String::as_str)
+}
+
+fn bind_localhost() -> std::io::Result<(TcpListener, SocketAddr)> {
+   for port in 4242u16..=4252 {
+      if let Ok(listener) = TcpListener::bind(("127.0.0.1", port))
+         && let Ok(addr) = listener.local_addr()
+      {
+         return Ok((listener, addr));
+      }
+   }
+   let listener = TcpListener::bind("127.0.0.1:0")?;
+   let addr = listener.local_addr()?;
+   Ok((listener, addr))
+}
+
 pub fn ensure_started() {
    if !enabled() {
       return;
@@ -157,17 +184,23 @@ pub fn ensure_started() {
    if RUNNING.swap(true, Ordering::AcqRel) {
       return;
    }
-   thread::spawn(|| {
-      let listener = match TcpListener::bind(ADDR) {
-         Ok(listener) => listener,
-         Err(err) => {
-            log::error!("remote shell: bind {ADDR} failed: {err}");
-            RUNNING.store(false, Ordering::Release);
-            return;
-         },
-      };
-      let _ = listener.set_nonblocking(true);
-      log::info!("remote shell listening on http://{ADDR} (use `adb forward tcp:4242 tcp:4242`)");
+   let (listener, addr) = match bind_localhost() {
+      Ok(bound) => bound,
+      Err(err) => {
+         log::error!("remote shell: bind 127.0.0.1 failed: {err}");
+         RUNNING.store(false, Ordering::Release);
+         return;
+      },
+   };
+   let addr_str = addr.to_string();
+   let _ = BOUND_ADDR.set(addr_str.clone());
+   let _ = listener.set_nonblocking(true);
+   #[cfg(target_os = "android")]
+   log::info!("remote shell listening on http://{addr_str} (use `adb forward tcp:4242 tcp:4242`)");
+   #[cfg(not(target_os = "android"))]
+   log::info!("Sunbird dashboard & API listening on http://{addr_str}/ui");
+
+   thread::spawn(move || {
       while enabled() {
          match listener.accept() {
             Ok((stream, _)) => {
@@ -187,25 +220,75 @@ pub fn ensure_started() {
    });
 }
 
+struct HttpRequest {
+   method:         String,
+   path:           String,
+   query:          String,
+   #[cfg_attr(target_os = "android", allow(dead_code))]
+   accept:         String,
+   host:           Option<String>,
+   origin:         Option<String>,
+   sec_fetch_site: Option<String>,
+   body:           Vec<u8>,
+}
+
+fn is_loopback_host(host: &str) -> bool {
+   let name = host.split(':').next().unwrap_or(host);
+   name.eq_ignore_ascii_case("127.0.0.1") || name.eq_ignore_ascii_case("localhost")
+}
+
+fn is_allowed_origin(origin: &str) -> bool {
+   origin
+      .strip_prefix("http://")
+      .is_some_and(is_loopback_host)
+}
+
+fn is_allowed_fetch_site(site: &str) -> bool {
+   site.eq_ignore_ascii_case("same-origin")
+      || site.eq_ignore_ascii_case("same-site")
+      || site.eq_ignore_ascii_case("none")
+}
+
 fn handle(mut stream: TcpStream) {
    let _ = stream.set_nonblocking(false);
    let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
    let _ = stream.set_write_timeout(Some(Duration::from_secs(15)));
 
-   let Ok((method, path, query, body)) = read_request(&stream) else {
+   let Ok(req) = read_request(&stream) else {
       return;
    };
-   let (status, content_type, response) = dispatch(&method, &path, &query, &body);
+   if req
+      .host
+      .as_deref()
+      .is_some_and(|host| !is_loopback_host(host))
+      || req
+         .origin
+         .as_deref()
+         .is_some_and(|origin| !is_allowed_origin(origin))
+      || req
+         .sec_fetch_site
+         .as_deref()
+         .is_some_and(|site| !is_allowed_fetch_site(site))
+   {
+      let (status, content_type, response) = err("403 Forbidden", "loopback origin only");
+      write_response(&mut stream, status, content_type, &response);
+      return;
+   }
+   let (status, content_type, response) = dispatch(&req);
+   write_response(&mut stream, status, content_type, &response);
+}
+
+fn write_response(stream: &mut TcpStream, status: &str, content_type: &str, response: &[u8]) {
    let header = format!(
-      "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: \
-       close\r\n\r\n",
+      "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nCache-Control: no-store\r\nContent-Length: \
+       {}\r\nConnection: close\r\n\r\n",
       response.len()
    );
    let _ = stream.write_all(header.as_bytes());
-   let _ = stream.write_all(&response);
+   let _ = stream.write_all(response);
 }
 
-fn read_request(stream: &TcpStream) -> std::io::Result<(String, String, String, Vec<u8>)> {
+fn read_request(stream: &TcpStream) -> std::io::Result<HttpRequest> {
    let mut reader = BufReader::new(stream);
    let mut request_line = String::new();
    if reader.read_line(&mut request_line)? == 0 {
@@ -223,6 +306,10 @@ fn read_request(stream: &TcpStream) -> std::io::Result<(String, String, String, 
    };
 
    let mut content_length: usize = 0;
+   let mut accept = String::new();
+   let mut host = None;
+   let mut origin = None;
+   let mut sec_fetch_site = None;
    loop {
       let mut line = String::new();
       if reader.read_line(&mut line)? == 0 {
@@ -232,27 +319,41 @@ fn read_request(stream: &TcpStream) -> std::io::Result<(String, String, String, 
       if trimmed.is_empty() {
          break;
       }
-      if let Some((name, value)) = trimmed.split_once(':')
-         && name.trim().eq_ignore_ascii_case("content-length")
-      {
-         content_length = value.trim().parse::<usize>().unwrap_or(0).min(MAX_BODY);
+      if let Some((name, value)) = trimmed.split_once(':') {
+         let name = name.trim();
+         let value = value.trim();
+         if name.eq_ignore_ascii_case("content-length") {
+            content_length = value.parse::<usize>().unwrap_or(0).min(MAX_BODY);
+         } else if name.eq_ignore_ascii_case("accept") {
+            value.clone_into(&mut accept);
+         } else if name.eq_ignore_ascii_case("host") {
+            host = Some(value.to_owned());
+         } else if name.eq_ignore_ascii_case("origin") {
+            origin = Some(value.to_owned());
+         } else if name.eq_ignore_ascii_case("sec-fetch-site") {
+            sec_fetch_site = Some(value.to_owned());
+         }
       }
    }
    let mut body = vec![0u8; content_length];
    if content_length > 0 {
       reader.read_exact(&mut body)?;
    }
-   Ok((method, path, query, body))
+   Ok(HttpRequest {
+      method,
+      path,
+      query,
+      accept,
+      host,
+      origin,
+      sec_fetch_site,
+      body,
+   })
 }
 
-/// The percent-decoded value of `key`, as `encodeURIComponent` or a form wrote
-/// it. A `%` not followed by two hex digits stays as it is.
-#[cfg(target_os = "android")]
-fn query_param(query: &str, key: &str) -> Option<String> {
-   let (_, raw) = query
-      .split('&')
-      .filter_map(|pair| pair.split_once('='))
-      .find(|(name, _)| *name == key)?;
+/// Percent-decodes a URI component. A `%` not followed by two hex digits stays
+/// as it is.
+fn percent_decode(raw: &str) -> String {
    let bytes = raw.as_bytes();
    let mut out = Vec::with_capacity(bytes.len());
    let mut at = 0;
@@ -276,15 +377,28 @@ fn query_param(query: &str, key: &str) -> Option<String> {
          },
       }
    }
-   Some(String::from_utf8_lossy(&out).into_owned())
+   String::from_utf8_lossy(&out).into_owned()
 }
 
-fn dispatch(
-   method: &str,
-   path: &str,
-   #[cfg_attr(not(target_os = "android"), allow(unused_variables))] query: &str,
-   body: &[u8],
-) -> (&'static str, &'static str, Vec<u8>) {
+/// The percent-decoded value of `key`, as `encodeURIComponent` or a form wrote
+/// it.
+#[cfg(target_os = "android")]
+fn query_param(query: &str, key: &str) -> Option<String> {
+   let (_, raw) = query
+      .split('&')
+      .filter_map(|pair| pair.split_once('='))
+      .find(|(name, _)| *name == key)?;
+   Some(percent_decode(raw))
+}
+
+fn dispatch(req: &HttpRequest) -> (&'static str, &'static str, Vec<u8>) {
+   let method = req.method.as_str();
+   let path = req.path.as_str();
+   #[cfg(target_os = "android")]
+   let query = req.query.as_str();
+   let body = req.body.as_slice();
+   let _ = &req.query;
+
    match (method, path) {
       #[cfg(not(target_os = "android"))]
       ("GET", "/ui") => (
@@ -292,6 +406,13 @@ fn dispatch(
          "text/html; charset=utf-8",
          phoenix_ui_desktop::DASHBOARD_HTML.as_bytes().to_vec(),
       ),
+      #[cfg(not(target_os = "android"))]
+      ("GET", "/") if req.accept.contains("text/html") => (
+         "200 OK",
+         "text/html; charset=utf-8",
+         phoenix_ui_desktop::DASHBOARD_HTML.as_bytes().to_vec(),
+      ),
+      ("GET", "/favicon.ico") => ("204 No Content", "image/x-icon", Vec::new()),
       ("GET", "/" | "/status") => {
          let plugins = crate::plugins();
          ok_json(&Status {
@@ -305,7 +426,16 @@ fn dispatch(
          let plugins = crate::plugins();
          ok_json(&plugins.iter().map(PluginJson::from).collect::<Vec<_>>())
       },
+      ("POST", "/plugins/reload-all") => {
+         crate::reload_all();
+         crate::refresh_settings();
+         ok_json(&Done::Started)
+      },
       ("GET", "/catalog") => catalog_state(),
+      ("POST", "/catalog/refresh") => {
+         update::fetch_catalog();
+         ok_json(&Done::Started)
+      },
       ("POST", "/catalog/install") => catalog_install(body),
       ("GET", "/logs") => {
          let mut lines = crate::console::lines();
@@ -382,13 +512,19 @@ fn dispatch(
       },
       _ if path.starts_with("/plugins/") => plugin_route(method, &path["/plugins/".len()..], body),
       _ => {
-         err(
-            "404 Not Found",
-            "endpoints: GET /status, GET /plugins, GET|PUT|DELETE /plugins/<name>, POST \
-             /plugins/<name>/{reload,enable,disable}, POST /eval, GET /logs, GET \
-             /ops[?match=&limit=], GET /events[?match=&limit=], GET /tree[/<id>][?depth=], POST \
-             /clear",
-         )
+         #[cfg(target_os = "android")]
+         let help = "endpoints: GET /status, GET /plugins, GET|PUT|DELETE /plugins/<name>, POST \
+                     /plugins/<name>/{reload,enable,disable,setting,press}, GET /catalog, POST \
+                     /catalog/{refresh,install}, POST /eval, GET /logs, GET \
+                     /ops[?match=&limit=], GET /events[?match=&limit=], GET /tree[/<id>][?depth=], \
+                     POST /clear";
+         #[cfg(not(target_os = "android"))]
+         let help = "endpoints: GET /ui, GET /status, GET /plugins, POST /plugins/reload-all, \
+                     GET|PUT|DELETE /plugins/<name>, POST \
+                     /plugins/<name>/{reload,enable,disable,setting,press}, GET /catalog, POST \
+                     /catalog/{refresh,install}, GET /update, POST /update/{check,apply}, POST \
+                     /eval, GET /logs";
+         err("404 Not Found", help)
       },
    }
 }
@@ -580,9 +716,11 @@ fn update_state() -> (&'static str, &'static str, Vec<u8>) {
 }
 
 fn plugin_route(method: &str, rest: &str, body: &[u8]) -> (&'static str, &'static str, Vec<u8>) {
-   let (name, action) = rest
+   let (raw_name, action) = rest
       .split_once('/')
       .map_or((rest, None), |(name, action)| (name, Some(action)));
+   let name = percent_decode(raw_name);
+   let name = name.as_str();
    let valid = !name.is_empty()
       && name
          .bytes()
@@ -726,4 +864,29 @@ fn err(status: &'static str, message: &str) -> (&'static str, &'static str, Vec<
       "text/plain; charset=utf-8",
       message.as_bytes().to_vec(),
    )
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[test]
+   fn validates_loopback_hosts_and_origins() {
+      assert!(is_loopback_host("127.0.0.1:4242"));
+      assert!(is_loopback_host("localhost:4242"));
+      assert!(!is_loopback_host("evil.example:4242"));
+      assert!(is_allowed_origin("http://127.0.0.1:4242"));
+      assert!(is_allowed_origin("http://localhost:4242"));
+      assert!(!is_allowed_origin("https://evil.example"));
+      assert!(!is_allowed_origin("http://127.0.0.1.evil.example"));
+      assert!(is_allowed_fetch_site("same-origin"));
+      assert!(is_allowed_fetch_site("none"));
+      assert!(!is_allowed_fetch_site("cross-site"));
+   }
+
+   #[test]
+   fn decodes_percent_encoded_names() {
+      assert_eq!(percent_decode("silent-typing"), "silent-typing");
+      assert_eq!(percent_decode("my%20plugin"), "my plugin");
+   }
 }

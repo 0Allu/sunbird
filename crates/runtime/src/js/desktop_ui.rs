@@ -17,6 +17,7 @@ use rquickjs::{
 fn noop_handle<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> {
    let remove = Function::new(ctx.clone(), || {})?;
    remove.set("update", Function::new(ctx.clone(), || {})?)?;
+   remove.set("close", Function::new(ctx.clone(), || {})?)?;
    Ok(remove)
 }
 
@@ -102,10 +103,25 @@ pub fn desktop_ui_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
       "onEvent",
       "onNode",
       "mount",
+      "showSheet",
+      "dispatch",
+      "update",
    ] {
       ui.set(
          slot_fn,
          Function::new(ctx.clone(), |ctx: Ctx<'js>| noop_handle(&ctx))?,
+      )?;
+   }
+   for query_fn in ["find", "findDown"] {
+      ui.set(
+         query_fn,
+         Function::new(ctx.clone(), |ctx: Ctx<'js>| rquickjs::Array::new(ctx))?,
+      )?;
+   }
+   for nullable_fn in ["node", "root"] {
+      ui.set(
+         nullable_fn,
+         Function::new(ctx.clone(), |ctx: Ctx<'js>| Value::new_null(ctx))?,
       )?;
    }
    ui.set(

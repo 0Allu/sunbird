@@ -445,6 +445,18 @@ pub fn reload(name: &str) {
    }
 }
 
+/// Reloads every currently enabled plugin.
+pub fn reload_all() {
+   let names = plugins()
+      .into_iter()
+      .filter(|plugin| plugin.enabled)
+      .map(|plugin| plugin.name)
+      .collect::<Vec<_>>();
+   for name in names {
+      reload(&name);
+   }
+}
+
 /// Desktop Phoenix shows "This app isn't available for your account" from
 /// `libdiscord_ops_surfaces::client_access::ClientAccessGate`. One function
 /// reads it (1 blocked, 2 no gate, also what a missing value reads as), and the
@@ -558,12 +570,21 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    STATE.set(state).map_err(|_| Error::AlreadyStarted)?;
    let state = STATE.get().expect("STATE was set above");
 
+   let first_run = !state.choices_path().exists();
    let plugins = js::load_plugins(state, bundled)?;
+   #[cfg(not(target_os = "android"))]
+   {
+      let _ = std::fs::create_dir_all(state.plugins_dir());
+      remote::set_flag(true);
+      remote::ensure_started();
+   }
+   #[cfg(target_os = "android")]
    if remote_shell_enabled() {
       remote::ensure_started();
    }
    #[cfg(target_os = "android")]
    {
+      let _ = first_run;
       update::forget_update(&state.files_dir());
       std::thread::spawn(|| {
          if let Err(err) = host::load() {
@@ -576,8 +597,19 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    }
    #[cfg(not(target_os = "android"))]
    {
-      if remote_shell_enabled() {
-         phoenix_ui_desktop::start_tray(&format!("http://{}/ui", remote::ADDR));
+      let dashboard_url = format!("http://{}/ui", remote::bound_addr());
+      phoenix_ui_desktop::start_tray(phoenix_ui_desktop::TrayConfig {
+         dashboard_url,
+         plugins_dir:      state.plugins_dir(),
+         on_reload_all:    Some(std::sync::Arc::new(reload_all)),
+         on_check_updates: Some(std::sync::Arc::new(update::check)),
+      });
+      phoenix_ui_desktop::notify(
+         "Sunbird ready",
+         Some("Click here or press Ctrl+Shift+U to open Settings"),
+      );
+      if first_run && plugins.is_empty() {
+         phoenix_ui_desktop::open_settings();
       }
       update::check();
    }
