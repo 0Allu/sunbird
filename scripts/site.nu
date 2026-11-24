@@ -25,5 +25,5 @@ def main [web: path] {
 
    ^cargo build --profile wasm -p patcher-web --target wasm32-unknown-unknown
    let wasm = $root | path join target wasm32-unknown-unknown wasm patcher_web.wasm
-   ^wasm-bindgen --target web --no-typescript --out-dir ($web | path join pkg) $wasm
+   ^wasm-bindgen --target web --out-dir ($web | path join pkg) $wasm
 }

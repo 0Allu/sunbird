@@ -25,13 +25,9 @@ jobs:
         env:
           ESBUILD: node_modules/.bin/esbuild
       - run: tar czf site.tar.gz -C web pkg plugins version.json
-      # One rolling release that sunbird-tools/site deploys from.
+      # One rolling release, which sunbird-tools/site polls and deploys.
       - run: |
           gh release view site >/dev/null 2>&1 || gh release create site --prerelease --title site --notes 'What sunbird.tools serves, rebuilt on every push to main.'
           gh release upload site site.tar.gz --clobber
         env:
           GH_TOKEN: ${{ github.token }}
-      # SITE_DISPATCH is a token with Contents write on sunbird-tools/site.
-      - run: gh api repos/sunbird-tools/site/dispatches -f event_type=artifacts
-        env:
-          GH_TOKEN: ${{ secrets.SITE_DISPATCH }}

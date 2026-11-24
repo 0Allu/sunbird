@@ -85,7 +85,7 @@ Read this file before changing code. Every fact here cost someone hours to learn
     then `cargo build --release -p patcher`.
 - Site. `nu scripts/site.nu web` and `node web/tools/bundle-plugins.mjs` (set `ESBUILD`
   if esbuild is not on `PATH`), then `nu scripts/fetch.nu <this checkout>` in sunbird-tools/site.
-  CI publishes the same files as the `site` release on pushes to `main` and triggers the site's deploy.
+  CI publishes the same files as the `site` release on pushes to `main`, and the site picks it up within 10 minutes.
 
 ## Fast loop
 
