@@ -84,20 +84,21 @@ static UNLOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
 static CHECK: std::sync::OnceLock<Option<Inline>> = std::sync::OnceLock::new();
 
+/// Hooks Phoenix's emoji check. Runs from the loader's constructor, before any
+/// thread can be inside the check, because an arm32 hook rewrites 8 bytes of
+/// it and a thread there would run the half-written jump.
+pub(super) fn install() {
+   #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+   CHECK.get_or_init(hook_check);
+}
+
 /// While `on`, emojis Phoenix keeps for Nitro count as usable in the message
 /// box: the picker and autocomplete offer them without a lock. Reactions,
 /// statuses and the rest keep Phoenix's answer, and nothing else about Nitro
-/// changes. The check is found and hooked once, off the calling thread.
+/// changes.
 pub(super) fn unlock(on: bool) {
    #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
-   {
-      UNLOCKED.store(on, std::sync::atomic::Ordering::Release);
-      if on && CHECK.get().is_none() {
-         std::thread::spawn(|| {
-            CHECK.get_or_init(hook_check);
-         });
-      }
-   }
+   UNLOCKED.store(on, std::sync::atomic::Ordering::Release);
    #[cfg(not(any(target_arch = "aarch64", target_arch = "arm")))]
    let _ = on;
 }
@@ -142,14 +143,10 @@ extern "C" fn unavailable_reason(emoji: *const u8, context: *const u8) -> u8 {
    let original: extern "C" fn(*const u8, *const u8) -> u8 =
       unsafe { std::mem::transmute(hook.original().as_ptr()) };
    let reason = original(emoji, context);
+   if reason != PREMIUM_LOCKED || !UNLOCKED.load(std::sync::atomic::Ordering::Acquire) {
+      return reason;
+   }
    // SAFETY: Phoenix passes a live context, and the intention byte is in it.
    let intention = unsafe { *context.add(INTENTION) };
-   if reason == PREMIUM_LOCKED
-      && intention == CHAT
-      && UNLOCKED.load(std::sync::atomic::Ordering::Acquire)
-   {
-      USABLE
-   } else {
-      reason
-   }
+   if intention == CHAT { USABLE } else { reason }
 }

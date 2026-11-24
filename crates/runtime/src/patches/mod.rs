@@ -479,6 +479,7 @@ pub fn start() {
       log::warn!("patches: already started");
       return;
    }
+   emoji::install();
    bridge::install(Box::new(PatchSink));
    // The chat header and message box are built once, before the first
    // gateway event would attach the bridge.
