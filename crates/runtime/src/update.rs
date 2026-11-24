@@ -119,19 +119,24 @@ pub fn check() {
             return;
          },
       };
+      let loader = (site.loader.as_str() > VERSION).then_some(site.loader);
       let mut plugins = Vec::new();
       let mut plugin_crcs = BTreeMap::new();
-      for plugin in crate::plugins() {
-         if let Some(&crc) = site.plugins.get(&plugin.name)
-            && crate::source(&plugin.name)
-               .is_some_and(|source| crc32fast::hash(source.as_bytes()) != crc)
-         {
-            plugin_crcs.insert(plugin.name.clone(), crc);
-            plugins.push(plugin.name);
+      // The site's plugins are built against its loader, so they can call
+      // API this one lacks. They wait until the loader is current.
+      if loader.is_none() {
+         for plugin in crate::plugins() {
+            if let Some(&crc) = site.plugins.get(&plugin.name)
+               && crate::source(&plugin.name)
+                  .is_some_and(|source| crc32fast::hash(source.as_bytes()) != crc)
+            {
+               plugin_crcs.insert(plugin.name.clone(), crc);
+               plugins.push(plugin.name);
+            }
          }
       }
       let update = Update {
-         loader: (site.loader.as_str() > VERSION).then_some(site.loader),
+         loader,
          plugins,
          plugin_crcs,
       };
@@ -146,22 +151,14 @@ pub fn check() {
          update.loader,
          update.plugins
       );
-      let body = match (&update.loader, update.plugins.is_empty()) {
-         (Some(version), true) => format!("Build {version} — tap to update in-app"),
-         (Some(version), false) => {
-            format!(
-               "Build {version} & {} plugin update{} — tap to update",
-               update.plugins.len(),
-               if update.plugins.len() == 1 { "" } else { "s" }
-            )
-         },
-         (None, false) => {
+      let body = match &update.loader {
+         Some(version) => format!("Build {version} — tap to update in-app"),
+         None => {
             format!(
                "Updated plugins: {} — tap to update now",
                update.plugins.join(", ")
             )
          },
-         (None, true) => String::new(),
       };
       *FOUND.lock().unwrap_or_else(PoisonError::into_inner) = Some(update);
       crate::settings::refresh();
