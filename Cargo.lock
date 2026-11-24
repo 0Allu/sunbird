@@ -675,6 +675,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "phoenix-inject"
+version = "0.1.0"
+dependencies = [
+ "misstep",
+]
+
+[[package]]
 name = "phoenix-loader"
 version = "0.1.0"
 dependencies = [

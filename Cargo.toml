@@ -1,6 +1,7 @@
 [workspace]
 members  = [
   "crates/hook",
+  "crates/inject",
   "crates/loader",
   "crates/patcher",
   "crates/patcher-web",
