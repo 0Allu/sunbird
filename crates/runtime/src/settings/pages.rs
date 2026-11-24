@@ -131,7 +131,11 @@ fn update_section() -> Option<Tree> {
          line.set(Prop::LINE_HEIGHT, Some(Value::F64(18.0)));
          update_rows.push(line);
       }
-      if update_found.is_some() {
+      // Plugins update in place, so the site's full download is only for a loader.
+      if update_found
+         .as_ref()
+         .is_some_and(|update| update.loader.is_some())
+      {
          update_rows.push(button_row(
             "Open download page",
             ICON_FILE,
