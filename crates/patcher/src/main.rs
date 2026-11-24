@@ -6,6 +6,11 @@
 //! With `--merge`, `--out` names one APK merged from the splits instead, which
 //! `--package` and `--label` install next to Discord. Without `--loader` only
 //! the access patches go in.
+//!
+//! `patcher --swap --loader <libphoenix.so> --out <file.apk> <patched.apk>`
+//! replaces the loader in an APK this patcher merged, such as the one installed
+//! on a phone (`adb shell pm path com.discord`), and signs it again, so a new
+//! loader installs over it without the splits it was made from.
 
 use std::{
    collections::BTreeMap,
@@ -43,12 +48,14 @@ use patcher::{
 const USAGE: &str = "usage: patcher --out <dir or file.apk> [--merge [--package <name>] [--label \
                      <name>]] [--loader <libphoenix.so> [--lib [<name>=]<extra.so>]... [--plugin \
                      <name.js>]...] [--frida <gadget.so[.gz]> --frida-bootstrap <bootstrap.js> \
-                     [--frida-script <x.js>]...] <split.apk>...";
+                     [--frida-script <x.js>]...] <split.apk>...\n       patcher --swap --loader \
+                     <libphoenix.so> --out <file.apk> <patched.apk>";
 
 #[derive(Default)]
 struct Args {
    out:       Option<PathBuf>,
    merge:     bool,
+   swap:      bool,
    package:   Option<String>,
    label:     Option<String>,
    loader:    Option<PathBuf>,
@@ -69,6 +76,7 @@ impl Args {
          match arg.to_str() {
             Some("--out") => parsed.out = Some(value()?),
             Some("--merge") => parsed.merge = true,
+            Some("--swap") => parsed.swap = true,
             Some("--package") => parsed.package = Some(text(value()?)?),
             Some("--label") => parsed.label = Some(text(value()?)?),
             Some("--loader") => parsed.loader = Some(value()?),
@@ -85,6 +93,10 @@ impl Args {
       ensure!(
          parsed.merge || (parsed.package.is_none() && parsed.label.is_none()),
          "--package and --label need --merge"
+      );
+      ensure!(
+         !parsed.swap || (parsed.loader.is_some() && parsed.apks.len() == 1 && !parsed.merge),
+         "--swap takes --loader and one patched APK\n{USAGE}"
       );
       Ok(parsed)
    }
@@ -163,8 +175,15 @@ fn read_text(path: &Path) -> misstep::Result<String> {
 fn main() -> misstep::Result<()> {
    misstep::install_panic_hook();
    let args = Args::parse()?;
-   let prepared = args.payload()?.prepare()?;
    let out = args.out.as_deref().context(USAGE)?;
+   if args.swap {
+      let loader = Library::new(LOADER, read(args.loader.as_deref().context(USAGE)?)?)?;
+      let apk = read(&args.apks[0])?;
+      save(out, &patcher::swap_loader(&apk, &loader)?)?;
+      println!("wrote {}", out.display());
+      return Ok(());
+   }
+   let prepared = args.payload()?.prepare()?;
    let mut log = |line: &str| println!("{line}");
 
    if args.merge {
