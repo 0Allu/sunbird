@@ -204,7 +204,7 @@ fn section<'data, 'file>(
 
 /// `(instruction, target)` for every PC-relative address the code forms. On
 /// arm64 that is `adrp` followed within four instructions by an `add` or 64-bit
-/// `ldr` on the same register. On x86_64 it is a REX.W `lea` or `mov` from
+/// `ldr` on the same register. On `x86_64` it is a REX.W `lea` or `mov` from
 /// `[rip + disp32]`. ARM is [`thumb_references`].
 fn references(
    machine: Machine,

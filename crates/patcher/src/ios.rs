@@ -122,7 +122,7 @@ pub fn build_patched_ipa<'a, S: Source + ?Sized>(
          Target::Framework => {
             open_access_gate(&record.name, &mut data)?;
          },
-         Target::Bundle => offer_switch(&record.name, &mut data)?,
+         Target::Bundle => offer_switch(&mut data),
          Target::Executable => load_weak(&record.name, &mut data, LOADER_PATH)?,
       }
       stored(
@@ -241,15 +241,18 @@ fn load_weak(path: &str, data: &mut [u8], dylib: &str) -> Result<(), Error> {
 
 /// Makes the Phoenix switch experiment's default config its enabled variation,
 /// so Settings offers the switch without the staff flag.
-fn offer_switch(path: &str, data: &mut [u8]) -> Result<(), Error> {
-   let switch =
-      ios::switch_entrypoint(data).map_err(|err| Error::Host(format!("{path}: {err}")))?;
+///
+/// The switch is a convenience, so a bundle it does not decode in is left as
+/// is rather than failing the whole patch.
+fn offer_switch(data: &mut [u8]) {
+   let Ok(switch) = ios::switch_entrypoint(data) else {
+      return;
+   };
    let enabled = switch.enabled_config;
    data.copy_within(
       enabled..enabled + ios::OBJECT_BUFFERS,
       switch.default_config,
    );
-   Ok(())
 }
 
 /// Makes both `ClientAccessGate` evaluators return true in a thin arm64
