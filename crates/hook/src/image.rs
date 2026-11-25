@@ -269,8 +269,8 @@ impl Image<'static> {
    }
 
    /// Atomically swaps each `(slot, value)` pair in this image and returns the
-   /// values the slots held. Pages of a read-only segment are made writable for
-   /// the write and read-only again afterwards.
+   /// values the slots held. Read-only pages are made writable for the write
+   /// and get their protection back afterwards.
    ///
    /// # Safety
    ///
@@ -282,42 +282,109 @@ impl Image<'static> {
          usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap_or(16384);
       let mut pages = writes
          .iter()
-         .filter(|&&(slot, _)| {
-            !self
-               .segments
-               .iter()
-               .any(|segment| segment.writable && segment.contains(slot))
-         })
          .map(|&(slot, _)| slot & !(page_size - 1))
          .collect::<Vec<usize>>();
       pages.sort_unstable();
       pages.dedup();
-      let protect = |page: usize, prot: c_int| {
-         // SAFETY: `page` is the page base of a mapped slot.
-         if unsafe { libc::mprotect(page as *mut c_void, page_size, prot) } == 0 {
-            Ok(())
-         } else {
-            Err(crate::Error::Protect {
-               addr:   page,
-               source: std::io::Error::last_os_error(),
-            })
-         }
-      };
-      for &page in &pages {
-         protect(page, libc::PROT_READ | libc::PROT_WRITE)?;
-      }
-      let previous = writes
+      let restore = pages
          .iter()
-         .map(|&(slot, value)| {
-            // SAFETY: the caller guarantees aligned slots, now writable.
-            unsafe { AtomicUsize::from_ptr(slot as *mut usize) }.swap(value, Ordering::AcqRel)
+         .map(|&page| {
+            region_protection(page)
+               .map(|prot| (page, prot))
+               .ok_or(crate::Error::Unmapped { addr: page })
          })
-         .collect();
-      for &page in &pages {
-         protect(page, libc::PROT_READ)?;
-      }
-      Ok(previous)
+         .collect::<Result<Vec<_>, _>>()?;
+      // SAFETY: forwarded from the caller, and `restore` holds each slot's
+      // page.
+      unsafe { swap_protected(writes, page_size, &restore) }
    }
+}
+
+#[cfg(target_vendor = "apple")]
+unsafe extern "C" {
+   static mach_task_self_: u32;
+   fn vm_region_64(
+      task: u32,
+      address: *mut usize,
+      size: *mut usize,
+      flavor: c_int,
+      info: *mut c_int,
+      count: *mut u32,
+      object_name: *mut u32,
+   ) -> c_int;
+}
+
+/// Protection of the mapping holding `addr`, from the kernel's region table.
+#[cfg(target_vendor = "apple")]
+fn region_protection(addr: usize) -> Option<c_int> {
+   const VM_REGION_BASIC_INFO_64: c_int = 9;
+   const VM_REGION_BASIC_INFO_COUNT_64: u32 = 9;
+
+   let (mut start, mut size, mut object) = (addr, 0usize, 0u32);
+   let mut info = [0 as c_int; VM_REGION_BASIC_INFO_COUNT_64 as usize];
+   let mut count = VM_REGION_BASIC_INFO_COUNT_64;
+   // SAFETY: `info` holds the ints this flavor writes, and the kernel fails
+   // rather than faults on an unmapped address.
+   let status = unsafe {
+      vm_region_64(
+         mach_task_self_,
+         &raw mut start,
+         &raw mut size,
+         VM_REGION_BASIC_INFO_64,
+         info.as_mut_ptr(),
+         &raw mut count,
+         &raw mut object,
+      )
+   };
+   // The kernel returns the next region when nothing maps `addr`.
+   (status == 0 && start <= addr && addr - start < size).then_some(info[0])
+}
+
+/// Swaps each `(slot, value)` pair with every page in `restore` made writable,
+/// then gives each page its protection back. A page that stays writable after
+/// a failed restore is left that way, since the swap has already landed.
+///
+/// # Safety
+///
+/// Every slot is a pointer-aligned word on one of the pages in `restore`, and
+/// code that reads it accepts either value.
+#[cfg(unix)]
+unsafe fn swap_protected(
+   writes: &[(usize, usize)],
+   page_size: usize,
+   restore: &[(usize, c_int)],
+) -> Result<Vec<usize>, crate::Error> {
+   let protect = |page: usize, prot: c_int| {
+      // SAFETY: `page` is a mapped page the caller looked up.
+      if unsafe { libc::mprotect(page as *mut c_void, page_size, prot) } == 0 {
+         Ok(())
+      } else {
+         Err(crate::Error::Protect {
+            addr:   page,
+            source: std::io::Error::last_os_error(),
+         })
+      }
+   };
+
+   for (done, &(page, prot)) in restore.iter().enumerate() {
+      if let Err(err) = protect(page, prot | libc::PROT_WRITE) {
+         for &(page, prot) in &restore[..done] {
+            let _ = protect(page, prot);
+         }
+         return Err(err);
+      }
+   }
+   let previous = writes
+      .iter()
+      // SAFETY: the caller guarantees aligned slots, now writable.
+      .map(|&(slot, value)| {
+         unsafe { AtomicUsize::from_ptr(slot as *mut usize) }.swap(value, Ordering::AcqRel)
+      })
+      .collect();
+   for &(page, prot) in restore {
+      let _ = protect(page, prot);
+   }
+   Ok(previous)
 }
 
 #[cfg(all(unix, not(target_vendor = "apple")))]
@@ -446,32 +513,8 @@ pub unsafe fn swap_words(writes: &[(usize, usize)]) -> Result<Vec<usize>, crate:
             addr: pages.first().copied().unwrap_or(0),
          }
       })?;
-   let protect = |page: usize, prot: c_int| {
-      // SAFETY: `page` is a mapped page, from /proc/self/maps.
-      if unsafe { libc::mprotect(page as *mut c_void, page_size, prot) } == 0 {
-         Ok(())
-      } else {
-         Err(crate::Error::Protect {
-            addr:   page,
-            source: std::io::Error::last_os_error(),
-         })
-      }
-   };
-
-   for &(page, prot) in &restore {
-      protect(page, prot | libc::PROT_WRITE)?;
-   }
-   let previous = writes
-      .iter()
-      // SAFETY: the caller guarantees aligned, mapped slots, now writable.
-      .map(|&(slot, value)| {
-         unsafe { AtomicUsize::from_ptr(slot as *mut usize) }.swap(value, Ordering::AcqRel)
-      })
-      .collect();
-   for &(page, prot) in &restore {
-      protect(page, prot)?;
-   }
-   Ok(previous)
+   // SAFETY: forwarded from the caller, and `restore` holds each slot's page.
+   unsafe { swap_protected(writes, page_size, &restore) }
 }
 
 #[cfg(all(unix, not(target_vendor = "apple")))]
