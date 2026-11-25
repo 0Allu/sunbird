@@ -1,5 +1,5 @@
-// @description Translates messages in selected channels using Kagi or Google
-// @version 0.1.0
+// @description Translates messages from the message menu, or every message in selected channels, using Kagi or Google
+// @version 0.2.0
 // @author amaanq
 
 const { gateway } = phoenix;
@@ -119,28 +119,47 @@ const subtext = (text: string) =>
     .map((line) => `-# ${line}`)
     .join("\n");
 
-phoenix.on(gateway.messageCreate, async (message) => {
+type Translatable = Pick<Phoenix.GatewayMessage, "id" | "channel_id" | "guild_id" | "content">;
+
+/// Appends the translation under `message` in place. Resolves to what happened, for a toast.
+const translateMessage = async (message: Translatable): Promise<string> => {
   const original = message.content?.trim();
-  const channels = settings.channels.split(",").map((id) => id.trim());
-  if (!original || !channels.includes(message.channel_id)) return;
+  if (!original) return "Nothing to translate";
 
   const target = settings.target.trim() || "en";
-  const translate = translators[settings.service];
-
-  let translation: Translation;
-  try {
-    translation = await translate(original, target);
-  } catch (err) {
-    phoenix.log.warn(`translating ${message.id}: ${err}`);
-    return;
+  const translation = await translators[settings.service](original, target);
+  if (baseLanguage(translation.from) === baseLanguage(target) || translation.text.trim() === original) {
+    return "Already in the target language";
   }
-  if (baseLanguage(translation.from) === baseLanguage(target)) return;
-  if (translation.text.trim() === original) return;
 
   phoenix.enqueue(gateway.messageUpdate, {
     id: message.id,
     channel_id: message.channel_id,
     ...(message.guild_id ? { guild_id: message.guild_id } : {}),
-    content: `${message.content}\n${subtext(translation.text)} (${translation.label})`,
+    content: `${message.content}
+${subtext(translation.text)} (${translation.label})`,
   });
+  return "Translated";
+};
+
+phoenix.on(gateway.messageCreate, async (message) => {
+  const channels = settings.channels.split(",").map((id) => id.trim());
+  if (!channels.includes(message.channel_id)) return;
+  try {
+    await translateMessage(message);
+  } catch (err) {
+    phoenix.log.warn(`translating ${message.id}: ${err}`);
+  }
+});
+
+phoenix.ui.addMessageAction({
+  label: "Translate",
+  visible: (ctx) => !!ctx.message?.content?.trim(),
+  onPress(ctx) {
+    if (!ctx.message) return;
+    translateMessage(ctx.message).then(
+      (result) => result !== "Translated" && phoenix.ui.toast(result),
+      (err) => phoenix.ui.toast(`Translation failed: ${err}`),
+    );
+  },
 });
