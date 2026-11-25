@@ -338,9 +338,11 @@ static ORIG_SETTINGS_LAYER: OnceLock<SettingsLayerFn> = OnceLock::new();
 static IN_SETTINGS: AtomicBool = AtomicBool::new(false);
 /// When Settings last rendered, in ms since [`epoch_ms`]'s start.
 static SETTINGS_AT: AtomicU64 = AtomicU64::new(0);
-/// Settings this recently rendered is still open: the press that opens a modal
-/// from it re-renders it first.
-const SETTINGS_RECENT_MS: u64 = 2000;
+/// Settings this recently rendered may still be open: the press that opens a
+/// modal from it re-renders it first.
+const SETTINGS_RECENT_MS: u64 = 500;
+/// Whether a redraw is due once [`SETTINGS_RECENT_MS`] has passed.
+static RECHECK: AtomicBool = AtomicBool::new(false);
 
 fn epoch_ms() -> u64 {
    static EPOCH: OnceLock<std::time::Instant> = OnceLock::new();
@@ -688,11 +690,18 @@ unsafe extern "C" fn modal_button_callback(
 pub fn open_page(spec: PageModalSpec) -> u64 {
    resolve_pending_choice();
    let id = NEXT_PAGE_ID.fetch_add(1, Ordering::Relaxed);
-   *ACTIVE_MODAL.lock().unwrap_or_else(PoisonError::into_inner) =
-      Some(ActiveModal::Page { id, spec });
-   MODAL_OPEN.store(true, Ordering::Release);
-   force_redraw();
+   set_active(Some(ActiveModal::Page { id, spec }));
    id
+}
+
+/// Replaces the active modal. `MODAL_OPEN` changes under the same lock, so a
+/// close racing an open cannot leave a held modal undrawn.
+fn set_active(modal: Option<ActiveModal>) {
+   let mut guard = ACTIVE_MODAL.lock().unwrap_or_else(PoisonError::into_inner);
+   MODAL_OPEN.store(modal.is_some(), Ordering::Release);
+   *guard = modal;
+   drop(guard);
+   force_redraw();
 }
 
 /// Opens a native choose or sheet dialog and returns what it will answer.
@@ -705,7 +714,7 @@ pub fn open_choice(
    options: Vec<ChoiceOption>,
 ) -> Arc<Choice> {
    let choice = Arc::new(Choice::new());
-   if MODAL_SYM.get().is_none() {
+   if ORIG_OVERLAY_RENDER.get().is_none() {
       choice.pick(-1);
       return choice;
    }
@@ -725,8 +734,7 @@ pub fn open_choice(
                label:    option.label,
                danger:   option.danger,
                on_press: Arc::new(move || {
-                  picked.pick(i32::try_from(index).unwrap_or(-1));
-                  close_active();
+                  finish_choice(&picked, i32::try_from(index).unwrap_or(-1));
                }),
             }
          })
@@ -736,24 +744,45 @@ pub fn open_choice(
          buttons,
       });
    }
-   *ACTIVE_MODAL.lock().unwrap_or_else(PoisonError::into_inner) = Some(ActiveModal::Choice {
+   set_active(Some(ActiveModal::Choice {
       spec:   PageModalSpec { title, sections },
       choice: Arc::clone(&choice),
-   });
-   MODAL_OPEN.store(true, Ordering::Release);
-   force_redraw();
+   }));
    choice
+}
+
+/// Opens a choose dialog and waits up to `timeout` for the picked index, -1
+/// when it is dismissed or left open.
+pub fn ask(
+   title: String,
+   body: Option<ModalSection>,
+   options: Vec<ChoiceOption>,
+   timeout: Duration,
+) -> i32 {
+   let choice = open_choice(title, body, options);
+   choice.wait(timeout).unwrap_or_else(|| {
+      dismiss_choice(&choice);
+      -1
+   })
 }
 
 /// Closes `choice`'s dialog if it is still the one on screen.
 pub fn dismiss_choice(choice: &Arc<Choice>) {
+   finish_choice(choice, -1);
+}
+
+/// Answers `choice` with `index` and closes its dialog, leaving any dialog
+/// that already replaced it open.
+fn finish_choice(choice: &Arc<Choice>, index: i32) {
    let mut guard = ACTIVE_MODAL.lock().unwrap_or_else(PoisonError::into_inner);
-   if matches!(guard.as_ref(), Some(ActiveModal::Choice { choice: active, .. }) if Arc::ptr_eq(active, choice))
-   {
-      choice.pick(-1);
+   let current = matches!(guard.as_ref(), Some(ActiveModal::Choice { choice: active, .. }) if Arc::ptr_eq(active, choice));
+   choice.pick(index);
+   if current {
       *guard = None;
       MODAL_OPEN.store(false, Ordering::Release);
-      drop(guard);
+   }
+   drop(guard);
+   if current {
       force_redraw();
    }
 }
@@ -780,38 +809,26 @@ pub fn close_page(id: u64) {
 /// Opens a native GPUI multiline code editor modal for `plugin`.
 pub fn open_code_editor(plugin: String, initial_source: String) {
    resolve_pending_choice();
-   *ACTIVE_MODAL.lock().unwrap_or_else(PoisonError::into_inner) =
-      Some(ActiveModal::CodeEditor(CodeEditorModal {
-         plugin,
-         pending_init: Some(initial_source),
-         status: None,
-      }));
-   MODAL_OPEN.store(true, Ordering::Release);
-   force_redraw();
+   set_active(Some(ActiveModal::CodeEditor(CodeEditorModal {
+      plugin,
+      pending_init: Some(initial_source),
+      status: None,
+   })));
 }
 
 /// Opens a native GPUI single-line URL installer modal.
 pub fn open_install_url() {
    resolve_pending_choice();
-   *ACTIVE_MODAL.lock().unwrap_or_else(PoisonError::into_inner) =
-      Some(ActiveModal::InstallUrl(InstallUrlModal {
-         pending_init: Some(String::new()),
-         status:       None,
-         busy:         false,
-      }));
-   MODAL_OPEN.store(true, Ordering::Release);
-   force_redraw();
+   set_active(Some(ActiveModal::InstallUrl(InstallUrlModal {
+      pending_init: Some(String::new()),
+      status:       None,
+      busy:         false,
+   })));
 }
 
 fn close_active() {
-   let mut guard = ACTIVE_MODAL.lock().unwrap_or_else(PoisonError::into_inner);
-   if let Some(ActiveModal::Choice { choice, .. }) = guard.as_ref() {
-      choice.pick(-1);
-   }
-   *guard = None;
-   drop(guard);
-   MODAL_OPEN.store(false, Ordering::Release);
-   force_redraw();
+   resolve_pending_choice();
+   set_active(None);
 }
 
 fn set_editor_status(msg: &str, is_error: bool) {
@@ -851,6 +868,10 @@ pub fn install(image: &Image<'static>) {
       log::warn!("desktop modal: GPUI builders unavailable, skipping");
       return;
    };
+   if !gpui::supports_push_any() {
+      log::warn!("desktop modal: Div::child(AnyElement) unavailable, skipping");
+      return;
+   }
    let found = match desktop::modal(image, div_into_any, &gpui_layout.div) {
       Ok(m) => m,
       Err(err) => {
@@ -1182,13 +1203,23 @@ unsafe extern "C" fn overlay_render_detour(
    // ponytail: closing Settings under an open modal hides the modal until
    // Settings opens again or the modal is replaced; nothing tells this render
    // apart from one where Settings only replays its last frame.
-   // Settings may render after this in the same frame; deciding here keeps the
-   // modal from being built twice.
+   if IN_SETTINGS.load(Ordering::Acquire) || sret.is_null() || cx.is_null() {
+      return out;
+   }
+   // Settings rendering after this in the same frame would build the modal a
+   // second time, so leave it to Settings while it was just on screen, and look
+   // again once that has passed in case it closed.
+   // ponytail: Settings left idle past this before a modal opens from a timer
+   // still gets one frame with the modal built in both places.
    let at = SETTINGS_AT.load(Ordering::Acquire);
    if at != 0 && epoch_ms().saturating_sub(at) < SETTINGS_RECENT_MS {
-      IN_SETTINGS.store(true, Ordering::Release);
-   }
-   if IN_SETTINGS.load(Ordering::Acquire) || sret.is_null() || cx.is_null() {
+      if !RECHECK.swap(true, Ordering::AcqRel) {
+         std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(SETTINGS_RECENT_MS + 100));
+            RECHECK.store(false, Ordering::Release);
+            force_redraw();
+         });
+      }
       return out;
    }
 
@@ -1596,7 +1627,7 @@ fn build_overlay(window: *mut c_void, app: *mut c_void) -> Option<RawDiv> {
             if let Some((msg, is_err)) = &ed.status
                && let Some(st) = plain_text_div(msg, if *is_err { COL_ERROR } else { COL_OK }, 13.0)
             {
-               *b = gpui::push_div(std::mem::replace(b, gpui::raw_div().unwrap()), st);
+               *b = gpui::push_div(std::mem::replace(b, RawDiv::zeroed()), st);
             }
             if let Some(tf) = FIELD_SYM.get()
                && let Some(ent) = unsafe {
@@ -1623,7 +1654,7 @@ fn build_overlay(window: *mut c_void, app: *mut c_void) -> Option<RawDiv> {
                      s.length(s.at.font_size, gpui_px(13.0));
                   });
                   if gpui::push_any(&mut wrap, &mut ta_any) {
-                     *b = gpui::push_div(std::mem::replace(b, gpui::raw_div().unwrap()), wrap);
+                     *b = gpui::push_div(std::mem::replace(b, RawDiv::zeroed()), wrap);
                   }
                }
             } else if let Some(msg) = plain_text_div(
@@ -1631,7 +1662,7 @@ fn build_overlay(window: *mut c_void, app: *mut c_void) -> Option<RawDiv> {
                COL_ERROR,
                13.5,
             ) {
-               *b = gpui::push_div(std::mem::replace(b, gpui::raw_div().unwrap()), msg);
+               *b = gpui::push_div(std::mem::replace(b, RawDiv::zeroed()), msg);
             }
          }
          let mut footer = Vec::new();
@@ -1694,7 +1725,7 @@ fn build_overlay(window: *mut c_void, app: *mut c_void) -> Option<RawDiv> {
                if let Some(mut wrap) = gpui::v_stack(4.0) {
                   gpui::style_div(&mut wrap, |s| s.length(s.at.size[0], W_FULL));
                   if gpui::push_any(&mut wrap, &mut ti_any) {
-                     *b = gpui::push_div(std::mem::replace(b, gpui::raw_div().unwrap()), wrap);
+                     *b = gpui::push_div(std::mem::replace(b, RawDiv::zeroed()), wrap);
                   }
                }
             } else if let Some(msg) = plain_text_div(
@@ -1702,12 +1733,12 @@ fn build_overlay(window: *mut c_void, app: *mut c_void) -> Option<RawDiv> {
                COL_ERROR,
                13.5,
             ) {
-               *b = gpui::push_div(std::mem::replace(b, gpui::raw_div().unwrap()), msg);
+               *b = gpui::push_div(std::mem::replace(b, RawDiv::zeroed()), msg);
             }
             if let Some((msg, is_err)) = &inst.status
                && let Some(st) = plain_text_div(msg, if *is_err { COL_ERROR } else { COL_OK }, 13.0)
             {
-               *b = gpui::push_div(std::mem::replace(b, gpui::raw_div().unwrap()), st);
+               *b = gpui::push_div(std::mem::replace(b, RawDiv::zeroed()), st);
             }
          }
          let mut footer = Vec::new();

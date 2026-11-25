@@ -338,10 +338,12 @@ unsafe extern "C" fn build_context_menu_detour(
 
 /// The JSON of the message the last menu opened on, read from Discord's memory
 /// while the menu's input still holds it.
-static MENU_MESSAGE: Mutex<Option<(u64, String)>> = Mutex::new(None);
+static MENU_MESSAGE: Mutex<Option<(u64, std::time::Instant, String)>> = Mutex::new(None);
+/// GPUI rebuilds an open menu every frame, so its message is serialized again
+/// only past this age, which still catches an edit before the next menu.
+const MENU_MESSAGE_FRESH: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Serializes the message at `message` once per menu; GPUI rebuilds an open
-/// menu every frame.
+/// Serializes the message at `message` for the menu built for it.
 ///
 /// # Safety
 ///
@@ -351,13 +353,14 @@ unsafe fn remember_message(message: *const u8, id: u64) {
       .lock()
       .unwrap_or_else(PoisonError::into_inner)
       .as_ref()
-      .is_some_and(|(held, _)| *held == id)
+      .is_some_and(|(held, at, _)| *held == id && at.elapsed() < MENU_MESSAGE_FRESH)
    {
       return;
    }
    // SAFETY: the caller's `message` is live for this call.
    if let Some(json) = unsafe { crate::message::json(message, id) } {
-      *MENU_MESSAGE.lock().unwrap_or_else(PoisonError::into_inner) = Some((id, json));
+      *MENU_MESSAGE.lock().unwrap_or_else(PoisonError::into_inner) =
+         Some((id, std::time::Instant::now(), json));
    }
 }
 
@@ -366,8 +369,8 @@ pub fn menu_message(id: u64) -> Option<String> {
    let held = MENU_MESSAGE.lock().unwrap_or_else(PoisonError::into_inner);
    let json = held
       .as_ref()
-      .filter(|(held, _)| *held == id)
-      .map(|(_, json)| json.clone());
+      .filter(|(held, ..)| *held == id)
+      .map(|(.., json)| json.clone());
    drop(held);
    json
 }

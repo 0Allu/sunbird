@@ -770,12 +770,7 @@ fn answer(
    body: Option<ModalSection>,
    items: Vec<modal::ChoiceOption>,
 ) -> Settlement {
-   let choice = modal::open_choice(title, body, items);
-   let index = choice.wait(Duration::from_secs(600)).unwrap_or_else(|| {
-      modal::dismiss_choice(&choice);
-      -1
-   });
-   Settlement::Int(Ok(index))
+   Settlement::Int(Ok(modal::ask(title, body, items, Duration::from_secs(600))))
 }
 
 fn parse_choice_options<'js>(options: &Object<'js>) -> rquickjs::Result<Vec<modal::ChoiceOption>> {

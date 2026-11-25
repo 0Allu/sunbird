@@ -114,17 +114,22 @@ mod windows {
                .get(..n)
                .is_some_and(|name| String::from_utf16_lossy(name) == "Zed::Window")
             {
+               // This runs off GPUI's thread, which may be freeing the window,
+               // so the words behind the user data are copied, not dereferenced.
                let user_data = GetWindowLongPtrW(hwnd, GWLP_USERDATA).cast_unsigned();
-               if user_data != 0 && user_data != usize::MAX {
-                  let rc = *(user_data as *const usize);
-                  if rc != 0 && rc != usize::MAX {
-                     let strong = *(rc as *const usize);
-                     if strong != 0 {
-                        let validation = *((rc + val_off) as *const usize);
-                        PostMessageW(hwnd, WM_GPUI_FORCE_UPDATE_WINDOW, validation, 0);
-                        return 1;
-                     }
-                  }
+               let word = |at: usize| {
+                  x86::read_memory(at, 8)
+                     .and_then(|bytes| bytes.try_into().ok())
+                     .map(usize::from_le_bytes)
+               };
+               let pointer =
+                  |at: usize| word(at).filter(|&value| value != 0 && value != usize::MAX);
+               if let Some(rc) = pointer(user_data)
+                  && pointer(rc).is_some()
+                  && let Some(validation) = rc.checked_add(val_off).and_then(word)
+               {
+                  PostMessageW(hwnd, WM_GPUI_FORCE_UPDATE_WINDOW, validation, 0);
+                  return 1;
                }
             }
          }
@@ -239,6 +244,10 @@ mod linux {
 
    /// What `WaylandWindow::request_frame` does, with the status moves made
    /// atomic since this runs off GPUI's main thread.
+   ///
+   /// ponytail: GPUI moves the same status with plain loads and stores at the
+   /// end of a frame, so a request landing between them is lost and the modal
+   /// waits for the next input; owning the frame state would close that.
    fn request_frame(frame: &Frame, window: Window) {
       // SAFETY: `remember` keeps `status` alive; GPUI stores its `Cell<u8>`
       // byte-wise.

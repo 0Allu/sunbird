@@ -1061,6 +1061,13 @@ pub fn alloc_rc_u64(value: u64) -> Option<*mut RcInner> {
    }
 }
 
+/// Whether `div_push_any` resolved, which every native modal needs to take
+/// Discord's own `Modal` element as a child.
+#[must_use]
+pub fn supports_push_any() -> bool {
+   SYMBOLS.get().is_some_and(|s| s.div_push_any.is_some())
+}
+
 /// Whether `div_push_any` and `str_into_any` resolved for native message
 /// accessories.
 #[must_use]

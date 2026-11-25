@@ -112,11 +112,14 @@ pub fn prepare() -> Result<(), Error> {
    message::install(&image);
    badges::install(&image);
    <os::Os as os::DesktopOs>::install(&image);
-   let registry = phoenix_runtime::hook(&image)?;
-   discord::install(&image);
-   accessories::install_optimistic_delete(&image);
+   let registry = phoenix_runtime::hook(&image);
+   if registry.is_ok() {
+      discord::install(&image);
+      accessories::install_optimistic_delete(&image);
+   }
+   // The index is tens of MB and nothing reads it after startup.
    phoenix_sigs::desktop::release_call_index();
-   *PREPARED.lock().unwrap_or_else(PoisonError::into_inner) = Some((image, registry));
+   *PREPARED.lock().unwrap_or_else(PoisonError::into_inner) = Some((image, registry?));
    Ok(())
 }
 
@@ -340,10 +343,6 @@ fn dialog(body: &[u8], sheet: bool) -> remote::Reply {
       );
    }
    let title = request.title.unwrap_or_else(|| "Sunbird".to_owned());
-   let choice = modal::open_choice(title, content, options);
-   let index = choice.wait(Duration::from_secs(120)).unwrap_or(-1);
-   if index == -1 {
-      modal::dismiss_choice(&choice);
-   }
+   let index = modal::ask(title, content, options, Duration::from_secs(120));
    remote::ok_json(&DialogAnswer { index })
 }

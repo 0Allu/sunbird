@@ -15,7 +15,10 @@ use std::{
    sync::OnceLock,
 };
 
-use phoenix_hook::image::Image;
+use phoenix_hook::{
+   image::Image,
+   x86,
+};
 use phoenix_sigs::desktop;
 
 /// `Result<Value, Error>` is 9 words; the slack covers a larger build.
@@ -28,9 +31,9 @@ static FNS: OnceLock<(ToValueFn, DropFn)> = OnceLock::new();
 static BUCKET: OnceLock<Bucket> = OnceLock::new();
 
 /// `Value`'s first word holds an object's entry capacity, or past `isize::MAX`
-/// the tag of every other variant; `Result` takes all ones for `Err`.
+/// the tags of its five other variants; `Result` puts `Err` on the next niche.
 const NICHE: u64 = 0x8000_0000_0000_0000;
-const ERR: u64 = u64::MAX;
+const LAST_TAG: u64 = NICHE + 4;
 const VALUE_SIZE: usize = 0x48;
 /// `Bucket { hash: usize, key: String, value: Value }`.
 const BUCKET_SIZE: usize = 8 + 24 + VALUE_SIZE;
@@ -71,7 +74,7 @@ pub unsafe fn json(message: *const u8, id: u64) -> Option<String> {
    let mut slot: Slot = [0; 16];
    // SAFETY: `slot` is larger than `Result<Value, Error>`, `message` is live.
    unsafe { to_value(&raw mut slot, message) };
-   if slot[0] == ERR {
+   if slot[0] > LAST_TAG {
       // ponytail: leaks the boxed error, a malformed message is rare.
       return None;
    }
@@ -103,14 +106,40 @@ const fn word(at: *const u8) -> u64 {
 
 /// A `String` or `Vec`, `{cap, ptr, len}`, as its pointer and length.
 fn vec(at: *const u8) -> Option<(*const u8, usize)> {
-   let (cap, ptr, len) = (
+   checked_vec(
       word(at),
       word(at.wrapping_add(8)),
       word(at.wrapping_add(16)),
-   );
-   (len <= cap && (ptr != 0 || len == 0))
-      .then(|| (ptr as *const u8, usize::try_from(len).ok()))
-      .and_then(|(ptr, len)| Some((ptr, len?)))
+   )
+}
+
+fn checked_vec(cap: u64, ptr: u64, len: u64) -> Option<(*const u8, usize)> {
+   (cap < NICHE && len <= cap && (ptr != 0 || len == 0))
+      .then(|| usize::try_from(len).ok())
+      .flatten()
+      .map(|len| (ptr as *const u8, len))
+}
+
+/// `len` bytes at `at`, or `None` where they are not mapped: checking a guessed
+/// layout may follow a word that is not a pointer.
+fn peek(at: *const u8, len: usize) -> Option<Vec<u8>> {
+   x86::read_memory(at as usize, len).filter(|bytes| bytes.len() == len)
+}
+
+fn peek_word(at: *const u8) -> Option<u64> {
+   Some(u64::from_le_bytes(peek(at, 8)?.try_into().ok()?))
+}
+
+/// Whether the `String` at `at` reads `want`, without trusting its pointer.
+fn peek_text_is(at: *const u8, want: &str) -> bool {
+   let Some(raw) = peek(at, 24) else {
+      return false;
+   };
+   let field =
+      |index: usize| u64::from_le_bytes(raw[index * 8..index * 8 + 8].try_into().unwrap_or([0; 8]));
+   checked_vec(field(0), field(1), field(2)).is_some_and(|(ptr, len)| {
+      len == want.len() && peek(ptr, len).is_some_and(|bytes| bytes == want.as_bytes())
+   })
 }
 
 fn text<'a>(at: *const u8) -> Option<&'a str> {
@@ -132,9 +161,9 @@ fn first_is_id(value: *const u8, bucket: Bucket, id: &str) -> bool {
    };
    let first = entries.wrapping_add(bucket.value);
    len > 0
-      && text(entries.wrapping_add(bucket.key)) == Some("id")
-      && word(first) == NICHE + 3
-      && text(first.wrapping_add(8)) == Some(id)
+      && peek_text_is(entries.wrapping_add(bucket.key), "id")
+      && peek_word(first) == Some(NICHE + 3)
+      && peek_text_is(first.wrapping_add(8), id)
 }
 
 /// Tries each order rustc may give an entry's `hash` (8 bytes), `key` (24)
@@ -164,7 +193,9 @@ fn write_value(out: &mut String, value: *const u8, bucket: Bucket, depth: usize)
       },
       Some(2) => {
          let payload = word(body.wrapping_add(8));
-         match word(body) {
+         // SAFETY: `N`'s tag is a byte at the start of the `Number`; the
+         // bytes after it are padding.
+         match unsafe { *body } {
             0 => write!(out, "{payload}").ok()?,
             #[expect(clippy::cast_possible_wrap, reason = "NegInt holds an i64")]
             1 => write!(out, "{}", payload as i64).ok()?,
