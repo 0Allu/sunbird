@@ -130,7 +130,6 @@ impl Platform for Mobile {
       staff::start(image);
    }
 
-   // The site's iOS patcher unlocks staff in the IPA's bytes.
    #[cfg(target_os = "ios")]
    fn staff(&self, _image: &'static Image<'static>) {}
 

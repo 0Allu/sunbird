@@ -52,8 +52,11 @@ fn main() -> misstep::Result<()> {
    let path = args.first().context(USAGE)?;
    let data = fs::read(path).with_context(|| format!("reading {path}"))?;
    if data.starts_with(&ios::HERMES_MAGIC) {
-      let at = ios::staff_env(&data).map_err(misstep::Report::msg)?;
-      println!("ok    {:<20} {at:#x}", "staff env");
+      let switch = ios::switch_entrypoint(&data).map_err(misstep::Report::msg)?;
+      println!(
+         "ok    {:<20} {:#x}",
+         "switch entrypoint", switch.default_config
+      );
       return Ok(());
    }
    let parsed = BinaryFile::parse(path, &data)?;

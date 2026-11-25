@@ -20,7 +20,7 @@ const RETURN_TRUE: [u8; 8] = [0x20, 0x00, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6];
 
 /// The Mach-O inside the framework, by the suffix of its archive path.
 const FRAMEWORK: &str = "PhoenixFatClient.framework/PhoenixFatClient";
-/// The Hermes bundle holding `isStaffEnv`.
+/// The Hermes bundle holding the Phoenix switch experiment.
 const JS_BUNDLE: &str = "Payload/Discord.app/main.jsbundle";
 /// The app's executable, which gets the load command for [`LOADER`].
 const EXECUTABLE: &str = "Payload/Discord.app/Discord";
@@ -29,12 +29,8 @@ const FRAMEWORKS: &str = "Payload/Discord.app/Frameworks/";
 const LOADER: &str = "libphoenix.dylib";
 /// The path [`EXECUTABLE`] loads [`LOADER`] from.
 const LOADER_PATH: &str = "@executable_path/Frameworks/libphoenix.dylib";
-/// `LoadConstTrue r1; Ret r1`, so `isStaffEnv` returns true and Discord offers
-/// the Phoenix launch switch. This enables every staff experiment, so it is a
-/// blunt lever kept for parity with the site.
-const STAFF_TRUE: [u8; 4] = [0x95, 0x01, 0x76, 0x01];
 
-/// Opens the access gate, forces `isStaffEnv` true and adds `loader` with
+/// Opens the access gate, offers the Phoenix switch and adds `loader` with
 /// `plugins` to a decrypted IPA. The patched and added files are stored
 /// uncompressed and every other entry is copied verbatim.
 pub fn build_patched_ipa(
@@ -65,7 +61,7 @@ pub fn build_patched_ipa(
       .ok_or_else(|| Error::Host(format!("{JS_BUNDLE} not found in the IPA")))?;
    let name = entries[bundle].name.clone();
    let mut hermes = entries[bundle].data()?.into_owned();
-   patch_staff(&name, &mut hermes)?;
+   offer_switch(&name, &mut hermes)?;
    entries[bundle] = zip::Entry::stored(name, hermes)?;
 
    let executable = entries
@@ -168,10 +164,16 @@ fn load_weak(path: &str, data: &mut [u8], dylib: &str) -> Result<(), Error> {
    Ok(())
 }
 
-/// Forces `isStaffEnv` to return true in the Hermes bundle.
-fn patch_staff(path: &str, data: &mut [u8]) -> Result<(), Error> {
-   let at = ios::staff_env(data).map_err(|err| Error::Host(format!("{path}: {err}")))?;
-   data[at..at + STAFF_TRUE.len()].copy_from_slice(&STAFF_TRUE);
+/// Makes the Phoenix switch experiment's default config its enabled variation,
+/// so Settings offers the switch without the staff flag.
+fn offer_switch(path: &str, data: &mut [u8]) -> Result<(), Error> {
+   let switch =
+      ios::switch_entrypoint(data).map_err(|err| Error::Host(format!("{path}: {err}")))?;
+   let enabled = switch.enabled_config;
+   data.copy_within(
+      enabled..enabled + ios::OBJECT_BUFFERS,
+      switch.default_config,
+   );
    Ok(())
 }
 

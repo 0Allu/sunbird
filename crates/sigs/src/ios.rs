@@ -219,14 +219,36 @@ const ACCESS_GATE: Pattern = Pattern::new(
 /// The first bytes of a Hermes bytecode bundle like `main.jsbundle`.
 pub const HERMES_MAGIC: [u8; 8] = 0x1F19_03C1_03BC_1FC6_u64.to_le_bytes();
 
-/// The `isStaffEnv` getter's prologue in the Hermes bytecode, up to its
-/// `LoadConstFalse; Ret` body. Read on Discord 357.0 (1.12.2).
-const STAFF_ENV: Pattern =
-   Pattern::new("89 01 02 93 00 D5 06 01 00 93 01 34 02 00 3B 02 02 03 45 05 02 00 22 13");
+/// The `2026-11-phoenix-switch-entrypoint` experiment's definition in the
+/// Hermes bytecode, three `NewObjectWithBufferLong`s: its name, its
+/// `{enabled: false}` default config and its `{enabled: true}` variation.
+/// Read on Discord 357.0 (1.12.2), where the name's buffer ids anchor it.
+const SWITCH_ENTRYPOINT: Pattern = Pattern::new(
+   "02 01 0D 02 00 00 D0 AD 0F 00 02 07 ?? ?? ?? ?? ?? ?? ?? ?? 52 01 07 02 01 07 ?? ?? ?? ?? 02 \
+    08 ?? ?? ?? ?? ?? ?? ?? ?? 58 07 08 01",
+);
 
-/// The `isStaffEnv` getter in `main.jsbundle`, as a file offset.
-pub fn staff_env(bundle: &[u8]) -> Found<usize> {
-   one("isStaffEnv", &STAFF_ENV.find_in(bundle))
+/// The key and value buffer ids of a `NewObjectWithBufferLong`, after its
+/// opcode and register.
+pub const OBJECT_BUFFERS: usize = 8;
+
+/// File offsets of the buffer ids of the Phoenix switch experiment's two
+/// configs in `main.jsbundle`. Discord offers the switch to staff, developers
+/// and users whose config of this experiment is enabled.
+pub struct SwitchEntrypoint {
+   pub default_config: usize,
+   pub enabled_config: usize,
+}
+
+pub fn switch_entrypoint(bundle: &[u8]) -> Found<SwitchEntrypoint> {
+   let at = one(
+      "phoenix switch entrypoint",
+      &SWITCH_ENTRYPOINT.find_in(bundle),
+   )?;
+   Ok(SwitchEntrypoint {
+      default_config: at + 12,
+      enabled_config: at + 32,
+   })
 }
 
 /// The two access-gate evaluators' entry points, which open the gate when both

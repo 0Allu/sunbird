@@ -157,7 +157,7 @@ impl IpaBuild {
       self.plugins.insert(name, source);
    }
 
-   /// Opens the access gate, forces `isStaffEnv` true and adds the loader and
+   /// Opens the access gate, offers the Phoenix switch and adds the loader and
    /// plugins, returning the repacked archive for the page to download.
    pub fn patch(&self, ipa: &[u8]) -> Result<Uint8Array, JsError> {
       if self.loader.is_empty() {
