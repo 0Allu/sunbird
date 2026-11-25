@@ -89,10 +89,6 @@ struct Loaded {
 
 type ChosenMap = BTreeMap<String, BTreeMap<String, Chosen>>;
 
-const fn default_true() -> bool {
-   true
-}
-
 /// Which plugins the user turned off or on against their default and how
 /// they set each plugin's settings, kept in `home/plugins.json`.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -103,7 +99,7 @@ struct Choices<'a> {
    enabled:      BTreeSet<String>,
    #[serde(default)]
    settings:     Cow<'a, ChosenMap>,
-   #[serde(default = "default_true")]
+   #[serde(default)]
    staff:        bool,
    #[serde(default)]
    remote_shell: bool,
@@ -115,7 +111,7 @@ impl Default for Choices<'_> {
          disabled:     BTreeSet::new(),
          enabled:      BTreeSet::new(),
          settings:     Cow::Owned(BTreeMap::new()),
-         staff:        true,
+         staff:        false,
          remote_shell: false,
       }
    }

@@ -97,7 +97,7 @@ static STATE: OnceLock<State> = OnceLock::new();
 static PLATFORM: OnceLock<&'static dyn Platform> = OnceLock::new();
 /// Phoenix's Staff Settings page reads `(user.flags | flag_override) & 1`, and
 /// the platforms set that bit while this is on.
-static STAFF: AtomicBool = AtomicBool::new(true);
+static STAFF: AtomicBool = AtomicBool::new(false);
 
 /// The running runtime, once [`start`] published it.
 #[must_use]
