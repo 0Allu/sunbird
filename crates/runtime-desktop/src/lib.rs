@@ -123,6 +123,14 @@ pub fn prepare() -> Result<(), Error> {
    Ok(())
 }
 
+/// Opens the access gate and hooks nothing else, so Discord runs as it would
+/// without Sunbird. For telling Discord's own behaviour from ours.
+pub fn open_gate_only() -> Result<(), Error> {
+   phoenix_runtime::set_platform(&Desktop);
+   open_access_gate(&phoenix_runtime::target()?);
+   Ok(())
+}
+
 /// Starts phoenix inside Desktop Phoenix, on what [`prepare`] hooked.
 pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    let prepared = PREPARED

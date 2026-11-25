@@ -82,6 +82,13 @@ extern "C" fn init() {
 #[cfg(any(windows, all(target_os = "linux", target_arch = "x86_64")))]
 fn desktop() {
    logging();
+   if env::var_os("SUNBIRD_GATE_ONLY").is_some() {
+      match phoenix_runtime_desktop::open_gate_only() {
+         Ok(()) => log::info!("SUNBIRD_GATE_ONLY: only the access gate is open"),
+         Err(err) => log::error!("phoenix could not open the access gate: {err}"),
+      }
+      return;
+   }
    let started = std::time::Instant::now();
    if let Err(err) = phoenix_runtime_desktop::prepare() {
       log::error!("phoenix could not hook Discord: {err}");

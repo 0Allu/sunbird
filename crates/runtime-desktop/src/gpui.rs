@@ -37,10 +37,10 @@ use phoenix_sigs::desktop::{
    layout,
 };
 
-/// `gpui::SharedString` (24 bytes): tag `0x18` is `Static(&'static str)`,
-/// requiring no allocator or `Arc::drop`.
+/// `gpui::SharedString` (24 bytes): tag `0x18` is `Static(&'static str)` and
+/// `0x19` is `Arc<str>`, the `ArcInner` at `ptr` with the bytes at `+0x10`.
+/// Not `Copy`: a heap one must reach Discord exactly once, which drops it.
 #[repr(C)]
-#[derive(Clone, Copy)]
 pub struct SharedString {
    pub tag: u8,
    _pad:    [u8; 7],
@@ -58,14 +58,34 @@ impl SharedString {
       }
    }
 
+   /// An `Arc<str>` on Discord's heap, which Discord frees with the element
+   /// it moves into. Interned only before the builders resolve.
    pub fn from_str(s: &str) -> Self {
-      Self::from_static(intern(s))
+      let Some(sym) = SYMBOLS.get() else {
+         return Self::from_static(intern(s));
+      };
+      // SAFETY: Discord's own allocator, with the layout `Arc<str>`'s drop
+      // frees: two counts, then the bytes, padded to 8.
+      let inner = unsafe { (sym.alloc_or_oom)(8, (16 + s.len()).next_multiple_of(8)) };
+      if inner.is_null() {
+         return Self::from_static(intern(s));
+      }
+      // SAFETY: `inner` holds `16 + s.len()` bytes, aligned to 8.
+      unsafe {
+         inner.cast::<[usize; 2]>().write([1, 1]);
+         ptr::copy_nonoverlapping(s.as_ptr(), inner.add(16), s.len());
+      }
+      Self {
+         tag:  0x19,
+         _pad: [0; 7],
+         ptr:  inner.cast_const(),
+         len:  s.len(),
+      }
    }
 }
 
-/// Process-lifetime string interner so dynamic plugin names, descriptions, and
-/// GPUI element IDs can be passed as `SharedString::Static(&'static str)` with
-/// zero allocator mismatch and bounded memory.
+/// Process-lifetime strings for element IDs and badge URLs, which Discord
+/// borrows as `&'static str`. Only bounded sets of strings belong here.
 static INTERNED: LazyLock<Mutex<HashSet<&'static str>>> =
    LazyLock::new(|| Mutex::new(HashSet::new()));
 
@@ -774,7 +794,7 @@ impl Builder {
       let title = SharedString::from_str(title);
       let subtitle = SharedString::from_str(subtitle);
       let mut out = RawDiv::zeroed();
-      // SAFETY: `SharedString::Static` pointers live for `'static`.
+      // SAFETY: Mana's `TextBlock::new` takes both strings.
       unsafe { (self.sym.text_block)(&raw mut out, &raw const title, &raw const subtitle) };
       out
    }
@@ -875,7 +895,7 @@ impl Builder {
          s.hsla(s.at.text_color, color_hsla);
       });
       let mut ss = SharedString::from_str(text);
-      // SAFETY: converts static `SharedString` into a 32-byte `AnyElement` and
+      // SAFETY: moves the `SharedString` into a 32-byte `AnyElement` and
       // pushes it.
       let mut any = unsafe {
          let mut out = MaybeUninit::<RawAnyElement>::uninit();
@@ -933,7 +953,7 @@ pub fn push_any(parent: &mut RawDiv, child: &mut RawAnyElement) -> bool {
 pub fn str_to_any(text: &str) -> Option<RawAnyElement> {
    let str_into_any = SYMBOLS.get()?.str_into_any?;
    let mut ss = SharedString::from_str(text);
-   // SAFETY: converts static `SharedString` into a 32-byte `AnyElement`.
+   // SAFETY: moves the `SharedString` into a 32-byte `AnyElement`.
    unsafe {
       let mut out = MaybeUninit::<RawAnyElement>::uninit();
       str_into_any(out.as_mut_ptr(), &raw mut ss);

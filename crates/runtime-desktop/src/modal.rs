@@ -1059,13 +1059,12 @@ unsafe fn ensure_field_entity(
          ent.id_hi,
       );
       if !field.is_null() {
-         let ph = SharedString::from_static(placeholder);
          for slot in tf.layout.placeholders {
             field
                .cast::<u8>()
                .add(slot)
                .cast::<SharedString>()
-               .write_unaligned(ph);
+               .write_unaligned(SharedString::from_static(placeholder));
          }
       }
       ent
