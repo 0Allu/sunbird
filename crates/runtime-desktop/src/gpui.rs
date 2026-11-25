@@ -32,6 +32,8 @@ use phoenix_runtime::{
 };
 use phoenix_sigs::desktop::{
    self,
+   GpuiLayout,
+   StyleOffsets,
    layout,
 };
 
@@ -39,15 +41,15 @@ use phoenix_sigs::desktop::{
 /// requiring no allocator or `Arc::drop`.
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct SharedString {
-   tag:  u8,
-   _pad: [u8; 7],
-   ptr:  *const u8,
-   len:  usize,
+pub(crate) struct SharedString {
+   pub(crate) tag: u8,
+   _pad:           [u8; 7],
+   pub(crate) ptr: *const u8,
+   pub(crate) len: usize,
 }
 
 impl SharedString {
-   const fn from_static(s: &'static str) -> Self {
+   pub(crate) const fn from_static(s: &'static str) -> Self {
       Self {
          tag:  0x18,
          _pad: [0; 7],
@@ -56,7 +58,7 @@ impl SharedString {
       }
    }
 
-   fn from_str(s: &str) -> Self {
+   pub(crate) fn from_str(s: &str) -> Self {
       Self::from_static(intern(s))
    }
 }
@@ -66,6 +68,10 @@ impl SharedString {
 /// zero allocator mismatch and bounded memory.
 static INTERNED: LazyLock<Mutex<HashSet<&'static str>>> =
    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+pub(crate) fn intern_str(s: &str) -> &'static str {
+   intern(s)
+}
 
 fn intern(s: &str) -> &'static str {
    let mut set = INTERNED.lock().unwrap_or_else(PoisonError::into_inner);
@@ -77,34 +83,59 @@ fn intern(s: &str) -> &'static str {
    leaked
 }
 
-#[repr(C, align(8))]
-struct RawDiv([u8; layout::DIV]);
+/// A zeroed buffer at least as large as the Discord struct built in it, whose
+/// size is decoded at startup and checked against `N` by `sigs`.
+#[repr(C, align(16))]
+pub struct Scratch<const N: usize>([u8; N]);
+
+impl<const N: usize> Scratch<N> {
+   pub const fn zeroed() -> Self {
+      Self([0; N])
+   }
+
+   pub const fn as_mut_ptr(&mut self) -> *mut u8 {
+      self.0.as_mut_ptr()
+   }
+
+   /// Writes `value` at `at`, or nothing if it would not fit.
+   pub fn put<T>(&mut self, at: usize, value: T) {
+      if at + size_of::<T>() <= N {
+         // SAFETY: in bounds of `self.0`, checked above.
+         unsafe {
+            self
+               .0
+               .as_mut_ptr()
+               .add(at)
+               .cast::<T>()
+               .write_unaligned(value);
+         }
+      }
+   }
+}
+
+pub type RawDiv = Scratch<{ layout::DIV_CAP }>;
+type RawSwitch = Scratch<{ layout::SCRATCH_CAP }>;
+pub type RawButton = Scratch<{ layout::SCRATCH_CAP }>;
 
 #[repr(C, align(8))]
 pub struct RawAnyElement([u8; layout::ANY_ELEMENT]);
 
-#[repr(C, align(8))]
-struct RawSwitch([u8; layout::SWITCH]);
-
-#[repr(C, align(8))]
-struct RawButton([u8; layout::BUTTON]);
-
 #[repr(C)]
-struct RcInner {
+pub(crate) struct RcInner {
    strong:    usize,
    weak:      usize,
    action_id: u64,
 }
 
 #[repr(C)]
-struct RcFnVtbl {
-   drop_in_place: *const c_void,
-   size:          usize,
-   align:         usize,
-   call_once:     *const c_void,
-   call_mut:      *const c_void,
-   call:          *const c_void,
-   extra:         *const c_void,
+pub(crate) struct RcFnVtbl {
+   pub drop_in_place: *const c_void,
+   pub size:          usize,
+   pub align:         usize,
+   pub call_once:     *const c_void,
+   pub call_mut:      *const c_void,
+   pub call:          *const c_void,
+   pub extra:         *const c_void,
 }
 
 // SAFETY: vtables contain only function pointers and plain integers.
@@ -132,7 +163,7 @@ static BUTTON_FN_VTBL: RcFnVtbl = RcFnVtbl {
 
 #[derive(Clone, Copy)]
 #[repr(u8)]
-enum BtnVariant {
+pub(crate) enum BtnVariant {
    Primary   = 0,
    Secondary = 1,
    Critical  = 3,
@@ -140,13 +171,17 @@ enum BtnVariant {
 
 #[derive(Clone, Copy)]
 #[repr(u8)]
-enum BtnSize {
+pub(crate) enum BtnSize {
    Small  = 1,
    Medium = 2,
 }
 
+/// Encodes `Some(Length::Definite(DefiniteLength::Fraction(1.0)))` (`w_full` /
+/// `h_full`) in GPUI's `StyleRefinement`.
+pub(crate) const W_FULL: u64 = 0x3F80_0000_0000_0002;
+
 /// Encodes `Some(AbsoluteLength::Pixels(px))` in GPUI's `StyleRefinement`.
-fn gpui_px(px: f32) -> u64 {
+pub(crate) fn gpui_px(px: f32) -> u64 {
    u64::from(px.to_bits()) << 32
 }
 
@@ -191,6 +226,7 @@ struct GpuiSymbols {
    button_new:       ButtonNewFn,
    action_row:       ActionRowFn,
    alloc_or_oom:     AllocOrOomFn,
+   layout:           GpuiLayout,
 }
 
 // SAFETY: function pointers and static `.rdata` `Location` pointer in
@@ -267,6 +303,9 @@ enum Action {
    RefreshCatalog,
    TogglePlugin(String),
    ReloadPlugin(String),
+   EditPluginCode(String),
+   OpenInstallUrl,
+   InstallFromFile,
    UninstallPlugin(String),
    ToggleSetting {
       plugin: String,
@@ -388,6 +427,34 @@ unsafe extern "C" fn button_callback(
          Action::ApplyUpdates => update::apply(),
          Action::RefreshCatalog => update::fetch_catalog(),
          Action::ReloadPlugin(name) => phoenix_runtime::reload(&name),
+         Action::EditPluginCode(name) => {
+            let Some(source) = phoenix_runtime::source(&name) else {
+               phoenix_ui_desktop::toast(&format!("Could not read source for {name}"));
+               return;
+            };
+            crate::modal::open_code_editor(name, source);
+         },
+         Action::OpenInstallUrl => {
+            crate::modal::open_install_url();
+         },
+         Action::InstallFromFile => {
+            std::thread::spawn(|| {
+               let Some((file_name, bytes)) = phoenix_ui_desktop::pick_js_file() else {
+                  return;
+               };
+               match phoenix_runtime::install_file(&file_name, bytes) {
+                  Ok(installed) => {
+                     log::info!("sunbird settings: installed {installed} from {file_name}");
+                     phoenix_ui_desktop::toast(&format!("Installed {installed}"));
+                     crate::modal::force_redraw();
+                  },
+                  Err(err) => {
+                     log::warn!("sunbird settings: install file {file_name}: {err}");
+                     phoenix_ui_desktop::toast(&format!("Install failed: {err}"));
+                  },
+               }
+            });
+         },
          Action::UninstallPlugin(name) => {
             if let Err(err) = phoenix_runtime::uninstall(&name) {
                log::warn!("sunbird settings: uninstall {name}: {err}");
@@ -421,28 +488,32 @@ pub fn locate(image: &Image<'static>) -> bool {
    }
 
    let found = desktop::gpui(image).and_then(|gpui| {
-      desktop::gpui_layouts(image, &gpui)?;
-      Ok(gpui)
+      let layout = desktop::gpui_layouts(image, &gpui)?;
+      Ok((gpui, layout))
    });
-   let desktop::Gpui {
-      caller_loc,
-      div_new,
-      div_flex,
-      div_flex_col,
-      div_style_mut,
-      div_child_div,
-      div_child_button,
-      div_into_any,
-      div_push_any,
-      str_into_any,
-      text_block,
-      switch_new,
-      switch_into_div,
-      button_new,
-      action_row,
-      alloc_or_oom,
-   } = match found {
-      Ok(gpui) => gpui,
+   let (
+      desktop::Gpui {
+         caller_loc,
+         div_new,
+         div_flex,
+         div_flex_col,
+         div_style_mut,
+         div_child_div,
+         div_child_button,
+         div_into_any,
+         div_push_any,
+         str_into_any,
+         text_block,
+         switch_new,
+         switch_into_div,
+         button_new,
+         action_row,
+         alloc_or_oom,
+         ..
+      },
+      found_layout,
+   ) = match found {
+      Ok(found) => found,
       Err(err) => {
          log::warn!("desktop gpui: {err}, leaving the settings page and accessories off");
          return false;
@@ -471,6 +542,7 @@ pub fn locate(image: &Image<'static>) -> bool {
          button_new:       std::mem::transmute::<usize, ButtonNewFn>(button_new),
          action_row:       std::mem::transmute::<usize, ActionRowFn>(action_row),
          alloc_or_oom:     std::mem::transmute::<usize, AllocOrOomFn>(alloc_or_oom),
+         layout:           found_layout,
       }
    };
    let _ = SYMBOLS.set(symbols);
@@ -479,7 +551,84 @@ pub fn locate(image: &Image<'static>) -> bool {
        switch={switch_new:#x}, button={button_new:#x}, row={action_row:#x}, \
        push_any={div_push_any:#x?}, str_any={str_into_any:#x?})"
    );
+   log::info!("desktop gpui: {found_layout:x?}");
    true
+}
+
+/// `div.f(..)` for a `Div` builder taking and returning it by value.
+fn chain(f: DivMutFn, mut div: RawDiv) -> RawDiv {
+   let mut out = RawDiv::zeroed();
+   // SAFETY: `f` moves `div` into `out`, both buffers fit a `Div`.
+   unsafe { f(&raw mut out, &raw mut div) };
+   out
+}
+
+/// The `GpuiLayout` decoded from this `Discord.exe`.
+pub fn layout() -> Option<&'static GpuiLayout> {
+   SYMBOLS.get().map(|sym| &sym.layout)
+}
+
+/// A `Div`'s `StyleRefinement`, written through the decoded field offsets.
+pub struct Style {
+   ptr:    *mut u8,
+   pub at: &'static StyleOffsets,
+}
+
+impl Style {
+   fn put<T>(&self, field: usize, value: T) {
+      if field + size_of::<T>() <= self.at.bytes {
+         // SAFETY: `ptr` is the live `StyleRefinement` of `at.bytes` bytes that
+         // `div_style_mut` returned, and the write is inside it.
+         unsafe { self.ptr.add(field).cast::<T>().write_unaligned(value) };
+      }
+   }
+
+   /// A one-byte enum field.
+   pub fn set(&self, field: usize, value: u8) {
+      self.put(field, value);
+   }
+
+   /// An `Option<Length>` or similar 8-byte field, [`gpui_px`] or [`W_FULL`].
+   pub fn length(&self, field: usize, value: u64) {
+      self.put(field, value);
+   }
+
+   pub fn lengths(&self, fields: &[usize], value: u64) {
+      for &field in fields {
+         self.length(field, value);
+      }
+   }
+
+   /// `Some(Hsla)`: a `u32` tag, then four `f32`s.
+   pub fn hsla(&self, field: usize, hsla: [f32; 4]) {
+      if field + 20 <= self.at.bytes {
+         self.put(field, 1u32);
+         self.put(field + 4, hsla);
+      }
+   }
+
+   /// `Some(f32)`: a `u32` tag, then the value.
+   pub fn float(&self, field: usize, value: f32) {
+      if field + 8 <= self.at.bytes {
+         self.put(field, 1u32);
+         self.put(field + 4, value);
+      }
+   }
+
+   pub fn shared_string(&self, field: usize, value: SharedString) {
+      self.put(field, value);
+   }
+
+   /// `Some(Background::Solid(hsla))`: tag `0`, the color at `+8`, and zeroed
+   /// gradient stops up to `+0x48`.
+   pub fn solid_background(&self, hsla: [f32; 4]) {
+      let field = self.at.background;
+      if field + 0x48 <= self.at.bytes {
+         self.put(field, 0u64);
+         self.put(field + 8, hsla);
+         self.put(field + 0x18, [0u64; 6]);
+      }
+   }
 }
 
 // ---------------------------------------------------------------------------
@@ -512,92 +661,54 @@ impl Builder {
    }
 
    fn raw_div(&self) -> RawDiv {
-      // SAFETY: constructs an empty GPUI `Div`.
-      unsafe {
-         let mut d = MaybeUninit::<RawDiv>::uninit();
-         (self.sym.div_new)(d.as_mut_ptr(), self.sym.caller_loc);
-         d.assume_init()
-      }
+      let mut d = RawDiv::zeroed();
+      // SAFETY: constructs an empty GPUI `Div` into a buffer that fits it.
+      unsafe { (self.sym.div_new)(&raw mut d, self.sym.caller_loc) };
+      d
    }
 
-   fn style_div(&self, div: &mut RawDiv, f: impl FnOnce(*mut u8)) {
-      // SAFETY: `div_style_mut` returns a valid mutable pointer to `Div`'s
-      // `StyleRefinement` (verified offsets from `Discord.exe`).
-      let style = unsafe { (self.sym.div_style_mut)(&raw mut *div) };
-      if !style.is_null() {
-         f(style);
+   fn style_div(&self, div: &mut RawDiv, f: impl FnOnce(&Style)) {
+      // SAFETY: `div_style_mut` returns `Div`'s boxed `StyleRefinement`.
+      let ptr = unsafe { (self.sym.div_style_mut)(&raw mut *div) };
+      if !ptr.is_null() {
+         f(&Style {
+            ptr,
+            at: &self.sym.layout.style,
+         });
       }
    }
 
    fn v_stack(&self, gap_px: f32) -> RawDiv {
-      // SAFETY: `div().flex().flex_col()` + true `gap` at StyleRefinement
-      // +0x1b8/+0x1c0.
-      unsafe {
-         let mut d0 = self.raw_div();
-         let mut d1 = MaybeUninit::<RawDiv>::uninit();
-         (self.sym.div_flex)(d1.as_mut_ptr(), &raw mut d0);
-         let mut d1 = d1.assume_init();
-
-         let mut d2 = MaybeUninit::<RawDiv>::uninit();
-         (self.sym.div_flex_col)(d2.as_mut_ptr(), &raw mut d1);
-         let mut d2 = d2.assume_init();
-
-         self.style_div(&mut d2, |s| {
-            let g = gpui_px(gap_px);
-            s.add(0x1B8).cast::<u64>().write_unaligned(g);
-            s.add(0x1C0).cast::<u64>().write_unaligned(g);
-         });
-         d2
-      }
+      let d = chain(self.sym.div_flex, self.raw_div());
+      let mut d = chain(self.sym.div_flex_col, d);
+      self.style_div(&mut d, |s| s.lengths(&s.at.gap, gpui_px(gap_px)));
+      d
    }
 
    fn h_row(&self, gap_px: f32, space_between: bool) -> RawDiv {
-      // SAFETY: `div().flex().items_center().gap(px)` (+ optional
-      // `justify_between`).
-      unsafe {
-         let mut d0 = self.raw_div();
-         let mut d1 = MaybeUninit::<RawDiv>::uninit();
-         (self.sym.div_flex)(d1.as_mut_ptr(), &raw mut d0);
-         let mut d1 = d1.assume_init();
-
-         self.style_div(&mut d1, |s| {
-            let g = gpui_px(gap_px);
-            s.add(0x1B8).cast::<u64>().write_unaligned(g);
-            s.add(0x1C0).cast::<u64>().write_unaligned(g);
-            s.add(0x279).write(4); // align_items = Center
-            if space_between {
-               s.add(0x27C).write(6); // justify_content = SpaceBetween
-            }
-         });
-         d1
-      }
+      const ALIGN_CENTER: u8 = 4;
+      const JUSTIFY_SPACE_BETWEEN: u8 = 6;
+      let mut d = chain(self.sym.div_flex, self.raw_div());
+      self.style_div(&mut d, |s| {
+         s.lengths(&s.at.gap, gpui_px(gap_px));
+         s.set(s.at.align_items, ALIGN_CENTER);
+         if space_between {
+            s.set(s.at.justify_content, JUSTIFY_SPACE_BETWEEN);
+         }
+      });
+      d
    }
 
    /// Rounded bordered card container matching Discord's native Settings cards.
    fn card(&self, gap_px: f32, pad_px: f32, radius_px: f32, border_alpha: f32) -> RawDiv {
       let mut d = self.v_stack(gap_px);
-      // SAFETY: verified StyleRefinement offsets:
-      // +0x110..+0x130 = border_widths, +0x130..+0x150 = corner_radii,
-      // +0x198..+0x1b8 = padding, +0x250 = Option<Hsla> border_color.
-      self.style_div(&mut d, |s| unsafe {
-         let bw = gpui_px(1.0);
-         for off in [0x110usize, 0x118, 0x120, 0x128] {
-            s.add(off).cast::<u64>().write_unaligned(bw);
-         }
-         let r = gpui_px(radius_px);
-         for off in [0x130usize, 0x138, 0x140, 0x148] {
-            s.add(off).cast::<u64>().write_unaligned(r);
-         }
-         let p = gpui_px(pad_px);
-         for off in [0x198usize, 0x1A0, 0x1A8, 0x1B0] {
-            s.add(off).cast::<u64>().write_unaligned(p);
-         }
+      self.style_div(&mut d, |s| {
+         s.lengths(&s.at.border_widths, gpui_px(1.0));
+         s.lengths(&s.at.corner_radii, gpui_px(radius_px));
+         s.lengths(&s.at.padding, gpui_px(pad_px));
          // Neutral translucent border that adapts across dark, ash, midnight,
          // and light themes.
-         s.add(0x250).cast::<u32>().write_unaligned(1);
-         s.add(0x254)
-            .cast::<[f32; 4]>()
-            .write_unaligned([0.62, 0.05, 0.55, border_alpha]);
+         s.hsla(s.at.border_color, [0.62, 0.05, 0.55, border_alpha]);
       });
       d
    }
@@ -605,26 +716,19 @@ impl Builder {
    /// Subtle 1px horizontal divider line between sections or rows.
    fn divider(&self) -> RawDiv {
       let mut d = self.raw_div();
-      // SAFETY: 1px bottom border with translucent neutral color and vertical
-      // margin.
-      self.style_div(&mut d, |s| unsafe {
-         s.add(0x120).cast::<u64>().write_unaligned(gpui_px(1.0)); // border_bottom = 1px
-         s.add(0x1F0).cast::<u64>().write_unaligned(gpui_px(1.0)); // height = 1px
-         s.add(0x250).cast::<u32>().write_unaligned(1);
-         s.add(0x254)
-            .cast::<[f32; 4]>()
-            .write_unaligned([0.62, 0.05, 0.55, 0.16]);
+      self.style_div(&mut d, |s| {
+         s.length(s.at.border_widths[2], gpui_px(1.0));
+         s.length(s.at.size[1], gpui_px(1.0));
+         s.hsla(s.at.border_color, [0.62, 0.05, 0.55, 0.16]);
       });
       d
    }
 
    fn push_div(&self, mut parent: RawDiv, mut child: RawDiv) -> RawDiv {
+      let mut out = RawDiv::zeroed();
       // SAFETY: moves both `RawDiv`s into `div_child_div`.
-      unsafe {
-         let mut out = MaybeUninit::<RawDiv>::uninit();
-         (self.sym.div_child_div)(out.as_mut_ptr(), &raw mut parent, &raw mut child);
-         out.assume_init()
-      }
+      unsafe { (self.sym.div_child_div)(&raw mut out, &raw mut parent, &raw mut child) };
+      out
    }
 
    fn build_button(
@@ -635,34 +739,16 @@ impl Builder {
       size: BtnSize,
       action: Action,
    ) -> RawButton {
-      let id_static = intern(id);
-      let label_ss = SharedString::from_str(label);
-      // SAFETY: creates a native Mana `Button`, sets variant (+0x323), size
-      // (+0x31d), and attaches our `Rc<dyn Fn>` click callback at
-      // +0x298..+0x2a8.
-      unsafe {
-         let mut btn = MaybeUninit::<RawButton>::uninit();
-         (self.sym.button_new)(
-            btn.as_mut_ptr(),
-            id_static.as_ptr(),
-            id_static.len(),
-            &raw const label_ss,
-         );
-         let mut btn = btn.assume_init();
-         let base = btn.0.as_mut_ptr();
-         base.add(layout::BUTTON_VARIANT).write(variant as u8);
-         base.add(layout::BUTTON_SIZE).write(size as u8);
-         let rc_ptr = self.alloc_rc_action(action);
-         base
-            .add(layout::BUTTON_ON_CLICK)
-            .cast::<*mut RcInner>()
-            .write_unaligned(rc_ptr);
-         base
-            .add(layout::BUTTON_ON_CLICK + 8)
-            .cast::<*const RcFnVtbl>()
-            .write_unaligned(&raw const BUTTON_FN_VTBL);
-         btn
-      }
+      let rc_ptr = self.alloc_rc_action(action);
+      new_button(
+         self.sym,
+         id,
+         label,
+         variant,
+         size,
+         &raw const BUTTON_FN_VTBL,
+         rc_ptr,
+      )
    }
 
    fn push_button(
@@ -675,23 +761,19 @@ impl Builder {
       action: Action,
    ) -> RawDiv {
       let mut btn = self.build_button(id, label, variant, size, action);
+      let mut out = RawDiv::zeroed();
       // SAFETY: appends native Mana `Button` directly into `parent`.
-      unsafe {
-         let mut out = MaybeUninit::<RawDiv>::uninit();
-         (self.sym.div_child_button)(out.as_mut_ptr(), &raw mut parent, &raw mut btn);
-         out.assume_init()
-      }
+      unsafe { (self.sym.div_child_button)(&raw mut out, &raw mut parent, &raw mut btn) };
+      out
    }
 
    fn text_block(&self, title: &str, subtitle: &str) -> RawDiv {
       let title = SharedString::from_str(title);
       let subtitle = SharedString::from_str(subtitle);
+      let mut out = RawDiv::zeroed();
       // SAFETY: `SharedString::Static` pointers live for `'static`.
-      unsafe {
-         let mut out = MaybeUninit::<RawDiv>::uninit();
-         (self.sym.text_block)(out.as_mut_ptr(), &raw const title, &raw const subtitle);
-         out.assume_init()
-      }
+      unsafe { (self.sym.text_block)(&raw mut out, &raw const title, &raw const subtitle) };
+      out
    }
 
    fn switch_row(
@@ -702,47 +784,33 @@ impl Builder {
       checked: bool,
       action: Action,
    ) -> RawDiv {
+      let at = &self.sym.layout.switch;
       let id_static = intern(id);
-      let label_ss = SharedString::from_str(label);
-      // SAFETY: creates a native Mana `Switch`, sets label (+0x98), optional
-      // description (+0xb0), and `on_change` `Rc<dyn Fn>` (+0x230..+0x240).
+      let mut sw = RawSwitch::zeroed();
+      // SAFETY: creates a native Mana `Switch` in a buffer that fits it.
       unsafe {
-         let mut sw = MaybeUninit::<RawSwitch>::uninit();
          (self.sym.switch_new)(
-            sw.as_mut_ptr(),
+            &raw mut sw,
             id_static.as_ptr(),
             id_static.len(),
             u8::from(checked),
          );
-         let mut sw = sw.assume_init();
-         let base = sw.0.as_mut_ptr();
-         base
-            .add(0x98)
-            .cast::<SharedString>()
-            .write_unaligned(label_ss);
-         if let Some(desc) = description
-            && !desc.is_empty()
-         {
-            let desc_ss = SharedString::from_str(desc);
-            base
-               .add(0xB0)
-               .cast::<SharedString>()
-               .write_unaligned(desc_ss);
-         }
-         let rc_ptr = self.alloc_rc_action(action);
-         base
-            .add(layout::SWITCH_ON_CHANGE)
-            .cast::<*mut RcInner>()
-            .write_unaligned(rc_ptr);
-         base
-            .add(layout::SWITCH_ON_CHANGE + 8)
-            .cast::<*const RcFnVtbl>()
-            .write_unaligned(&raw const SWITCH_FN_VTBL);
-
-         let mut out = MaybeUninit::<RawDiv>::uninit();
-         (self.sym.switch_into_div)(out.as_mut_ptr(), &raw mut sw);
-         out.assume_init()
       }
+      // The defaults these overwrite are static `SharedString`s and `None`,
+      // which own nothing.
+      sw.put(at.label, SharedString::from_str(label));
+      if let Some(desc) = description
+         && !desc.is_empty()
+      {
+         sw.put(at.description, SharedString::from_str(desc));
+      }
+      sw.put(at.on_change, self.alloc_rc_action(action));
+      sw.put(at.on_change + 8, &raw const SWITCH_FN_VTBL);
+
+      let mut out = RawDiv::zeroed();
+      // SAFETY: moves the `Switch` into its `Div`.
+      unsafe { (self.sym.switch_into_div)(&raw mut out, &raw mut sw) };
+      out
    }
 
    #[expect(clippy::too_many_arguments, reason = "one per GPUI row part")]
@@ -759,17 +827,17 @@ impl Builder {
       let title_ss = SharedString::from_str(title);
       let sub_ss = SharedString::from_str(subtitle);
       let mut btn = self.build_button(id, button_label, variant, size, action);
+      let mut out = RawDiv::zeroed();
       // SAFETY: builds Discord's native `ActionRow(title, subtitle, button)`.
       unsafe {
-         let mut out = MaybeUninit::<RawDiv>::uninit();
          (self.sym.action_row)(
-            out.as_mut_ptr(),
+            &raw mut out,
             &raw const title_ss,
             &raw const sub_ss,
             &raw mut btn,
          );
-         out.assume_init()
       }
+      out
    }
 
    fn write_any(&self, mut div: RawDiv, sret: *mut RawAnyElement) {
@@ -783,10 +851,13 @@ impl Builder {
       let Some(push) = self.sym.div_push_any else {
          return false;
       };
-      // SAFETY: `RawDiv + 0x40` is `SmallVec<[AnyElement; 2]>` (verified inside
-      // `div_child_div`).
+      // SAFETY: `children` is the `Div`'s `SmallVec<[AnyElement; 2]>`, decoded
+      // from `div_child_div` and inside the `Div`.
       unsafe {
-         let children = parent.0.as_mut_ptr().add(0x40).cast::<c_void>();
+         let children = parent
+            .as_mut_ptr()
+            .add(self.sym.layout.div.children)
+            .cast::<c_void>();
          push(children, child);
       }
       true
@@ -795,13 +866,10 @@ impl Builder {
    fn text_line(&self, text: &str, color_hsla: [f32; 4], font_px: f32) -> Option<RawDiv> {
       let str_into_any = self.sym.str_into_any?;
       let mut line_div = self.raw_div();
-      // SAFETY: verified StyleRefinement offsets:
-      // +0x58 = text.font_size (AbsoluteLength::Pixels),
-      // +0x88 = text.color (Option<Hsla>: u32 tag=1, [f32; 4] at +0x8c).
-      self.style_div(&mut line_div, |s| unsafe {
-         s.add(0x58).cast::<u64>().write_unaligned(gpui_px(font_px));
-         s.add(0x88).cast::<u32>().write_unaligned(1);
-         s.add(0x8C).cast::<[f32; 4]>().write_unaligned(color_hsla);
+      self.style_div(&mut line_div, |s| {
+         s.length(s.at.font_size, gpui_px(font_px));
+         s.length(s.at.line_height, gpui_px(font_px + 4.0));
+         s.hsla(s.at.text_color, color_hsla);
       });
       let mut ss = SharedString::from_str(text);
       // SAFETY: converts static `SharedString` into a 32-byte `AnyElement` and
@@ -818,10 +886,122 @@ impl Builder {
    }
 }
 
+/// Returns the resolved address of `Div::into_any_element` for sibling desktop
+/// locators (`crate::modal`).
+pub(crate) fn div_into_any_addr() -> Option<usize> {
+   SYMBOLS.get().map(|s| s.div_into_any as usize)
+}
+
+pub(crate) fn raw_div() -> Option<RawDiv> {
+   let sym = SYMBOLS.get()?;
+   Some(Builder { sym }.raw_div())
+}
+
+pub(crate) fn style_div(div: &mut RawDiv, f: impl FnOnce(&Style)) {
+   if let Some(sym) = SYMBOLS.get() {
+      Builder { sym }.style_div(div, f);
+   }
+}
+
+pub(crate) fn v_stack(gap_px: f32) -> Option<RawDiv> {
+   let sym = SYMBOLS.get()?;
+   Some(Builder { sym }.v_stack(gap_px))
+}
+
+pub(crate) fn h_row(gap_px: f32, space_between: bool) -> Option<RawDiv> {
+   let sym = SYMBOLS.get()?;
+   Some(Builder { sym }.h_row(gap_px, space_between))
+}
+
+pub(crate) fn push_div(parent: RawDiv, child: RawDiv) -> RawDiv {
+   let Some(sym) = SYMBOLS.get() else {
+      return parent;
+   };
+   Builder { sym }.push_div(parent, child)
+}
+
+pub(crate) fn push_any(parent: &mut RawDiv, child: &mut RawAnyElement) -> bool {
+   let Some(sym) = SYMBOLS.get() else {
+      return false;
+   };
+   Builder { sym }.push_any(parent, child)
+}
+
+pub(crate) fn str_to_any(text: &str) -> Option<RawAnyElement> {
+   let str_into_any = SYMBOLS.get()?.str_into_any?;
+   let mut ss = SharedString::from_str(text);
+   // SAFETY: converts static `SharedString` into a 32-byte `AnyElement`.
+   unsafe {
+      let mut out = MaybeUninit::<RawAnyElement>::uninit();
+      str_into_any(out.as_mut_ptr(), &raw mut ss);
+      Some(out.assume_init())
+   }
+}
+
+pub(crate) fn build_raw_button(
+   id: &str,
+   label: &str,
+   variant: BtnVariant,
+   size: BtnSize,
+   vtbl: *const RcFnVtbl,
+   action_id: u64,
+) -> Option<RawButton> {
+   let sym = SYMBOLS.get()?;
+   let rc_ptr = alloc_rc_u64(action_id)?;
+   Some(new_button(sym, id, label, variant, size, vtbl, rc_ptr))
+}
+
+/// A native Mana `Button` with our `variant`, `size` and `Rc<dyn Fn>` click
+/// handler.
+fn new_button(
+   sym: &GpuiSymbols,
+   id: &str,
+   label: &str,
+   variant: BtnVariant,
+   size: BtnSize,
+   vtbl: *const RcFnVtbl,
+   rc_ptr: *mut RcInner,
+) -> RawButton {
+   let at = &sym.layout.button;
+   let id_static = intern(id);
+   let label_ss = SharedString::from_str(label);
+   let mut btn = RawButton::zeroed();
+   // SAFETY: constructs a native Mana `Button` in a buffer that fits it.
+   unsafe {
+      (sym.button_new)(
+         &raw mut btn,
+         id_static.as_ptr(),
+         id_static.len(),
+         &raw const label_ss,
+      );
+   }
+   btn.put(at.variant, variant as u8);
+   btn.put(at.scale, size as u8);
+   btn.put(at.on_click, rc_ptr);
+   btn.put(at.on_click + 8, vtbl);
+   btn
+}
+
+pub(crate) fn push_raw_button(mut parent: RawDiv, mut btn: RawButton) -> RawDiv {
+   let Some(sym) = SYMBOLS.get() else {
+      return parent;
+   };
+   let mut out = RawDiv::zeroed();
+   // SAFETY: appends native Mana `Button` directly into `parent`.
+   unsafe { (sym.div_child_button)(&raw mut out, &raw mut parent, &raw mut btn) };
+   out
+}
+
+pub(crate) fn write_any(div: RawDiv, sret: *mut RawAnyElement) {
+   if let Some(sym) = SYMBOLS.get() {
+      Builder { sym }.write_any(div, sret);
+   }
+}
+
 /// Converts 32-bit ARGB (`0xAARRGGBB`) into GPUI's `[h, s, l, a]`
 /// (`0.0..=1.0`).
 #[expect(clippy::many_single_char_names, reason = "the HSL formula's own names")]
-fn argb_to_hsla(argb: u32) -> [f32; 4] {
+pub(crate) fn argb_to_hsla(argb: u32) -> [f32; 4] {
    let [alpha, r, g, b] = argb.to_be_bytes().map(|byte| f32::from(byte) / 255.0);
    let a = if alpha == 0.0 && argb != 0 {
       1.0
@@ -852,6 +1032,26 @@ fn argb_to_hsla(argb: u32) -> [f32; 4] {
       (h, s)
    };
    [h, s, l, a]
+}
+
+/// Allocates an `RcInner { strong: 1, weak: 1, action_id: value }` on
+/// `Discord.exe`'s own heap so Discord's `Rc::drop` frees it cleanly.
+pub(crate) fn alloc_rc_u64(value: u64) -> Option<*mut RcInner> {
+   let sym = SYMBOLS.get()?;
+   // SAFETY: uses Discord's resolved `alloc_or_oom(align, size)` for a 24-byte
+   // `RcInner` layout matching `std::rc::RcBox<u64>`.
+   unsafe {
+      let ptr = (sym.alloc_or_oom)(align_of::<RcInner>(), size_of::<RcInner>()).cast::<RcInner>();
+      if ptr.is_null() {
+         return None;
+      }
+      ptr.write(RcInner {
+         strong:    1,
+         weak:      1,
+         action_id: value,
+      });
+      Some(ptr)
+   }
 }
 
 /// Whether `div_push_any` and `str_into_any` resolved for native message
@@ -888,15 +1088,11 @@ pub fn wrap_with_accessories(
    let mut outer = b.v_stack(2.0);
    if let Some(argb) = tint {
       let hsla = argb_to_hsla(argb);
-      // SAFETY: verified StyleRefinement offsets:
-      // +0x88 = text.color (Option<Hsla>, inherited by child text runs),
-      // +0x128 = border_left, +0x250 = border_color.
-      b.style_div(&mut outer, |s| unsafe {
-         s.add(0x88).cast::<u32>().write_unaligned(1);
-         s.add(0x8C).cast::<[f32; 4]>().write_unaligned(hsla);
-         s.add(0x128).cast::<u64>().write_unaligned(gpui_px(3.0));
-         s.add(0x250).cast::<u32>().write_unaligned(1);
-         s.add(0x254).cast::<[f32; 4]>().write_unaligned(hsla);
+      // The text color is inherited by child text runs.
+      b.style_div(&mut outer, |s| {
+         s.hsla(s.at.text_color, hsla);
+         s.length(s.at.border_widths[3], gpui_px(3.0));
+         s.hsla(s.at.border_color, hsla);
       });
    }
    if !b.push_any(&mut outer, &mut orig) {
@@ -907,12 +1103,12 @@ pub fn wrap_with_accessories(
 
    if !lines.is_empty() {
       let mut acc_box = b.v_stack(2.0);
-      // SAFETY: indent accessories under the message text column (left=72px,
-      // bottom=4px, right=16px).
-      b.style_div(&mut acc_box, |s| unsafe {
-         s.add(0x1A0).cast::<u64>().write_unaligned(gpui_px(16.0)); // padding_right
-         s.add(0x1A8).cast::<u64>().write_unaligned(gpui_px(4.0)); // padding_bottom
-         s.add(0x1B0).cast::<u64>().write_unaligned(gpui_px(72.0)); // padding_left
+      // Indent accessories under the message text column.
+      b.style_div(&mut acc_box, |s| {
+         let [_, right, bottom, left] = s.at.padding;
+         s.length(right, gpui_px(16.0));
+         s.length(bottom, gpui_px(4.0));
+         s.length(left, gpui_px(72.0));
       });
       for (text, color) in lines {
          let hsla = color.map_or(MUTED, argb_to_hsla);
@@ -942,13 +1138,15 @@ const DESKTOP_FULL: &[&str] = &[
    "message-logger",
    "no-profile-themes",
    "spoiler-mode",
+   "view-raw",
+   "global-badges",
    "dearrow",
    "translate",
    "clear-urls",
    "fix-embeds",
 ];
 
-const DESKTOP_PARTIAL: &[&str] = &["global-badges", "fakenitro"];
+const DESKTOP_PARTIAL: &[&str] = &["fakenitro"];
 
 /// Renders the categorized native Sunbird Settings page into `sret`.
 pub fn render_sunbird_page(sret: *mut RawAnyElement) -> bool {
@@ -1100,16 +1298,35 @@ fn render_plugins_tab(
       Action::SetFilter(PluginFilter::Disabled),
    );
 
-   let mut toolbar = b.h_row(8.0, true);
-   toolbar = b.push_div(toolbar, left_pills);
-   toolbar = b.push_button(
-      toolbar,
+   let mut right_actions = b.h_row(6.0, false);
+   right_actions = b.push_button(
+      right_actions,
+      "sunbird-toolbar-install-url",
+      "+ URL",
+      BtnVariant::Primary,
+      BtnSize::Small,
+      Action::OpenInstallUrl,
+   );
+   right_actions = b.push_button(
+      right_actions,
+      "sunbird-toolbar-install-file",
+      "+ File...",
+      BtnVariant::Secondary,
+      BtnSize::Small,
+      Action::InstallFromFile,
+   );
+   right_actions = b.push_button(
+      right_actions,
       "sunbird-toolbar-reload-all",
       "Reload All",
       BtnVariant::Secondary,
       BtnSize::Small,
       Action::ReloadAll,
    );
+
+   let mut toolbar = b.h_row(8.0, true);
+   toolbar = b.push_div(toolbar, left_pills);
+   toolbar = b.push_div(toolbar, right_actions);
    root = b.push_div(root, toolbar);
 
    let filtered: Vec<&phoenix_runtime::PluginInfo> = plugins
@@ -1167,49 +1384,55 @@ fn render_plugins_tab(
       );
 
       let has_settings = plugin.enabled && !plugin.settings.is_empty();
-      if has_settings || plugin.installed {
-         let mut actions = b.h_row(8.0, false);
-         if has_settings {
-            let lbl = if is_open {
-               format!("▾ Hide Settings ({})", plugin.settings.len())
+      let mut actions = b.h_row(8.0, false);
+      if has_settings {
+         let lbl = if is_open {
+            format!("▾ Hide Settings ({})", plugin.settings.len())
+         } else {
+            format!("▸ Settings ({})", plugin.settings.len())
+         };
+         actions = b.push_button(
+            actions,
+            &format!("sunbird-expand-{}", plugin.name),
+            &lbl,
+            if is_open {
+               BtnVariant::Primary
             } else {
-               format!("▸ Settings ({})", plugin.settings.len())
-            };
-            actions = b.push_button(
-               actions,
-               &format!("sunbird-expand-{}", plugin.name),
-               &lbl,
-               if is_open {
-                  BtnVariant::Primary
-               } else {
-                  BtnVariant::Secondary
-               },
-               BtnSize::Small,
-               Action::ToggleExpandPlugin(plugin.name.clone()),
-            );
-         }
-         if plugin.enabled && plugin.installed {
-            actions = b.push_button(
-               actions,
-               &format!("sunbird-reload-{}", plugin.name),
-               "Reload",
-               BtnVariant::Secondary,
-               BtnSize::Small,
-               Action::ReloadPlugin(plugin.name.clone()),
-            );
-         }
-         if !plugin.enabled && plugin.installed {
-            actions = b.push_button(
-               actions,
-               &format!("sunbird-remove-{}", plugin.name),
-               "Remove",
-               BtnVariant::Critical,
-               BtnSize::Small,
-               Action::UninstallPlugin(plugin.name.clone()),
-            );
-         }
-         card = b.push_div(card, actions);
+               BtnVariant::Secondary
+            },
+            BtnSize::Small,
+            Action::ToggleExpandPlugin(plugin.name.clone()),
+         );
       }
+      actions = b.push_button(
+         actions,
+         &format!("sunbird-edit-{}", plugin.name),
+         "Edit Code",
+         BtnVariant::Secondary,
+         BtnSize::Small,
+         Action::EditPluginCode(plugin.name.clone()),
+      );
+      if plugin.enabled && plugin.installed {
+         actions = b.push_button(
+            actions,
+            &format!("sunbird-reload-{}", plugin.name),
+            "Reload",
+            BtnVariant::Secondary,
+            BtnSize::Small,
+            Action::ReloadPlugin(plugin.name.clone()),
+         );
+      }
+      if !plugin.enabled && plugin.installed {
+         actions = b.push_button(
+            actions,
+            &format!("sunbird-remove-{}", plugin.name),
+            "Remove",
+            BtnVariant::Critical,
+            BtnSize::Small,
+            Action::UninstallPlugin(plugin.name.clone()),
+         );
+      }
+      card = b.push_div(card, actions);
 
       // Collapsible per-plugin settings dropdown drawer
       if has_settings && is_open {

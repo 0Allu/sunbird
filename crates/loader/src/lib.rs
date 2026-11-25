@@ -59,7 +59,7 @@ pub unsafe extern "system" fn DllMain(
       log::info!("hooked Discord in {:?}", started.elapsed());
       let _ = std::thread::Builder::new()
          .name("sunbird-init".to_owned())
-         .spawn(init);
+         .spawn(|| init());
    }
    1
 }

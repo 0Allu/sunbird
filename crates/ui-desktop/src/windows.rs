@@ -245,6 +245,43 @@ unsafe extern "system" {
    fn Shell_NotifyIconW(message: u32, data: *mut NotifyIconDataW) -> i32;
 }
 
+#[repr(C)]
+struct OpenFileNameW {
+   l_struct_size:       u32,
+   hwnd_owner:          *mut c_void,
+   h_instance:          *mut c_void,
+   lpstr_filter:        *const u16,
+   lpstr_custom_filter: *mut u16,
+   n_max_cust_filter:   u32,
+   n_filter_index:      u32,
+   lpstr_file:          *mut u16,
+   n_max_file:          u32,
+   lpstr_file_title:    *mut u16,
+   n_max_file_title:    u32,
+   lpstr_initial_dir:   *const u16,
+   lpstr_title:         *const u16,
+   flags:               u32,
+   n_file_offset:       u16,
+   n_file_extension:    u16,
+   lpstr_def_ext:       *const u16,
+   l_cust_data:         isize,
+   lpfn_hook:           *const c_void,
+   lp_template_name:    *const u16,
+   pv_reserved:         *mut c_void,
+   dw_reserved:         u32,
+   flags_ex:            u32,
+}
+
+#[link(name = "comdlg32")]
+unsafe extern "system" {
+   fn GetOpenFileNameW(ofn: *mut OpenFileNameW) -> i32;
+}
+
+const OFN_PATHMUSTEXIST: u32 = 0x0000_0800;
+const OFN_FILEMUSTEXIST: u32 = 0x0000_1000;
+const OFN_NOCHANGEDIR: u32 = 0x0000_0008;
+const OFN_EXPLORER: u32 = 0x0008_0000;
+
 fn wide(text: &str) -> Vec<u16> {
    text.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -771,4 +808,54 @@ pub fn open_url(url: &str) -> Result<(), Error> {
       });
    }
    Ok(())
+}
+
+/// Opens the native Windows file picker filtered to `.js` plugin bundles and
+/// returns `(file_name, bytes)` if the user chose a file.
+pub fn pick_js_file() -> Option<(String, Vec<u8>)> {
+   let mut file_buf = vec![0u16; 32_768];
+   let filter: Vec<u16> = "JavaScript Plugins (*.js)\0*.js\0All Files (*.*)\0*.*\0\0"
+      .encode_utf16()
+      .collect();
+   let title = wide("Install Sunbird Plugin (.js)");
+   let def_ext = wide("js");
+   #[expect(clippy::cast_possible_truncation, reason = "OPENFILENAMEW is 152 bytes")]
+   let mut ofn = OpenFileNameW {
+      l_struct_size:       size_of::<OpenFileNameW>() as u32,
+      hwnd_owner:          ptr::null_mut(),
+      h_instance:          ptr::null_mut(),
+      lpstr_filter:        filter.as_ptr(),
+      lpstr_custom_filter: ptr::null_mut(),
+      n_max_cust_filter:   0,
+      n_filter_index:      1,
+      lpstr_file:          file_buf.as_mut_ptr(),
+      n_max_file:          u32::try_from(file_buf.len()).unwrap_or(32_768),
+      lpstr_file_title:    ptr::null_mut(),
+      n_max_file_title:    0,
+      lpstr_initial_dir:   ptr::null(),
+      lpstr_title:         title.as_ptr(),
+      flags:               OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER,
+      n_file_offset:       0,
+      n_file_extension:    0,
+      lpstr_def_ext:       def_ext.as_ptr(),
+      l_cust_data:         0,
+      lpfn_hook:           ptr::null(),
+      lp_template_name:    ptr::null(),
+      pv_reserved:         ptr::null_mut(),
+      dw_reserved:         0,
+      flags_ex:            0,
+   };
+   // SAFETY: all pointers in `ofn` stay valid for the duration of the modal
+   // `GetOpenFileNameW` call.
+   if unsafe { GetOpenFileNameW(&raw mut ofn) } == 0 {
+      return None;
+   }
+   let nul = file_buf
+      .iter()
+      .position(|&c| c == 0)
+      .unwrap_or(file_buf.len());
+   let path = PathBuf::from(String::from_utf16_lossy(&file_buf[..nul]));
+   let name = path.file_name()?.to_string_lossy().into_owned();
+   let bytes = std::fs::read(&path).ok()?;
+   Some((name, bytes))
 }

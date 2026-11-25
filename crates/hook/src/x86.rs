@@ -171,6 +171,220 @@ pub fn sret_stores(code: &[u8], ip: usize) -> Vec<(usize, usize)> {
    stores
 }
 
+/// One `DebugStruct::field(name, &self.field)` call in a derived `Debug::fmt`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DebugField {
+   /// Address and length of the field name literal.
+   pub name:     usize,
+   pub name_len: usize,
+   /// Offset of the field in `self`.
+   pub offset:   usize,
+   /// The `&dyn Debug` vtable passed for the field, whose slot 3 is its `fmt`.
+   pub vtable:   Option<usize>,
+}
+
+/// The fields a derived `Debug::fmt` prints, in code order.
+///
+/// Each field is `lea rdx, [name]; mov r8d, len; lea r9, [self + off]` (or
+/// `mov r9, self` after `add self, off`) with the vtable stored to `[rsp +
+/// 0x20]`, then a call. `self` is the register `rcx` is first copied into.
+/// Cold blocks are decoded linearly too, so fields printed out of line count.
+#[must_use]
+#[expect(clippy::too_many_lines, reason = "one match arm per instruction shape")]
+pub fn debug_fields(code: &[u8], ip: usize) -> Vec<DebugField> {
+   use std::collections::HashMap;
+
+   use iced_x86::{
+      Code,
+      Mnemonic,
+      OpKind,
+      Register,
+   };
+
+   #[derive(Clone, Copy)]
+   enum Value {
+      Rip(usize),
+      Field(usize),
+      Imm(u64),
+   }
+
+   let mut decoder = Decoder::with_ip(64, code, ip as u64, DecoderOptions::NONE);
+   let mut this = None;
+   let mut added = 0usize;
+   let mut regs: HashMap<Register, Value> = HashMap::new();
+   let mut vtable = None;
+   let mut fields = Vec::new();
+   while decoder.can_decode() {
+      let ins = decoder.decode();
+      if ins.is_invalid() {
+         continue;
+      }
+      let dst = (ins.op_count() > 0 && ins.op0_kind() == OpKind::Register)
+         .then(|| ins.op0_register().full_register());
+      let to_this = dst.is_some() && dst == this;
+      match (ins.mnemonic(), dst) {
+         (Mnemonic::Mov, Some(_))
+            if this.is_none()
+               && matches!(ins.code(), Code::Mov_r64_rm64 | Code::Mov_rm64_r64)
+               && ins.op1_kind() == OpKind::Register
+               && ins.op1_register() == Register::RCX =>
+         {
+            this = dst;
+         },
+         (Mnemonic::Lea, Some(dst)) => {
+            let value = if ins.is_ip_rel_memory_operand() {
+               Some(Value::Rip(addr(ins.ip_rel_memory_address())))
+            } else if Some(ins.memory_base()) == this && ins.memory_index() == Register::None {
+               Some(Value::Field(addr(ins.memory_displacement64())))
+            } else {
+               None
+            };
+            match value {
+               Some(value) => regs.insert(dst, value),
+               None => regs.remove(&dst),
+            };
+         },
+         (Mnemonic::Add, Some(_)) if to_this && ins.op1_kind() != OpKind::Register => {
+            added = addr(ins.immediate(1));
+         },
+         (Mnemonic::Inc, Some(_)) if to_this => added = 1,
+         (Mnemonic::Mov, Some(dst)) => {
+            let value = match ins.op1_kind() {
+               OpKind::Immediate32 | OpKind::Immediate32to64 | OpKind::Immediate64 => {
+                  Some(Value::Imm(ins.immediate(1)))
+               },
+               OpKind::Register if Some(ins.op1_register().full_register()) == this => {
+                  Some(Value::Field(added))
+               },
+               OpKind::Register => regs.get(&ins.op1_register().full_register()).copied(),
+               _ => None,
+            };
+            match value {
+               Some(value) => regs.insert(dst, value),
+               None => regs.remove(&dst),
+            };
+         },
+         (Mnemonic::Mov, None)
+            if ins.op0_kind() == OpKind::Memory
+               && ins.memory_base() == Register::RSP
+               && ins.memory_displacement64() == 0x20
+               && ins.op1_kind() == OpKind::Register =>
+         {
+            vtable = match regs.get(&ins.op1_register().full_register()) {
+               Some(Value::Rip(at)) => Some(*at),
+               _ => None,
+            };
+         },
+         (Mnemonic::Call, _) => {
+            if let (Some(Value::Rip(name)), Some(Value::Imm(len)), Some(Value::Field(offset))) = (
+               regs.get(&Register::RDX),
+               regs.get(&Register::R8),
+               regs.get(&Register::R9),
+            ) && (1..64).contains(len)
+            {
+               fields.push(DebugField {
+                  name: *name,
+                  name_len: addr(*len),
+                  offset: *offset,
+                  vtable,
+               });
+            }
+            regs.clear();
+            vtable = None;
+            added = 0;
+         },
+         (Mnemonic::Jmp | Mnemonic::Ret, _) => {
+            regs.clear();
+            vtable = None;
+            added = 0;
+         },
+         _ => {},
+      }
+   }
+   fields
+}
+
+/// `(offset, value)` of each `mov byte [..], imm8` into the struct a call
+/// just returned through `rcx`.
+///
+/// `before` ends at the call and holds its `lea rcx, [base + disp]`; `after`
+/// starts right behind it and is read up to the next branch or call, through
+/// registers loaded with `lea reg, [base + disp]`.
+#[must_use]
+pub fn sret_byte_stores(
+   before: &[u8],
+   before_ip: usize,
+   after: &[u8],
+   after_ip: usize,
+) -> Vec<(usize, u8)> {
+   use std::collections::HashMap;
+
+   use iced_x86::{
+      FlowControl,
+      Mnemonic,
+      OpKind,
+      Register,
+   };
+
+   let mut out = None;
+   let mut decoder = Decoder::with_ip(64, before, before_ip as u64, DecoderOptions::NONE);
+   while decoder.can_decode() {
+      let ins = decoder.decode();
+      if ins.is_invalid() {
+         continue;
+      }
+      let writes_rcx = ins.op_count() > 0
+         && ins.op0_kind() == OpKind::Register
+         && ins.op0_register().full_register() == Register::RCX;
+      if writes_rcx {
+         out = (ins.mnemonic() == Mnemonic::Lea
+            && !ins.is_ip_rel_memory_operand()
+            && ins.memory_index() == Register::None)
+            .then(|| (ins.memory_base(), ins.memory_displacement64().cast_signed()));
+      }
+   }
+   let Some((base, disp)) = out else {
+      return Vec::new();
+   };
+
+   let mut aliases: HashMap<Register, i64> = HashMap::from([(base, 0)]);
+   let mut stores = Vec::new();
+   let mut decoder = Decoder::with_ip(64, after, after_ip as u64, DecoderOptions::NONE);
+   while decoder.can_decode() {
+      let ins = decoder.decode();
+      if ins.is_invalid() || ins.flow_control() != FlowControl::Next {
+         break;
+      }
+      if ins.op_count() > 0 && ins.op0_kind() == OpKind::Register {
+         let dst = ins.op0_register().full_register();
+         if dst != base {
+            aliases.remove(&dst);
+            if ins.mnemonic() == Mnemonic::Lea
+               && ins.memory_base() == base
+               && ins.memory_index() == Register::None
+            {
+               aliases.insert(dst, ins.memory_displacement64().cast_signed() - disp);
+            }
+         }
+         continue;
+      }
+      if ins.mnemonic() == Mnemonic::Mov
+         && ins.op0_kind() == OpKind::Memory
+         && ins.memory_size().size() == 1
+         && ins.op1_kind() == OpKind::Immediate8
+         && ins.memory_index() == Register::None
+         && let Some(&delta) = aliases.get(&ins.memory_base())
+      {
+         let at = ins.memory_displacement64().cast_signed() + delta
+            - if ins.memory_base() == base { disp } else { 0 };
+         if let Ok(at) = usize::try_from(at) {
+            stores.push((at, ins.immediate8()));
+         }
+      }
+   }
+   stores
+}
+
 /// An instruction that points at an address, and the function holding it.
 pub struct CodeRef {
    pub function: usize,

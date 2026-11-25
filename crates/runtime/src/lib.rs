@@ -36,6 +36,7 @@ pub mod console;
 pub mod discord;
 pub mod fetch;
 pub mod gateway;
+pub mod highlight;
 pub mod js;
 pub mod local;
 mod platform;

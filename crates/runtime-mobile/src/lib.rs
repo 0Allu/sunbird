@@ -7,7 +7,6 @@ mod bridge;
 mod debug;
 mod discord;
 mod fetch;
-mod highlight;
 mod host;
 mod install;
 mod js;
@@ -19,6 +18,8 @@ mod settings;
 mod socket;
 mod staff;
 mod store;
+
+pub(crate) use phoenix_runtime::highlight;
 
 use std::{
    ffi::c_void,

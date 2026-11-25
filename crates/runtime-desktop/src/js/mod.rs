@@ -4,16 +4,24 @@
 pub mod native;
 pub mod ui;
 
-use std::cell::RefCell;
+use std::{
+   cell::RefCell,
+   collections::HashMap,
+};
 
 use rquickjs::{
    Ctx,
+   Function,
    JsLifetime,
 };
 
 use crate::{
    accessories,
-   js::ui::DesktopAccessory,
+   context_menu,
+   js::ui::{
+      DesktopAccessory,
+      DesktopAction,
+   },
 };
 
 /// What plugins registered with the desktop UI, kept in the runtime's userdata
@@ -21,7 +29,11 @@ use crate::{
 #[derive(Default)]
 pub struct Desktop<'js> {
    /// `phoenix.ui.addMessageAccessory` callbacks.
-   pub accessories: RefCell<Vec<DesktopAccessory<'js>>>,
+   pub accessories:  RefCell<Vec<DesktopAccessory<'js>>>,
+   /// `phoenix.ui.addMessageAction` callbacks.
+   pub actions:      RefCell<Vec<DesktopAction<'js>>>,
+   /// Active `phoenix.ui.openPage` button callbacks, keyed by button ID.
+   pub page_buttons: RefCell<HashMap<u64, (u64, String, Function<'js>)>>,
 }
 
 // SAFETY: every field is bound to 'js, and Changed swaps exactly that lifetime.
@@ -29,7 +41,8 @@ unsafe impl<'js> JsLifetime<'js> for Desktop<'js> {
    type Changed<'to> = Desktop<'to>;
 }
 
-/// Drops the accessories `name` registered and redraws Discord without them.
+/// Drops the accessories, context menu actions, and open page callbacks `name`
+/// registered and redraws Discord without them.
 pub fn unload(ctx: &Ctx<'_>, name: &str) {
    let Some(registry) = ctx.userdata::<Desktop<'_>>() else {
       return;
@@ -42,4 +55,19 @@ pub fn unload(ctx: &Ctx<'_>, name: &str) {
       accessories::clear_cache();
       accessories::invalidate_discord_windows();
    }
+   drop(list);
+
+   let mut actions = registry.actions.borrow_mut();
+   let before_actions = actions.len();
+   actions.retain(|entry| entry.plugin != name);
+   if actions.len() != before_actions {
+      let meta = actions.iter().map(DesktopAction::meta).collect();
+      context_menu::sync_actions(meta);
+   }
+   drop(actions);
+
+   registry
+      .page_buttons
+      .borrow_mut()
+      .retain(|_, (_, plugin, _)| plugin != name);
 }

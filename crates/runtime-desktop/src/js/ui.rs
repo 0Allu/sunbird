@@ -5,9 +5,12 @@
 //! on Desktop Phoenix. Remaining mobile-only UI-op slot hooks return harmless
 //! no-op removers so cross-platform plugins load cleanly without throwing.
 
-use std::sync::atomic::{
-   AtomicU64,
-   Ordering,
+use std::sync::{
+   Arc,
+   atomic::{
+      AtomicU64,
+      Ordering,
+   },
 };
 
 use phoenix_runtime::{
@@ -16,8 +19,13 @@ use phoenix_runtime::{
       Engine,
       Registry,
    },
+   store::{
+      self,
+      Cell,
+   },
 };
 use rquickjs::{
+   Array,
    CatchResultExt,
    Ctx,
    Exception,
@@ -32,7 +40,17 @@ use crate::{
       self,
       RenderedAccessory,
    },
+   context_menu::{
+      self,
+      ActionMeta,
+   },
    js::Desktop,
+   modal::{
+      self,
+      ModalButton,
+      ModalSection,
+      PageModalSpec,
+   },
 };
 
 #[derive(Clone)]
@@ -41,6 +59,31 @@ pub struct DesktopAccessory<'js> {
    pub plugin:   String,
    pub priority: i32,
    pub render:   Function<'js>,
+}
+
+#[derive(Clone)]
+pub struct DesktopAction<'js> {
+   pub id:       u64,
+   pub plugin:   String,
+   pub label:    String,
+   pub icon:     Option<String>,
+   pub danger:   bool,
+   pub priority: i32,
+   pub visible:  Option<Function<'js>>,
+   pub on_press: Function<'js>,
+}
+
+impl DesktopAction<'_> {
+   pub fn meta(&self) -> ActionMeta {
+      ActionMeta {
+         id:          self.id,
+         label:       self.label.clone(),
+         icon:        self.icon.clone(),
+         danger:      self.danger,
+         priority:    self.priority,
+         has_visible: self.visible.is_some(),
+      }
+   }
 }
 
 fn noop_handle<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> {
@@ -251,6 +294,287 @@ fn add_message_accessory<'js>(
    Ok(remove)
 }
 
+fn cached_message_and_me(channel_id: u64, message_id: u64) -> (Option<String>, Option<String>) {
+   let Some(state) = phoenix_runtime::state() else {
+      return (None, None);
+   };
+   let Ok(db) = store::database(&state.files_dir()) else {
+      return (None, None);
+   };
+   // Phoenix keys messages `<channel>:<message>`, each zero-padded to 20 digits.
+   let rows = if channel_id != 0 {
+      store::query(&db, "SELECT v FROM messages WHERE k = ?", &[format!(
+         "{channel_id:020}:{message_id:020}"
+      )])
+   } else {
+      store::query(&db, "SELECT v FROM messages WHERE k LIKE ? LIMIT 1", &[
+         format!("%:{message_id:020}"),
+      ])
+   };
+   let msg_json = rows
+      .ok()
+      .and_then(|rows| rows.first("v").and_then(Cell::text).map(str::to_owned));
+   let me_id = store::meta(&db, "me")
+      .ok()
+      .flatten()
+      .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+      .and_then(|val| {
+         val.get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+      });
+   (msg_json, me_id)
+}
+
+fn build_message_context<'js>(
+   ctx: &Ctx<'js>,
+   message_id: u64,
+   channel_id: u64,
+   include_message: bool,
+) -> rquickjs::Result<Object<'js>> {
+   let arg = Object::new(ctx.clone())?;
+   let id_str = message_id.to_string();
+   arg.set("messageId", id_str.as_str())?;
+   if channel_id != 0 {
+      let ch_str = channel_id.to_string();
+      arg.set("channelId", ch_str.as_str())?;
+   } else {
+      arg.set("channelId", Value::new_null(ctx.clone()))?;
+   }
+   let (msg_json, me_id) = if include_message {
+      cached_message_and_me(channel_id, message_id)
+   } else {
+      (None, None)
+   };
+   if let Some(json) = msg_json
+      && let Ok(parsed) = ctx.json_parse(json)
+   {
+      arg.set("message", parsed)?;
+   } else {
+      arg.set("message", Value::new_null(ctx.clone()))?;
+   }
+   if let Some(me) = me_id {
+      arg.set("currentUserId", me.as_str())?;
+   } else {
+      arg.set("currentUserId", Value::new_null(ctx.clone()))?;
+   }
+   if let Ok(reply) = Function::new(ctx.clone(), String::new) {
+      arg.set("reply", reply)?;
+   }
+   Ok(arg)
+}
+
+/// Evaluates an `addMessageAction`'s synchronous `visible(ctx)` predicate.
+pub fn check_action_visible(
+   engine: &Engine,
+   action_id: u64,
+   message_id: u64,
+   channel_id: u64,
+) -> bool {
+   engine.with(|ctx| {
+      let Some((plugin, visible)) = ctx.userdata::<Desktop<'_>>().and_then(|registry| {
+         let list = registry.actions.borrow();
+         let entry = list.iter().find(|e| e.id == action_id)?;
+         Some((entry.plugin.clone(), entry.visible.clone()?))
+      }) else {
+         return true;
+      };
+      let Ok(arg) = build_message_context(&ctx, message_id, channel_id, true) else {
+         return true;
+      };
+      match visible.call::<_, Value<'_>>((arg,)).catch(&ctx) {
+         Ok(val) if val.is_promise() => true,
+         Ok(val) => val.as_bool().unwrap_or(true),
+         Err(err) => {
+            log::error!("[{plugin}] addMessageAction visible: {err}");
+            false
+         },
+      }
+   })
+}
+
+/// Invokes a registered `addMessageAction`'s `onPress(ctx)` callback.
+pub fn invoke_message_action(engine: &Engine, action_id: u64, message_id: u64, channel_id: u64) {
+   engine.with(|ctx| {
+      let Some((plugin, on_press)) = ctx.userdata::<Desktop<'_>>().and_then(|registry| {
+         let list = registry.actions.borrow();
+         let entry = list.iter().find(|e| e.id == action_id)?;
+         Some((entry.plugin.clone(), entry.on_press.clone()))
+      }) else {
+         return;
+      };
+      let Ok(arg) = build_message_context(&ctx, message_id, channel_id, true) else {
+         return;
+      };
+      if let Err(err) = on_press.call::<_, Value<'_>>((arg,)).catch(&ctx) {
+         log::error!("[{plugin}] addMessageAction onPress: {err}");
+      }
+   });
+}
+
+fn add_message_action<'js>(
+   ctx: &Ctx<'js>,
+   plugin: &str,
+   options: &Object<'js>,
+) -> rquickjs::Result<Function<'js>> {
+   static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+   let label = options.get::<_, String>("label")?;
+   let icon = options.get::<_, Option<String>>("icon")?;
+   let danger = options.get::<_, Option<bool>>("danger")?.unwrap_or(false);
+   let priority = options.get::<_, Option<i32>>("priority")?.unwrap_or(0);
+   let visible = options.get::<_, Option<Function<'js>>>("visible")?;
+   let on_press = options.get::<_, Function<'js>>("onPress")?;
+   let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+
+   let meta = {
+      let registry = ctx
+         .userdata::<Desktop<'js>>()
+         .ok_or_else(|| Exception::throw_internal(ctx, "no registry"))?;
+      let mut list = registry.actions.borrow_mut();
+      list.push(DesktopAction {
+         id,
+         plugin: plugin.to_owned(),
+         label,
+         icon,
+         danger,
+         priority,
+         visible,
+         on_press,
+      });
+      list.iter().map(DesktopAction::meta).collect()
+   };
+   context_menu::sync_actions(meta);
+
+   let remove = Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
+      if let Some(registry) = ctx.userdata::<Desktop<'js>>() {
+         let mut list = registry.actions.borrow_mut();
+         list.retain(|entry| entry.id != id);
+         let meta = list.iter().map(DesktopAction::meta).collect();
+         context_menu::sync_actions(meta);
+      }
+   })?;
+   remove.set("update", Function::new(ctx.clone(), || {})?)?;
+   Ok(remove)
+}
+
+fn invoke_page_button(button_id: u64) {
+   let Some(engine) = phoenix_runtime::engine() else {
+      return;
+   };
+   engine.with(|ctx| {
+      let Some((plugin, on_press)) = ctx.userdata::<Desktop<'_>>().and_then(|registry| {
+         let map = registry.page_buttons.borrow();
+         let (_, plugin, func) = map.get(&button_id)?;
+         Some((plugin.clone(), func.clone()))
+      }) else {
+         return;
+      };
+      if let Err(err) = on_press.call::<_, Value<'_>>(()).catch(&ctx) {
+         log::error!("[{plugin}] openPage button onPress: {err}");
+      }
+   });
+}
+
+fn open_page<'js>(
+   ctx: &Ctx<'js>,
+   plugin: &str,
+   options: &Object<'js>,
+) -> rquickjs::Result<Object<'js>> {
+   static NEXT_PAGE: AtomicU64 = AtomicU64::new(1);
+   static NEXT_BTN: AtomicU64 = AtomicU64::new(1);
+
+   let page_id = NEXT_PAGE.fetch_add(1, Ordering::Relaxed);
+   let title = options
+      .get::<_, Option<String>>("title")?
+      .unwrap_or_else(|| "Sunbird".to_owned());
+   let sections_js = options.get::<_, Option<Array<'js>>>("sections")?;
+
+   let mut sections = Vec::new();
+   let mut new_buttons = Vec::new();
+   if let Some(arr) = sections_js {
+      for entry in arr.iter::<Object<'js>>() {
+         let Ok(sec) = entry else {
+            continue;
+         };
+         let kind = sec.get::<_, Option<String>>("type")?.unwrap_or_default();
+         let sec_title = sec.get::<_, Option<String>>("title")?;
+         match kind.as_str() {
+            "buttons" => {
+               let mut buttons = Vec::new();
+               if let Some(btns) = sec.get::<_, Option<Array<'js>>>("buttons")? {
+                  for item in btns.iter::<Object<'js>>() {
+                     let Ok(btn) = item else {
+                        continue;
+                     };
+                     let Ok(label) = btn.get::<_, String>("label") else {
+                        continue;
+                     };
+                     let danger = btn.get::<_, Option<bool>>("danger")?.unwrap_or(false);
+                     let on_press = btn.get::<_, Option<Function<'js>>>("onPress")?;
+                     let btn_id = NEXT_BTN.fetch_add(1, Ordering::Relaxed);
+                     if let Some(func) = on_press {
+                        new_buttons.push((btn_id, func));
+                     }
+                     buttons.push(ModalButton {
+                        label,
+                        danger,
+                        on_press: Arc::new(move || invoke_page_button(btn_id)),
+                     });
+                  }
+               }
+               sections.push(ModalSection::Buttons {
+                  title: sec_title,
+                  buttons,
+               });
+            },
+            "code" => {
+               let text = sec.get::<_, Option<String>>("text")?.unwrap_or_default();
+               let monospace = sec.get::<_, Option<bool>>("monospace")?.unwrap_or(true);
+               let highlight = sec.get::<_, Option<bool>>("highlight")?.unwrap_or(false);
+               sections.push(ModalSection::Code {
+                  title: sec_title,
+                  text,
+                  monospace,
+                  highlight,
+               });
+            },
+            "text" => {
+               let text = sec.get::<_, Option<String>>("text")?.unwrap_or_default();
+               sections.push(ModalSection::Text {
+                  title: sec_title,
+                  text,
+               });
+            },
+            _ => {},
+         }
+      }
+   }
+
+   if let Some(registry) = ctx.userdata::<Desktop<'js>>() {
+      let mut map = registry.page_buttons.borrow_mut();
+      for (btn_id, func) in new_buttons {
+         map.insert(btn_id, (page_id, plugin.to_owned(), func));
+      }
+   }
+
+   let modal_id = modal::open_page(PageModalSpec { title, sections });
+   let obj = Object::new(ctx.clone())?;
+   obj.set(
+      "close",
+      Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
+         modal::close_page(modal_id);
+         if let Some(registry) = ctx.userdata::<Desktop<'js>>() {
+            registry
+               .page_buttons
+               .borrow_mut()
+               .retain(|_, (pid, ..)| *pid != page_id);
+         }
+      })?,
+   )?;
+   Ok(obj)
+}
+
 /// Wires desktop `phoenix.ui`, `phoenix.messages.onSend` / `onEmojiPick`, and
 /// `phoenix.commands` onto the plugin's API objects.
 pub fn desktop_patch_api<'js>(
@@ -323,12 +647,27 @@ pub fn desktop_ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<
       })?,
    )?;
 
+   let action_owner = plugin.to_owned();
+   ui.set(
+      "addMessageAction",
+      Function::new(ctx.clone(), move |ctx: Ctx<'js>, options: Object<'js>| {
+         add_message_action(&ctx, &action_owner, &options)
+      })?,
+   )?;
+
+   let page_owner = plugin.to_owned();
+   ui.set(
+      "openPage",
+      Function::new(ctx.clone(), move |ctx: Ctx<'js>, options: Object<'js>| {
+         open_page(&ctx, &page_owner, &options)
+      })?,
+   )?;
+
    // Graceful no-op shims for remaining mobile UI-op surfaces so cross-platform
    // plugins load without throwing on desktop.
    for slot_fn in [
       "addHeaderButton",
       "addComposerButton",
-      "addMessageAction",
       "addProfileSection",
       "addProfileTab",
       "hide",
@@ -357,13 +696,6 @@ pub fn desktop_ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<
          Function::new(ctx.clone(), |ctx: Ctx<'js>| Value::new_null(ctx))?,
       )?;
    }
-   ui.set(
-      "openPage",
-      Function::new(ctx.clone(), |ctx: Ctx<'js>, _page: Opt<Value<'js>>| {
-         log::info!("desktop ui: openPage is not yet implemented on desktop");
-         noop_handle(&ctx)
-      })?,
-   )?;
    ui.set(
       "choose",
       Function::new(

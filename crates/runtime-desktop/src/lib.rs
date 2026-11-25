@@ -4,10 +4,13 @@
 #![cfg(windows)]
 
 mod accessories;
+mod badges;
+mod context_menu;
 mod discord;
 mod fetch;
 mod gpui;
 mod js;
+mod modal;
 mod settings;
 mod staff;
 
@@ -72,10 +75,14 @@ pub fn prepare() -> Result<(), Error> {
    open_access_gate(&image);
    staff::prepare(&image);
    settings::install(&image);
+   modal::install(&image);
    accessories::install(&image);
+   context_menu::install(&image);
+   badges::install(&image);
    let registry = phoenix_runtime::hook(&image)?;
    discord::install(&image);
    accessories::install_optimistic_delete(&image);
+   phoenix_sigs::desktop::release_call_index();
    *PREPARED.lock().unwrap_or_else(PoisonError::into_inner) = Some((image, registry));
    Ok(())
 }

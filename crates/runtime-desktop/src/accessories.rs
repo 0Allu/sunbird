@@ -213,42 +213,13 @@ const fn argb_to_rgba(argb: u32) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// Win32 Repaint Trigger
+// GPUI Repaint Trigger
 // ---------------------------------------------------------------------------
 
-#[link(name = "user32")]
-unsafe extern "system" {
-   fn EnumWindows(cb: unsafe extern "system" fn(isize, isize) -> i32, lparam: isize) -> i32;
-   fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
-   fn IsWindowVisible(hwnd: isize) -> i32;
-   fn InvalidateRect(hwnd: isize, rect: *const c_void, erase: i32) -> i32;
-}
-
-unsafe extern "system" fn invalidate_own_window(hwnd: isize, lparam: isize) -> i32 {
-   let want_pid = u32::try_from(lparam).unwrap_or_default();
-   let mut pid = 0u32;
-   // SAFETY: Win32 window query + repaint request for this process's own
-   // visible windows.
-   unsafe {
-      GetWindowThreadProcessId(hwnd, &raw mut pid);
-      if pid == want_pid && IsWindowVisible(hwnd) != 0 {
-         InvalidateRect(hwnd, ptr::null(), 0);
-      }
-   }
-   1
-}
-
-/// Invalidates all visible top-level windows in this process so GPUI repaints
-/// updated message accessories on the next vsync.
+/// Requests an immediate GPUI re-render on all visible Discord windows so
+/// updated message accessories appear right away.
 pub fn invalidate_discord_windows() {
-   let pid = std::process::id();
-   // SAFETY: callback only queries PID/visibility and calls `InvalidateRect`.
-   unsafe {
-      EnumWindows(
-         invalidate_own_window,
-         isize::try_from(pid).unwrap_or_default(),
-      );
-   }
+   crate::modal::force_redraw();
 }
 
 // ---------------------------------------------------------------------------

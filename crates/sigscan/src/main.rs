@@ -147,13 +147,23 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
                .map(|gpui| at(gpui.div_new))
                .map_err(Clone::clone),
          );
+         let layouts = gpui
+            .as_ref()
+            .map_err(|_| "needs the builders".to_owned())
+            .and_then(|gpui| desktop::gpui_layouts(image, gpui));
          report(
             "gpui layouts",
-            gpui
+            layouts
                .as_ref()
-               .map_err(|_| "needs the builders".to_owned())
-               .and_then(|gpui| desktop::gpui_layouts(image, gpui))
-               .map(|()| "match".to_owned()),
+               .map(|l| format!("{:x?} {:x?} {:x?}", l.div, l.switch, l.button))
+               .map_err(Clone::clone),
+         );
+         report(
+            "style offsets",
+            layouts
+               .as_ref()
+               .map(|l| format!("{:x?}", l.style))
+               .map_err(|_| "needs the layouts".to_owned()),
          );
          let row = desktop::message_row(image);
          report(
@@ -187,6 +197,64 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
                })
                .map(at),
          );
+         report(
+            "message context menu",
+            desktop::message_context_menu(image).map(|menu| {
+               format!(
+                  "{} (msg +{:#x}, id +{:#x}, ch +{:#x}) {:x?}",
+                  at(menu.build_fn),
+                  menu.msg_ptr_offset,
+                  menu.msg_id_offset,
+                  menu.channel_id_offset,
+                  menu.layout,
+               )
+            }),
+         );
+         report(
+            "native modal",
+            gpui
+               .as_ref()
+               .map_err(|_| "needs the builders".to_owned())
+               .and_then(|gpui| {
+                  let layouts = layouts
+                     .as_ref()
+                     .map_err(|_| "needs the layouts".to_owned())?;
+                  desktop::modal(image, gpui.div_into_any, &layouts.div)
+               })
+               .map(|m| {
+                  format!(
+                     "overlay={}, push={}, new={}, into_any={}, div_id={}, val=+{:#x}, \
+                      mouse_down=+{:#x}, listener_push={}, is_hovered={}, propagate=+{:#x} {:x?}",
+                     at(m.overlay_render),
+                     at(m.vec_push_any),
+                     at(m.modal_new),
+                     at(m.modal_into_any),
+                     at(m.div_id),
+                     m.window_validation_offset,
+                     m.dismiss.mouse_down_listeners,
+                     at(m.dismiss.listener_push),
+                     at(m.dismiss.hitbox_is_hovered),
+                     m.dismiss.propagate_event,
+                     m.layout,
+                  )
+               }),
+         );
+         report(
+            "native text fields",
+            desktop::text_fields(image).map(|tf| {
+               format!(
+                  "single={}, multi={}, ti={}, ta={}, get={}, set={} {:x?}",
+                  at(tf.cx_new_single),
+                  at(tf.cx_new_multiline),
+                  at(tf.text_input_new),
+                  at(tf.text_area_new),
+                  at(tf.text_get),
+                  at(tf.set_value),
+                  tf.layout,
+               )
+            }),
+         );
+         report("media fetch", desktop::media_fetch(image).map(at));
       },
       Machine::Aarch64 if macho => report("guest bridge", ios::bridge(image).map(at)),
       Machine::Aarch64 => {

@@ -40,10 +40,10 @@ const SUNBIRD_PAGE: u8 = 24;
 type SectionFn = unsafe extern "C" fn(
    sret: *mut RawAnyElement,
    host_state: *mut c_void,
+   host_data: *mut c_void,
+   host_vtable: *const c_void,
    window: *mut c_void,
    cx: *mut c_void,
-   arg5: u64,
-   arg6: u64,
 ) -> *mut RawAnyElement;
 
 static ORIG_SECTION: OnceLock<SectionFn> = OnceLock::new();
@@ -131,10 +131,10 @@ fn hook_section_render(image: &Image<'static>) {
 unsafe extern "C" fn section_detour(
    sret: *mut RawAnyElement,
    host_state: *mut c_void,
+   host_data: *mut c_void,
+   host_vtable: *const c_void,
    window: *mut c_void,
    cx: *mut c_void,
-   arg5: u64,
-   arg6: u64,
 ) -> *mut RawAnyElement {
    if !host_state.is_null() && !sret.is_null() {
       let offset = PAGE_OFFSET.load(Ordering::Acquire);
@@ -153,5 +153,5 @@ unsafe extern "C" fn section_detour(
       return sret;
    };
    // SAFETY: forwards all arguments verbatim to the original `host::section`.
-   unsafe { orig(sret, host_state, window, cx, arg5, arg6) }
+   unsafe { orig(sret, host_state, host_data, host_vtable, window, cx) }
 }

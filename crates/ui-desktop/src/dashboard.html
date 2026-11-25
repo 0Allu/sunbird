@@ -354,10 +354,10 @@ let activeTab = 'plugins';
 let catalogTimer = null;
 
 const DESKTOP_FULL = new Set([
-  'silent-typing', 'message-latency', 'no-profile-themes',
-  'dearrow', 'translate', 'clear-urls', 'fix-embeds'
+  'silent-typing', 'message-latency', 'message-logger', 'no-profile-themes',
+  'spoiler-mode', 'view-raw', 'dearrow', 'translate', 'clear-urls', 'fix-embeds'
 ]);
-const DESKTOP_PARTIAL = new Set(['global-badges', 'message-logger', 'spoiler-mode', 'fakenitro']);
+const DESKTOP_PARTIAL = new Set(['global-badges', 'fakenitro']);
 
 function compatBadge(name) {
   if (DESKTOP_FULL.has(name)) return '<span class="badge desktop">Desktop Ready</span>';

@@ -121,6 +121,11 @@ Read this file before changing code. Every fact here cost someone hours to learn
      A hook logs each call's `rcx rdx r8 r9`, the bytes behind them and the caller to `-Events`.
      Addresses print as RVAs like `+0x7711630`, the same `sigscan` prints.
    - `-Events` also shows every gateway event by name and size and Discord's API requests by path.
+6. Keep agent/subagent turns fast:
+   - Iterate with `dev-fast` (`.\scripts\dev.ps1 -Desktop`, no `-Release`). Only run `-Release` once at the end before committing or shipping.
+   - Batch reads, edits, and shell commands (`test && build && launch` in one command); avoid one-off `grep`/`sed`/`fmt` turns.
+   - Use compiled `sigscan.exe` (`check`, `strings`, `refs`, `dis`) or `phoenix.native` for binary lookups — never scan the 515 MB `Discord.exe` `.text` section with Python loops/regexes.
+   - Reserve high-effort subagents for hard reverse-engineering only; use `medium` effort / `fastMode` for routine edits and debugging, and pass exact file paths + build env in the brief.
 
 The debug shell answers anyone on the phone's loopback, and `/eval` runs JS with the Discord
 session. Leave it off outside development.

@@ -86,6 +86,20 @@ pub fn copy(text: &str) -> Result<(), Error> {
    }
 }
 
+/// Opens the native OS file picker for choosing a `.js` plugin bundle to
+/// install (`(file_name, bytes)`).
+#[must_use]
+pub fn pick_js_file() -> Option<(String, Vec<u8>)> {
+   #[cfg(windows)]
+   {
+      windows::pick_js_file()
+   }
+   #[cfg(not(windows))]
+   {
+      None
+   }
+}
+
 /// Opens `url` in the system's default browser / handler.
 pub fn open_url(url: &str) -> Result<(), Error> {
    if !url.starts_with("https://") && !url.starts_with("http://") && !url.starts_with("discord://")
