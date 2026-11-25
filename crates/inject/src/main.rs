@@ -113,9 +113,34 @@ mod windows {
    const NO_WINDOW: u32 = 0x0800_0000;
 
    /// Where the site serves `version.json` and the loaders. `SUNBIRD_SITE`
-   /// points it at a local server for testing.
-   fn site() -> String {
-      env::var("SUNBIRD_SITE").unwrap_or_else(|_| "https://assets.sunbird.tools".to_owned())
+   /// points it at a local server for testing; anything else must be https,
+   /// since what it serves is loaded into Discord.
+   fn site() -> misstep::Result<String> {
+      let site =
+         env::var("SUNBIRD_SITE").unwrap_or_else(|_| "https://assets.sunbird.tools".to_owned());
+      if !site_allowed(&site) {
+         misstep::bail!("SUNBIRD_SITE must be https:// or a localhost server, not {site}");
+      }
+      Ok(site)
+   }
+
+   fn site_allowed(site: &str) -> bool {
+      site.starts_with("https://")
+         || ["http://127.0.0.1", "http://localhost"]
+            .iter()
+            .any(|local| {
+               site
+                  .strip_prefix(local)
+                  .is_some_and(|rest| rest.is_empty() || rest.starts_with([':', '/']))
+            })
+   }
+
+   /// A program in System32, by full path: `Command` looks beside this
+   /// launcher first, which is the Downloads folder on the first run.
+   fn system32(program: &str) -> PathBuf {
+      PathBuf::from(env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into()))
+         .join("System32")
+         .join(program)
    }
 
    /// Shows `text` in a message box, since the launcher has no console.
@@ -148,13 +173,9 @@ mod windows {
       let home = local.join("Sunbird");
       let mut args = env::args_os().skip(1).peekable();
       if args.peek().is_some_and(|arg| arg == "--uninstall") {
-         return uninstall(&home);
+         uninstall(&local, &home);
+         return Ok(());
       }
-      let dll = match args.next_if(|arg| arg != "--") {
-         Some(path) => PathBuf::from(path),
-         None => install(&home)?,
-      };
-      let dll = dll.canonicalize()?;
       let app = local.join("DiscordPhoenix").join("app");
       let exe = app.join("Discord.exe");
       if !exe.is_file() {
@@ -163,6 +184,16 @@ mod windows {
             exe.display()
          );
       }
+      let explicit = args.next_if(|arg| {
+         Path::new(arg)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("dll"))
+      });
+      let dll = match explicit {
+         Some(path) => PathBuf::from(path),
+         None => install(&local, &home)?,
+      };
+      let dll = dll.canonicalize()?;
       let mut command = OsString::from(format!("\"{}\"", exe.display()));
       for arg in args.skip_while(|arg| arg == "--") {
          command.push(" ");
@@ -258,11 +289,12 @@ mod windows {
    /// Copies this launcher into `home`, adds its shortcuts once, and brings
    /// `phoenix.dll` up to the site's version. A failed update keeps the DLL
    /// already there, so Sunbird still starts offline.
-   fn install(home: &Path) -> misstep::Result<PathBuf> {
+   fn install(local: &Path, home: &Path) -> misstep::Result<PathBuf> {
       fs::create_dir_all(home)?;
       let launcher = home.join("sunbird.exe");
       let me = env::current_exe()?;
-      if !same_file(&me, &launcher) {
+      let copied = !same_file(&me, &launcher);
+      if copied {
          fs::copy(&me, &launcher).context("copying the launcher")?;
       }
       let dll = home.join("phoenix.dll");
@@ -271,7 +303,11 @@ mod windows {
       {
          return Err(err.context("downloading phoenix.dll"));
       }
-      shortcuts(&launcher, false)?;
+      // Missing shortcuts never stop Discord from starting, and a shortcut the
+      // user deleted stays deleted until they run the installer again.
+      if copied {
+         let _ = shortcuts(local, &launcher, false);
+      }
       Ok(dll)
    }
 
@@ -286,15 +322,16 @@ mod windows {
    /// one recorded beside it. A running Discord keeps the old DLL mapped,
    /// which Windows lets us rename but not overwrite.
    fn update(home: &Path, dll: &Path) -> misstep::Result<()> {
-      let site = site();
-      let manifest = curl(&[&format!("{site}/version.json")])?;
+      let site = site()?;
+      let manifest = curl(&site, 10, &[&format!("{site}/version.json")])?;
       let version = loader_version(&manifest).context("version.json has no loader")?;
       let stamp = home.join("version.txt");
       if dll.is_file() && fs::read_to_string(&stamp).is_ok_and(|have| have.trim() == version) {
          return Ok(());
       }
-      let fresh = home.join("phoenix.dll.new");
-      curl(&[
+      // Per process, so a second launch mid-download writes its own file.
+      let fresh = home.join(format!("phoenix.dll.{}.new", std::process::id()));
+      curl(&site, 60, &[
          "-o",
          &fresh.to_string_lossy(),
          &format!("{site}/plugins/phoenix-windows-x86_64.dll"),
@@ -310,11 +347,22 @@ mod windows {
       Ok(())
    }
 
-   /// Runs Windows' own `curl.exe` and returns what it printed.
-   fn curl(args: &[&str]) -> misstep::Result<String> {
+   /// Runs Windows' own `curl.exe` and returns what it printed. Only
+   /// `site`'s scheme is allowed, and redirects never leave https.
+   fn curl(site: &str, max_secs: u32, args: &[&str]) -> misstep::Result<String> {
       use std::os::windows::process::CommandExt;
-      let out = Command::new("curl.exe")
-         .args(["-fsSL", "--max-time", "60"])
+      let proto = if site.starts_with("https://") {
+         "=https"
+      } else {
+         "=http"
+      };
+      let out = Command::new(system32("curl.exe"))
+         .args(["-fsSL", "--proto", proto, "--proto-redir", "=https"])
+         .args([
+            "--ssl-revoke-best-effort",
+            "--max-time",
+            &max_secs.to_string(),
+         ])
          .args(args)
          .creation_flags(NO_WINDOW)
          .output()
@@ -334,22 +382,22 @@ mod windows {
 
    /// The Start Menu and Desktop shortcuts, through PowerShell's
    /// `WScript.Shell`, so OneDrive-redirected desktops resolve. Adds them when
-   /// missing, or removes them.
-   fn shortcuts(launcher: &Path, remove: bool) -> misstep::Result<()> {
+   /// missing, or removes them. Paths reach the script through the
+   /// environment, never inside its text.
+   fn shortcuts(local: &Path, launcher: &Path, remove: bool) -> misstep::Result<()> {
       use std::os::windows::process::CommandExt;
-      let icon = env::var("LOCALAPPDATA").unwrap_or_default() + r"\DiscordPhoenix\app\Discord.exe";
       let script = format!(
          "$w = New-Object -ComObject WScript.Shell; foreach ($dir in \
           @([Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('Desktop'))) \
           {{ $p = Join-Path $dir 'Sunbird.lnk'; if (${remove}) {{ Remove-Item -LiteralPath $p \
           -ErrorAction SilentlyContinue; continue }}; if (Test-Path -LiteralPath $p) {{ continue \
-          }}; $s = $w.CreateShortcut($p); $s.TargetPath = '{target}'; $s.IconLocation = \
-          '{icon},0'; $s.Description = 'Discord with Sunbird'; $s.Save() }}",
-         target = launcher.display().to_string().replace('\'', "''"),
-         icon = icon.replace('\'', "''"),
+          }}; $s = $w.CreateShortcut($p); $s.TargetPath = $env:SB_TARGET; $s.IconLocation = \
+          $env:SB_ICON + ',0'; $s.Description = 'Discord with Sunbird'; $s.Save() }}"
       );
-      let status = Command::new("powershell.exe")
+      let status = Command::new(system32(r"WindowsPowerShell\v1.0\powershell.exe"))
          .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+         .env("SB_TARGET", launcher)
+         .env("SB_ICON", local.join(r"DiscordPhoenix\app\Discord.exe"))
          .creation_flags(NO_WINDOW)
          .status()
          .context("running powershell.exe")?;
@@ -359,13 +407,20 @@ mod windows {
       Ok(())
    }
 
-   /// Removes the shortcuts and `home`. Files a running Discord still maps
-   /// stay until it exits.
-   fn uninstall(home: &Path) -> misstep::Result<()> {
-      shortcuts(&home.join("sunbird.exe"), true)?;
-      let _ = fs::remove_dir_all(home);
-      alert("Sunbird is uninstalled. Discord itself was not changed.");
-      Ok(())
+   /// Removes the shortcuts and `home`. Files a running Discord or launcher
+   /// still holds stay until they exit, and the user is told so.
+   fn uninstall(local: &Path, home: &Path) {
+      let _ = shortcuts(local, &home.join("sunbird.exe"), true);
+      match fs::remove_dir_all(home) {
+         Err(err) if err.kind() != io::ErrorKind::NotFound => {
+            alert(&format!(
+               "The shortcuts are removed, but {} could not be deleted ({err}). Quit Discord and \
+                delete it.",
+               home.display()
+            ));
+         },
+         _ => alert("Sunbird is uninstalled. Discord itself was not changed."),
+      }
    }
 
    #[cfg(test)]
@@ -378,6 +433,26 @@ mod windows {
             Some("2026.11.23.2353-b51d77c")
          );
          assert_eq!(super::loader_version("{}"), None);
+      }
+
+      #[test]
+      fn allows_https_or_localhost_sites() {
+         for ok in [
+            "https://assets.sunbird.tools",
+            "http://127.0.0.1:8765",
+            "http://localhost",
+            "http://localhost/x",
+         ] {
+            assert!(super::site_allowed(ok), "{ok}");
+         }
+         for bad in [
+            "http://assets.sunbird.tools",
+            "http://localhost.evil.com",
+            "http://127.0.0.1.evil.com",
+            "ftp://x",
+         ] {
+            assert!(!super::site_allowed(bad), "{bad}");
+         }
       }
    }
 }
