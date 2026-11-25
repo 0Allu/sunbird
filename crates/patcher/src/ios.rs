@@ -2,7 +2,11 @@
 //! gate and loads the plugin runtime, the build the site hands the user to
 //! sideload.
 
-use std::collections::BTreeMap;
+use std::{
+   borrow::Cow,
+   collections::BTreeMap,
+   ops::Range,
+};
 
 use phoenix_sigs::{
    PLUGIN_BUNDLE,
@@ -12,7 +16,12 @@ use phoenix_sigs::{
 
 use crate::{
    Error,
-   zip,
+   zip::{
+      self,
+      Entry,
+      Source,
+      Writer,
+   },
 };
 
 /// `mov w0, #1; ret`, which makes an evaluator report access.
@@ -30,59 +39,125 @@ const LOADER: &str = "libphoenix.dylib";
 /// The path [`EXECUTABLE`] loads [`LOADER`] from.
 const LOADER_PATH: &str = "@executable_path/Frameworks/libphoenix.dylib";
 
+/// A piece of the patched IPA, in file order.
+pub enum Part<'a> {
+   /// This range of the input, unchanged.
+   Copy(Range<usize>),
+   Bytes(Cow<'a, [u8]>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Target {
+   Framework,
+   Bundle,
+   Executable,
+}
+
+impl Target {
+   const ALL: [Self; 3] = [Self::Framework, Self::Bundle, Self::Executable];
+
+   fn of(name: &str) -> Option<Self> {
+      match name {
+         JS_BUNDLE => Some(Self::Bundle),
+         EXECUTABLE => Some(Self::Executable),
+         _ if name.contains("/Frameworks/") && name.ends_with(FRAMEWORK) => Some(Self::Framework),
+         _ => None,
+      }
+   }
+
+   const fn path(self) -> &'static str {
+      match self {
+         Self::Framework => FRAMEWORK,
+         Self::Bundle => JS_BUNDLE,
+         Self::Executable => EXECUTABLE,
+      }
+   }
+}
+
 /// Opens the access gate, offers the Phoenix switch and adds `loader` with
-/// `plugins` to a decrypted IPA. The patched and added files are stored
-/// uncompressed and every other entry is copied verbatim.
-pub fn build_patched_ipa(
-   ipa: &[u8],
-   loader: &[u8],
+/// `plugins` to a decrypted IPA, handing the result to `emit` in order.
+///
+/// The patched and added files are stored uncompressed, and every other entry
+/// is a [`Part::Copy`] of its bytes in `ipa`. Only one patched file is in
+/// memory at a time, so a phone's browser can patch a 230 MB IPA.
+pub fn build_patched_ipa<'a, S: Source + ?Sized>(
+   ipa: &S,
+   loader: &'a [u8],
    plugins: &BTreeMap<String, String>,
-) -> Result<Vec<u8>, Error> {
-   let records = zip::read(ipa)?;
+   mut emit: impl FnMut(Part<'a>) -> Result<(), Error>,
+) -> Result<(), Error> {
+   let records = zip::read_from(ipa)?;
    let added = [LOADER, PLUGIN_BUNDLE].map(|name| format!("{FRAMEWORKS}{name}"));
-   let mut entries = records
-      .iter()
-      .map(|record| record.entry(ipa))
-      .filter(|entry| !added.contains(&entry.name))
-      .collect::<Vec<_>>();
+   for target in Target::ALL {
+      if !records
+         .iter()
+         .any(|record| Target::of(&record.name) == Some(target))
+      {
+         return Err(Error::Host(format!(
+            "{} not found in the IPA",
+            target.path()
+         )));
+      }
+   }
 
-   let framework = entries
+   let mut writer = Writer::default();
+   for record in records
       .iter()
-      .position(|entry| entry.name.contains("/Frameworks/") && entry.name.ends_with(FRAMEWORK))
-      .ok_or_else(|| Error::Host(format!("{FRAMEWORK} not found in the IPA")))?;
-   let name = entries[framework].name.clone();
-   let mut macho = entries[framework].data()?.into_owned();
-   open_access_gate(&name, &mut macho)?;
-   entries[framework] = zip::Entry::stored(name, macho)?;
-
-   let bundle = entries
-      .iter()
-      .position(|entry| entry.name == JS_BUNDLE)
-      .ok_or_else(|| Error::Host(format!("{JS_BUNDLE} not found in the IPA")))?;
-   let name = entries[bundle].name.clone();
-   let mut hermes = entries[bundle].data()?.into_owned();
-   offer_switch(&name, &mut hermes)?;
-   entries[bundle] = zip::Entry::stored(name, hermes)?;
-
-   let executable = entries
-      .iter()
-      .position(|entry| entry.name == EXECUTABLE)
-      .ok_or_else(|| Error::Host(format!("{EXECUTABLE} not found in the IPA")))?;
-   let mut binary = entries[executable].data()?.into_owned();
-   load_weak(EXECUTABLE, &mut binary, LOADER_PATH)?;
-   entries[executable] = zip::Entry::stored(EXECUTABLE.to_owned(), binary)?;
+      .filter(|record| !added.contains(&record.name))
+   {
+      let Some(target) = Target::of(&record.name) else {
+         let local = writer.local(
+            &record.name,
+            record.method,
+            record.crc,
+            record.size,
+            record.data.len(),
+         )?;
+         emit(Part::Bytes(Cow::Owned(local)))?;
+         emit(Part::Copy(record.data.clone()))?;
+         continue;
+      };
+      let mut data = record.contents(ipa)?;
+      match target {
+         Target::Framework => {
+            open_access_gate(&record.name, &mut data)?;
+         },
+         Target::Bundle => offer_switch(&record.name, &mut data)?,
+         Target::Executable => load_weak(&record.name, &mut data, LOADER_PATH)?,
+      }
+      stored(
+         &mut writer,
+         Entry::stored(record.name.clone(), data)?,
+         &mut emit,
+      )?;
+   }
 
    let bundle =
       serde_json::to_vec(plugins).map_err(|err| Error::Host(format!("plugin bundle: {err}")))?;
    let [loader_name, bundle_name] = added;
-   entries.push(zip::Entry::stored(loader_name, loader)?);
-   entries.push(zip::Entry::stored(bundle_name, bundle)?);
+   stored(&mut writer, Entry::stored(loader_name, loader)?, &mut emit)?;
+   stored(&mut writer, Entry::stored(bundle_name, bundle)?, &mut emit)?;
 
-   let mut out = Vec::new();
-   for part in zip::write(entries)?.parts {
-      out.extend_from_slice(&part);
+   for part in writer.finish()? {
+      emit(Part::Bytes(Cow::Owned(part)))?;
    }
-   Ok(out)
+   Ok(())
+}
+
+fn stored<'a>(
+   writer: &mut Writer,
+   entry: Entry<'a>,
+   emit: &mut impl FnMut(Part<'a>) -> Result<(), Error>,
+) -> Result<(), Error> {
+   let local = writer.local(
+      &entry.name,
+      entry.method,
+      entry.crc,
+      entry.size,
+      entry.raw.len(),
+   )?;
+   emit(Part::Bytes(Cow::Owned(local)))?;
+   emit(Part::Bytes(entry.raw))
 }
 
 const MH_MAGIC_64: u32 = 0xFEED_FACF;

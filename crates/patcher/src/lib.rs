@@ -18,7 +18,7 @@ mod host;
 pub mod ios;
 mod manifest;
 mod sign;
-mod zip;
+pub mod zip;
 
 use std::{
    borrow::Cow,

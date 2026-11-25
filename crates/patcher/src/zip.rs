@@ -1,10 +1,15 @@
-//! The zip subset APKs use. Unchanged entries keep their compressed bytes.
-//! Stored entries are aligned through zero-filled local extra fields, 16 KiB
-//! for native libraries so the linker can map them on 16 KiB page kernels.
+//! The zip subset APKs use.
+//!
+//! Unchanged entries keep their compressed bytes. Stored entries are aligned
+//! through zero-filled local extra fields, 16 KiB for native libraries so the
+//! linker can map them on 16 KiB page kernels.
 
 use std::{
    borrow::Cow,
-   io::Read,
+   io::{
+      self,
+      Read,
+   },
    ops::Range,
 };
 
@@ -43,6 +48,23 @@ impl Method {
    }
 }
 
+/// Random access to an archive, so a large one is read in pieces and never
+/// held whole, like the 230 MB IPA the site patches in a phone's browser.
+pub trait Source {
+   fn size(&self) -> usize;
+   fn read(&self, range: Range<usize>) -> Result<Cow<'_, [u8]>, Error>;
+}
+
+impl Source for [u8] {
+   fn size(&self) -> usize {
+      self.len()
+   }
+
+   fn read(&self, range: Range<usize>) -> Result<Cow<'_, [u8]>, Error> {
+      self.get(range).map(Cow::Borrowed).ok_or(Error::Truncated)
+   }
+}
+
 /// An entry as the central directory lists it, with its compressed bytes as a
 /// range of the archive.
 pub struct Record {
@@ -54,6 +76,7 @@ pub struct Record {
 }
 
 impl Record {
+   #[must_use]
    pub fn entry<'a>(&self, archive: &'a [u8]) -> Entry<'a> {
       Entry {
          name:   self.name.clone(),
@@ -62,6 +85,50 @@ impl Record {
          size:   self.size,
          raw:    Cow::Borrowed(&archive[self.data.clone()]),
       }
+   }
+
+   /// The uncompressed bytes, read from `archive` a mebibyte at a time.
+   pub fn contents<S: Source + ?Sized>(&self, archive: &S) -> Result<Vec<u8>, Error> {
+      let inflate = |source| {
+         Error::Inflate {
+            name: self.name.clone(),
+            source,
+         }
+      };
+      match self.method {
+         Method::Stored => Ok(archive.read(self.data.clone())?.into_owned()),
+         Method::Deflated => {
+            let mut out = Vec::with_capacity(self.size as usize);
+            let chunks = Chunks {
+               archive,
+               rest: self.data.clone(),
+            };
+            DeflateDecoder::new_with_buf(chunks, vec![0; CHUNK])
+               .read_to_end(&mut out)
+               .map_err(inflate)?;
+            Ok(out)
+         },
+      }
+   }
+}
+
+const CHUNK: usize = 1 << 20;
+
+struct Chunks<'a, S: ?Sized> {
+   archive: &'a S,
+   rest:    Range<usize>,
+}
+
+impl<S: Source + ?Sized> Read for Chunks<'_, S> {
+   fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+      let end = self.rest.end.min(self.rest.start + buf.len());
+      let chunk = self
+         .archive
+         .read(self.rest.start..end)
+         .map_err(|err| io::Error::other(err.to_string()))?;
+      buf[..chunk.len()].copy_from_slice(&chunk);
+      self.rest.start = end;
+      Ok(chunk.len())
    }
 }
 
@@ -103,24 +170,27 @@ impl<'a> Entry<'a> {
          },
       }
    }
-
-   fn alignment(&self) -> usize {
-      match self.method {
-         Method::Deflated => 1,
-         Method::Stored if self.name.as_bytes().ends_with(b".so") => 16384,
-         Method::Stored => 4,
-      }
-   }
 }
 
+const MAX_COMMENT: usize = 0xFFFF;
+
 pub fn read(archive: &[u8]) -> Result<Vec<Record>, Error> {
-   let bytes = Bytes(archive);
-   let end = (0..=archive.len().saturating_sub(22))
+   read_from(archive)
+}
+
+pub fn read_from<S: Source + ?Sized>(archive: &S) -> Result<Vec<Record>, Error> {
+   let size = archive.size();
+   let tail = archive.read(size.saturating_sub(22 + MAX_COMMENT)..size)?;
+   let tail = Bytes(&tail);
+   let end = (0..=tail.0.len().saturating_sub(22))
       .rev()
-      .find(|&at| bytes.u32(at).is_ok_and(|magic| magic == END))
+      .find(|&at| tail.u32(at).is_ok_and(|magic| magic == END))
       .ok_or_else(|| Error::Zip("not a zip, no end of central directory".into()))?;
-   let count = bytes.u16(end + 10)?;
-   let mut at = bytes.u32(end + 16)? as usize;
+   let count = tail.u16(end + 10)?;
+   let start = tail.u32(end + 16)? as usize;
+   let directory = archive.read(start..start.saturating_add(tail.u32(end + 12)? as usize))?;
+   let bytes = Bytes(&directory);
+   let mut at = 0;
 
    let mut records = Vec::with_capacity(usize::from(count));
    for _ in 0..count {
@@ -136,13 +206,16 @@ pub fn read(archive: &[u8]) -> Result<Vec<Record>, Error> {
          other => return Err(Error::Zip(format!("{name}: unsupported method {other}"))),
       };
       let local = bytes.u32(at + 42)? as usize;
-      if bytes.u32(local)? != LOCAL {
+      let header = archive.read(local..local.saturating_add(30))?;
+      let header = Bytes(&header);
+      if header.u32(0)? != LOCAL {
          return Err(Error::Zip(format!("{name}: bad local header")));
       }
-      let start =
-         local + 30 + usize::from(bytes.u16(local + 26)?) + usize::from(bytes.u16(local + 28)?);
-      let data = start..start + bytes.u32(at + 20)? as usize;
-      bytes.slice(data.clone())?;
+      let start = local + 30 + usize::from(header.u16(26)?) + usize::from(header.u16(28)?);
+      let data = start..start.saturating_add(bytes.u32(at + 20)? as usize);
+      if data.end > size {
+         return Err(Error::Truncated);
+      }
 
       records.push(Record {
          name,
@@ -165,73 +238,114 @@ pub struct Archive<'a> {
 }
 
 pub fn write(entries: Vec<Entry<'_>>) -> Result<Archive<'_>, Error> {
-   let too_big = || Error::Zip("zip64 is not supported".into());
+   let mut writer = Writer::default();
    let mut parts = Vec::with_capacity(2 * entries.len() + 2);
-   let mut central = Vec::new();
-   let mut offset = 0usize;
-
    for entry in entries {
-      let align = entry.alignment();
-      let pad = (align - (offset + 30 + entry.name.len()) % align) % align;
-      let compressed = u32::try_from(entry.raw.len()).map_err(|_| too_big())?;
-      let name_len = u16::try_from(entry.name.len()).map_err(|_| too_big())?;
-
-      let mut local = Vec::with_capacity(30 + entry.name.len() + pad);
-      put32(&mut local, LOCAL);
-      put16(&mut local, entry.method.version());
-      put16(&mut local, 0);
-      put16(&mut local, entry.method.id());
-      put32(&mut local, DOS_TIME);
-      put32(&mut local, entry.crc);
-      put32(&mut local, compressed);
-      put32(&mut local, entry.size);
-      put16(&mut local, name_len);
-      put16(&mut local, u16::try_from(pad).map_err(|_| too_big())?);
-      local.extend_from_slice(entry.name.as_bytes());
-      local.resize(local.len() + pad, 0);
-
-      put32(&mut central, CENTRAL);
-      put16(&mut central, 20);
-      put16(&mut central, entry.method.version());
-      put16(&mut central, 0);
-      put16(&mut central, entry.method.id());
-      put32(&mut central, DOS_TIME);
-      put32(&mut central, entry.crc);
-      put32(&mut central, compressed);
-      put32(&mut central, entry.size);
-      put16(&mut central, name_len);
-      central.extend_from_slice(&[0; 12]);
-      put32(&mut central, u32::try_from(offset).map_err(|_| too_big())?);
-      central.extend_from_slice(entry.name.as_bytes());
-
-      offset += local.len() + entry.raw.len();
+      let local = writer.local(
+         &entry.name,
+         entry.method,
+         entry.crc,
+         entry.size,
+         entry.raw.len(),
+      )?;
       parts.push(Cow::Owned(local));
       parts.push(entry.raw);
    }
 
-   let count = u16::try_from(parts.len() / 2).map_err(|_| too_big())?;
-   let mut end = Vec::with_capacity(22);
-   put32(&mut end, END);
-   put32(&mut end, 0);
-   put16(&mut end, count);
-   put16(&mut end, count);
-   put32(
-      &mut end,
-      u32::try_from(central.len()).map_err(|_| too_big())?,
-   );
-   put32(&mut end, u32::try_from(offset).map_err(|_| too_big())?);
-   put16(&mut end, 0);
-   if offset
-      .checked_add(central.len())
-      .is_none_or(|size| size > u32::MAX as usize)
-   {
-      return Err(too_big());
-   }
-
    let directory = parts.len();
+   let [central, end] = writer.finish()?;
    parts.push(Cow::Owned(central));
    parts.push(Cow::Owned(end));
    Ok(Archive { parts, directory })
+}
+
+/// Lays entries out one after another and collects the central directory, so
+/// a caller can hand each entry's bytes on as soon as it has them.
+#[derive(Default)]
+pub struct Writer {
+   central: Vec<u8>,
+   offset:  usize,
+   count:   usize,
+}
+
+impl Writer {
+   /// The local header of an entry whose `raw` bytes, compressed by `method`,
+   /// come right after it.
+   pub fn local(
+      &mut self,
+      name: &str,
+      method: Method,
+      crc: u32,
+      size: u32,
+      raw: usize,
+   ) -> Result<Vec<u8>, Error> {
+      let too_big = || Error::Zip("zip64 is not supported".into());
+      let align = match method {
+         Method::Deflated => 1,
+         Method::Stored if name.as_bytes().ends_with(b".so") => 16384,
+         Method::Stored => 4,
+      };
+      let pad = (align - (self.offset + 30 + name.len()) % align) % align;
+      let compressed = u32::try_from(raw).map_err(|_| too_big())?;
+      let name_len = u16::try_from(name.len()).map_err(|_| too_big())?;
+
+      let mut local = Vec::with_capacity(30 + name.len() + pad);
+      put32(&mut local, LOCAL);
+      put16(&mut local, method.version());
+      put16(&mut local, 0);
+      put16(&mut local, method.id());
+      put32(&mut local, DOS_TIME);
+      put32(&mut local, crc);
+      put32(&mut local, compressed);
+      put32(&mut local, size);
+      put16(&mut local, name_len);
+      put16(&mut local, u16::try_from(pad).map_err(|_| too_big())?);
+      local.extend_from_slice(name.as_bytes());
+      local.resize(local.len() + pad, 0);
+
+      let central = &mut self.central;
+      put32(central, CENTRAL);
+      put16(central, 20);
+      put16(central, method.version());
+      put16(central, 0);
+      put16(central, method.id());
+      put32(central, DOS_TIME);
+      put32(central, crc);
+      put32(central, compressed);
+      put32(central, size);
+      put16(central, name_len);
+      central.extend_from_slice(&[0; 12]);
+      put32(central, u32::try_from(self.offset).map_err(|_| too_big())?);
+      central.extend_from_slice(name.as_bytes());
+
+      self.offset += local.len() + raw;
+      self.count += 1;
+      Ok(local)
+   }
+
+   pub fn finish(self) -> Result<[Vec<u8>; 2], Error> {
+      let too_big = || Error::Zip("zip64 is not supported".into());
+      let count = u16::try_from(self.count).map_err(|_| too_big())?;
+      let mut end = Vec::with_capacity(22);
+      put32(&mut end, END);
+      put32(&mut end, 0);
+      put16(&mut end, count);
+      put16(&mut end, count);
+      put32(
+         &mut end,
+         u32::try_from(self.central.len()).map_err(|_| too_big())?,
+      );
+      put32(&mut end, u32::try_from(self.offset).map_err(|_| too_big())?);
+      put16(&mut end, 0);
+      if self
+         .offset
+         .checked_add(self.central.len())
+         .is_none_or(|size| size > u32::MAX as usize)
+      {
+         return Err(too_big());
+      }
+      Ok([self.central, end])
+   }
 }
 
 fn put16(out: &mut Vec<u8>, value: u16) {

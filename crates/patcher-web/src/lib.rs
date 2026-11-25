@@ -6,6 +6,7 @@
 use std::{
    borrow::Cow,
    collections::BTreeMap,
+   ops::Range,
 };
 
 use js_sys::{
@@ -14,17 +15,25 @@ use js_sys::{
    Uint8Array,
 };
 use patcher::{
+   Error,
    Frida,
    Library,
    PackageName,
    Payload,
    Prepared,
    Runtime,
+   ios::Part,
+   zip::Source,
 };
 use wasm_bindgen::{
    JsError,
    JsValue,
    prelude::wasm_bindgen,
+};
+use web_sys::{
+   Blob,
+   BlobPropertyBag,
+   FileReaderSync,
 };
 
 #[wasm_bindgen]
@@ -158,12 +167,85 @@ impl IpaBuild {
    }
 
    /// Opens the access gate, offers the Phoenix switch and adds the loader and
-   /// plugins, returning the repacked archive for the page to download.
-   pub fn patch(&self, ipa: &[u8]) -> Result<Uint8Array, JsError> {
+   /// plugins. Reads `ipa` in pieces with `FileReaderSync`, so it runs only in
+   /// a worker, and the returned `Blob` reuses `ipa`'s unchanged slices.
+   #[expect(
+      clippy::cast_possible_truncation,
+      clippy::cast_sign_loss,
+      reason = "a Blob's size is a whole number of bytes, and zip32 caps it at 4 GiB"
+   )]
+   pub fn patch(&self, ipa: &Blob) -> Result<Blob, JsError> {
       if self.loader.is_empty() {
          return Err(JsError::new("no iOS loader set"));
       }
-      let out = patcher::ios::build_patched_ipa(ipa, &self.loader, &self.plugins)?;
-      Ok(Uint8Array::from(&out[..]))
+      let size = ipa.size();
+      if size > f64::from(u32::MAX) {
+         return Err(Error::Overflow.into());
+      }
+      let source = PageBlob {
+         blob:   ipa,
+         size:   size as usize,
+         reader: FileReaderSync::new().map_err(|err| page_error("FileReaderSync", &err))?,
+      };
+
+      let parts = Array::new();
+      patcher::ios::build_patched_ipa(&source, &self.loader, &self.plugins, |part| {
+         let blob = match part {
+            Part::Copy(range) => source.slice(range),
+            Part::Bytes(bytes) => {
+               // SAFETY: the Blob constructor copies the view before wasm runs
+               // again, which could grow memory.
+               let view = unsafe { Uint8Array::view(&bytes) };
+               Blob::new_with_u8_array_sequence(&Array::of1(&view))
+                  .map_err(|err| page_error("building the IPA", &err))
+            },
+         }?;
+         parts.push(&blob);
+         Ok(())
+      })?;
+
+      let options = BlobPropertyBag::new();
+      options.set_type("application/octet-stream");
+      Ok(Blob::new_with_blob_sequence_and_options(&parts, &options)
+         .map_err(|err| page_error("building the IPA", &err))?)
    }
+}
+
+/// The IPA the page picked, read as the patcher needs it.
+struct PageBlob<'a> {
+   blob:   &'a Blob,
+   size:   usize,
+   reader: FileReaderSync,
+}
+
+impl PageBlob<'_> {
+   fn slice(&self, range: Range<usize>) -> Result<Blob, Error> {
+      let offset = |at: usize| {
+         u32::try_from(at)
+            .map(f64::from)
+            .map_err(|_| Error::Overflow)
+      };
+      self
+         .blob
+         .slice_with_f64_and_f64(offset(range.start)?, offset(range.end)?)
+         .map_err(|err| page_error("slicing the IPA", &err))
+   }
+}
+
+impl Source for PageBlob<'_> {
+   fn size(&self) -> usize {
+      self.size
+   }
+
+   fn read(&self, range: Range<usize>) -> Result<Cow<'_, [u8]>, Error> {
+      let buffer = self
+         .reader
+         .read_as_array_buffer(&self.slice(range)?)
+         .map_err(|err| page_error("reading the IPA", &err))?;
+      Ok(Cow::Owned(Uint8Array::new(&buffer).to_vec()))
+   }
+}
+
+fn page_error(what: &str, err: &JsValue) -> Error {
+   Error::Input(format!("{what}: {err:?}"))
 }
