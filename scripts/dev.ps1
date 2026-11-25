@@ -69,14 +69,23 @@ function Forward-DebugShell {
    adb forward tcp:4242 tcp:4242 | Out-Null
 }
 
+# Desktop's shell is always on, so it wants the per-start token it writes
+# beside its plugins.
+function Get-DebugHeaders {
+   if (-not $Desktop) { return @{} }
+   $tokenFile = Join-Path $env:LOCALAPPDATA "DiscordPhoenix\sunbird\debug-shell-token"
+   if (-not (Test-Path $tokenFile)) { return @{} }
+   @{ "X-Sunbird-Token" = (Get-Content $tokenFile -Raw).Trim() }
+}
+
 function Invoke-DebugGet([string]$Path) {
    Forward-DebugShell
-   Invoke-RestMethod -Uri "http://127.0.0.1:4242$Path"
+   Invoke-RestMethod -Uri "http://127.0.0.1:4242$Path" -Headers (Get-DebugHeaders)
 }
 
 function Invoke-DebugPost([string]$Path, [string]$Body = "", [string]$ContentType = "text/plain") {
    Forward-DebugShell
-   Invoke-RestMethod -Uri "http://127.0.0.1:4242$Path" -Method Post -Body $Body -ContentType $ContentType
+   Invoke-RestMethod -Uri "http://127.0.0.1:4242$Path" -Method Post -Body $Body -ContentType $ContentType -Headers (Get-DebugHeaders)
 }
 
 # Fast host unit tests
@@ -152,7 +161,7 @@ if ($HotReload) {
          $body = ($banner -join "`n") + "`n" + $body
       }
       Forward-DebugShell
-      $resp = Invoke-RestMethod -Uri "http://127.0.0.1:4242/plugins/$HotReload" -Method Put -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) -ContentType "text/javascript; charset=utf-8"
+      $resp = Invoke-RestMethod -Uri "http://127.0.0.1:4242/plugins/$HotReload" -Method Put -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) -ContentType "text/javascript; charset=utf-8" -Headers (Get-DebugHeaders)
       Write-Host "Hot-reloaded $HotReload`: $($resp | ConvertTo-Json -Compress)"
    } finally {
       Remove-Item $tmp -Force -ErrorAction SilentlyContinue

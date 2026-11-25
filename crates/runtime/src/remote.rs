@@ -18,6 +18,7 @@ use std::{
       TcpListener,
       TcpStream,
    },
+   path::Path,
    sync::{
       LazyLock,
       Mutex,
@@ -172,6 +173,94 @@ pub fn set_enabled(on: bool) {
    }
 }
 
+/// A random token every request must carry, once a platform asks for one.
+static TOKEN: OnceLock<String> = OnceLock::new();
+const TOKEN_COOKIE: &str = "sunbird_token";
+
+/// Makes every request carry a random per-start token, and writes it to
+/// `token_file` for local tools like `scripts/dev.ps1`.
+///
+/// The token comes as `?token=`, an `X-Sunbird-Token` header or the cookie
+/// `/ui?token=` sets. Platforms whose shell is always on call this: any local
+/// process or app could otherwise reach `/eval` and run JS with the session.
+pub fn require_token(token_file: &Path) {
+   use std::io::Write as _;
+   let token = TOKEN.get_or_init(random_token);
+   let mut options = std::fs::OpenOptions::new();
+   options.write(true).create(true).truncate(true);
+   // Other users on the machine must not read it out of a shared home; the
+   // mode only applies to a new file.
+   #[cfg(unix)]
+   {
+      let _ = std::fs::remove_file(token_file);
+      std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+   }
+   if let Err(err) = options
+      .open(token_file)
+      .and_then(|mut file| file.write_all(token.as_bytes()))
+   {
+      log::warn!("remote shell: writing {}: {err}", token_file.display());
+   }
+}
+
+/// The dashboard's URL, with the token when one is required.
+#[must_use]
+pub fn dashboard_url() -> String {
+   let url = format!("http://{}/ui", bound_addr());
+   match TOKEN.get() {
+      Some(token) => format!("{url}?token={token}"),
+      None => url,
+   }
+}
+
+/// 128 bits from std's OS-seeded `SipHash` keys, so no RNG crate is needed.
+fn random_token() -> String {
+   use std::{
+      fmt::Write as _,
+      hash::{
+         BuildHasher,
+         Hasher,
+      },
+   };
+   let state = std::hash::RandomState::new();
+   (0u64..2).fold(String::with_capacity(32), |mut out, at| {
+      let mut hasher = state.build_hasher();
+      hasher.write_u64(at);
+      let _ = write!(out, "{:016x}", hasher.finish());
+      out
+   })
+}
+
+/// Compares in time independent of where the first difference is.
+fn same_token(given: &str, token: &str) -> bool {
+   given.len() == token.len()
+      && given
+         .bytes()
+         .zip(token.bytes())
+         .fold(0, |diff, (a, b)| diff | (a ^ b))
+         == 0
+}
+
+/// Whether `req` carries `token`, and whether it came in the query.
+fn token_given(req: &Request, token: &str) -> (bool, bool) {
+   let in_query = req
+      .query
+      .split('&')
+      .filter_map(|pair| pair.strip_prefix("token="))
+      .any(|given| same_token(given, token));
+   let elsewhere = req
+      .token_header
+      .as_deref()
+      .is_some_and(|given| same_token(given, token))
+      || req.cookie.as_deref().is_some_and(|cookie| {
+         cookie
+            .split(';')
+            .filter_map(|pair| pair.trim().strip_prefix(TOKEN_COOKIE)?.strip_prefix('='))
+            .any(|given| same_token(given, token))
+      });
+   (in_query || elsewhere, in_query)
+}
+
 /// Returns the actual bound `host:port` of the localhost server, falling back
 /// to [`ADDR`] if not started yet.
 #[must_use]
@@ -241,6 +330,8 @@ pub struct Request {
    host:           Option<String>,
    origin:         Option<String>,
    sec_fetch_site: Option<String>,
+   cookie:         Option<String>,
+   token_header:   Option<String>,
    pub body:       Vec<u8>,
 }
 
@@ -288,17 +379,46 @@ fn handle(mut stream: TcpStream) {
          .is_some_and(|site| !is_allowed_fetch_site(site))
    {
       let (status, content_type, response) = err("403 Forbidden", "loopback origin only");
-      write_response(&mut stream, status, content_type, &response);
+      write_response(&mut stream, status, content_type, &response, None);
       return;
    }
+   let mut cookie = None;
+   if let Some(token) = TOKEN.get() {
+      let (given, in_query) = token_given(&req, token);
+      if !given {
+         let (status, content_type, response) = err("403 Forbidden", "missing debug shell token");
+         write_response(&mut stream, status, content_type, &response, None);
+         return;
+      }
+      // The dashboard's own requests then carry the token without it in
+      // every URL.
+      if in_query {
+         cookie = Some(format!(
+            "{TOKEN_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/"
+         ));
+      }
+   }
    let (status, content_type, response) = dispatch(&req);
-   write_response(&mut stream, status, content_type, &response);
+   write_response(
+      &mut stream,
+      status,
+      content_type,
+      &response,
+      cookie.as_deref(),
+   );
 }
 
-fn write_response(stream: &mut TcpStream, status: &str, content_type: &str, response: &[u8]) {
+fn write_response(
+   stream: &mut TcpStream,
+   status: &str,
+   content_type: &str,
+   response: &[u8],
+   cookie: Option<&str>,
+) {
+   let cookie = cookie.map_or_else(String::new, |cookie| format!("Set-Cookie: {cookie}\r\n"));
    let header = format!(
       "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nCache-Control: \
-       no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+       no-store\r\n{cookie}Content-Length: {}\r\nConnection: close\r\n\r\n",
       response.len()
    );
    let _ = stream.write_all(header.as_bytes());
@@ -327,6 +447,8 @@ fn read_request(stream: &TcpStream) -> std::io::Result<Request> {
    let mut host = None;
    let mut origin = None;
    let mut sec_fetch_site = None;
+   let mut cookie = None;
+   let mut token_header = None;
    loop {
       let mut line = String::new();
       if reader.read_line(&mut line)? == 0 {
@@ -349,6 +471,10 @@ fn read_request(stream: &TcpStream) -> std::io::Result<Request> {
             origin = Some(value.to_owned());
          } else if name.eq_ignore_ascii_case("sec-fetch-site") {
             sec_fetch_site = Some(value.to_owned());
+         } else if name.eq_ignore_ascii_case("cookie") {
+            cookie = Some(value.to_owned());
+         } else if name.eq_ignore_ascii_case("x-sunbird-token") {
+            token_header = Some(value.to_owned());
          }
       }
    }
@@ -364,6 +490,8 @@ fn read_request(stream: &TcpStream) -> std::io::Result<Request> {
       host,
       origin,
       sec_fetch_site,
+      cookie,
+      token_header,
       body,
    })
 }
@@ -824,6 +952,42 @@ mod tests {
       assert!(is_allowed_fetch_site("none"));
       assert!(!is_allowed_fetch_site("same-site"));
       assert!(!is_allowed_fetch_site("cross-site"));
+   }
+
+   #[test]
+   fn takes_the_token_from_query_header_or_cookie() {
+      let request = |query: &str, cookie: Option<&str>, header: Option<&str>| {
+         Request {
+            method:         "GET".to_owned(),
+            path:           "/ui".to_owned(),
+            query:          query.to_owned(),
+            accept:         String::new(),
+            host:           None,
+            origin:         None,
+            sec_fetch_site: None,
+            cookie:         cookie.map(str::to_owned),
+            token_header:   header.map(str::to_owned),
+            body:           Vec::new(),
+         }
+      };
+      let token = "abc123";
+      assert_eq!(
+         token_given(&request("x=1&token=abc123", None, None), token),
+         (true, true)
+      );
+      assert_eq!(
+         token_given(&request("", Some("a=b; sunbird_token=abc123"), None), token),
+         (true, false)
+      );
+      assert_eq!(
+         token_given(&request("", None, Some("abc123")), token),
+         (true, false)
+      );
+      assert!(!token_given(&request("token=abc12", None, None), token).0);
+      assert!(!token_given(&request("", Some("sunbird_tokenx=abc123"), None), token).0);
+      assert!(!token_given(&request("", None, None), token).0);
+      assert_eq!(random_token().len(), 32);
+      assert_ne!(random_token(), random_token());
    }
 
    #[test]

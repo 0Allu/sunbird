@@ -224,9 +224,12 @@ impl Platform for Desktop {
       };
       let _ = std::fs::create_dir_all(state.plugins_dir());
       remote::set_flag(true);
+      // Desktop keeps the shell on, so any local process could reach `/eval`
+      // and the session; only holders of this start's token get in.
+      remote::require_token(&state.plugins_dir().with_file_name("debug-shell-token"));
       remote::ensure_started();
       phoenix_ui_desktop::start_tray(phoenix_ui_desktop::TrayConfig {
-         dashboard_url:    format!("http://{}/ui", remote::bound_addr()),
+         dashboard_url:    remote::dashboard_url(),
          plugins_dir:      state.plugins_dir(),
          on_reload_all:    Some(Arc::new(phoenix_runtime::reload_all)),
          on_check_updates: Some(Arc::new(phoenix_runtime::update::check)),
