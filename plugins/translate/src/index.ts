@@ -1,5 +1,5 @@
 // @description Translates messages from the message menu, or every message in selected channels, using Kagi or Google
-// @version 0.2.0
+// @version 0.2.1
 // @author amaanq
 
 const { gateway } = phoenix;
@@ -42,11 +42,29 @@ interface Translation {
 
 type Translator = (text: string, target: string) => Promise<Translation>;
 
+const GOOGLE_KEY = "AIzaSyDLEeFI5OtFBwYBIoK_jj5m32rZK5CkCXA";
+
+// Google answers with a code like "id"; this turns it into "Indonesian".
+let languageNames: Promise<Map<string, string>> | undefined;
+const languageName = async (code: string) => {
+  languageNames ??= phoenix
+    .fetch(`https://translate-pa.googleapis.com/v1/supportedLanguages?client=gtx&display_language=en&key=${GOOGLE_KEY}`)
+    .then((response) => {
+      const { sourceLanguages = [] } = response.json<{ sourceLanguages?: { language: string; name: string }[] }>() ?? {};
+      return new Map(sourceLanguages.map(({ language, name }) => [language, name]));
+    })
+    .catch(() => {
+      languageNames = undefined;
+      return new Map<string, string>();
+    });
+  return (await languageNames).get(code) ?? code;
+};
+
 const google: Translator = async (text, target) => {
   const query = Object.entries({
     "params.client": "gtx",
     dataTypes: "TRANSLATION",
-    key: "AIzaSyDLEeFI5OtFBwYBIoK_jj5m32rZK5CkCXA",
+    key: GOOGLE_KEY,
     "query.sourceLanguage": "auto",
     "query.targetLanguage": target,
     "query.text": text,
@@ -57,7 +75,7 @@ const google: Translator = async (text, target) => {
   if (!response.ok) throw new Error(`Google answered ${response.status}`);
 
   const { translation, sourceLanguage } = response.json<{ translation: string; sourceLanguage: string }>();
-  return { text: translation, from: sourceLanguage, label: sourceLanguage };
+  return { text: translation, from: sourceLanguage, label: await languageName(sourceLanguage) };
 };
 
 const kagi =
