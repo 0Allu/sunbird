@@ -34,9 +34,11 @@ use object::{
          SectionTable,
       },
       macho::{
+         FatArch as _,
          Fixup,
          LoadCommandVariant,
          MachHeader,
+         MachOFatFile32,
          Section as _,
          Segment as _,
       },
@@ -69,6 +71,8 @@ pub enum FileError {
    },
    #[error("{path}: unsupported e_machine {machine}")]
    Machine { path: String, machine: u16 },
+   #[error("{path}: Mach-O cputype {cputype:#x}, only arm64 is read")]
+   CpuType { path: String, cputype: u32 },
    #[error("{path}: segment or section outside the file")]
    Truncated { path: String },
    #[error("{path}: relocation at {offset:#x} outside every segment")]
@@ -272,6 +276,13 @@ impl<'a> MachOFile<'a> {
 
       let header = MachHeader64::<Endianness>::parse(data, 0).map_err(parse)?;
       let endian = header.endian().map_err(parse)?;
+      let cputype = header.cputype(endian);
+      if cputype != macho::CPU_TYPE_ARM64 {
+         return Err(FileError::CpuType {
+            path:    path.to_owned(),
+            cputype: cputype.0,
+         });
+      }
       let mut image = Image {
          path:          path.to_owned(),
          build_id:      None,
@@ -458,7 +469,8 @@ impl<'a> PeFile<'a> {
    }
 }
 
-/// An ELF, PE64 or 64-bit Mach-O binary parsed from disk.
+/// An ELF, PE64 or arm64 Mach-O binary parsed from disk, a fat Mach-O by its
+/// arm64 slice.
 pub enum BinaryFile<'a> {
    Elf(ElfFile<'a>),
    Pe(PeFile<'a>),
@@ -471,6 +483,27 @@ impl<'a> BinaryFile<'a> {
          Ok(Self::Pe(PeFile::parse(path, data)?))
       } else if data.starts_with(&macho::MH_MAGIC_64.to_le_bytes()) {
          Ok(Self::MachO(MachOFile::parse(path, data)?))
+      } else if data.starts_with(&macho::FAT_MAGIC.to_be_bytes()) {
+         let parse = |source| {
+            FileError::Parse {
+               path: path.to_owned(),
+               source,
+            }
+         };
+         let arches = MachOFatFile32::parse(data).map_err(parse)?.arches();
+         let arm64 = arches
+            .iter()
+            .find(|arch| arch.cputype() == macho::CPU_TYPE_ARM64)
+            .ok_or_else(|| {
+               FileError::CpuType {
+                  path:    path.to_owned(),
+                  cputype: arches.first().map_or(0, |arch| arch.cputype().0),
+               }
+            })?;
+         Ok(Self::MachO(MachOFile::parse(
+            path,
+            arm64.data(data).map_err(parse)?,
+         )?))
       } else {
          Ok(Self::Elf(ElfFile::parse(path, data)?))
       }
