@@ -321,6 +321,20 @@ unsafe impl Send for DismissSymbols {}
 unsafe impl Sync for DismissSymbols {}
 
 static ORIG_OVERLAY_RENDER: OnceLock<OverlayRenderFn> = OnceLock::new();
+
+/// The Settings layer's render, `fn(sret, layer, window, cx) -> sret`.
+type SettingsLayerFn = unsafe extern "C" fn(
+   *mut RawAnyElement,
+   *mut c_void,
+   *mut c_void,
+   *mut c_void,
+) -> *mut RawAnyElement;
+static ORIG_SETTINGS_LAYER: OnceLock<SettingsLayerFn> = OnceLock::new();
+/// Set by each Settings render, taken by the next `Workspace` render. A frame
+/// renders `Workspace` first and then the Settings layer over it.
+static SETTINGS_SHOWN: AtomicBool = AtomicBool::new(false);
+/// Whether this frame's `Workspace` render drew the modal.
+static WORKSPACE_DREW: AtomicBool = AtomicBool::new(false);
 static MODAL_SYM: OnceLock<ModalSymbols> = OnceLock::new();
 static FIELD_SYM: OnceLock<TextFieldSymbols> = OnceLock::new();
 static DISMISS_SYM: OnceLock<DismissSymbols> = OnceLock::new();
@@ -922,6 +936,7 @@ pub fn install(image: &Image<'static>) {
    // SAFETY: `trampoline` replays the 19-byte prologue and jumps to `+19`.
    let orig = unsafe { std::mem::transmute::<usize, OverlayRenderFn>(trampoline) };
    let _ = ORIG_OVERLAY_RENDER.set(orig);
+   install_settings_layer(image, pro);
    log::info!(
       "desktop modal: hooked Workspace::render_overlays @ {:#x} (push={:#x}, val +{:#x}) {:x?}",
       found.overlay_render,
@@ -929,6 +944,36 @@ pub fn install(image: &Image<'static>) {
       found.window_validation_offset,
       found.layout,
    );
+}
+
+/// Hooks the Settings layer's render, so modals opened over Settings draw
+/// above it.
+fn install_settings_layer(image: &Image<'static>, pro: desktop::Prologue) {
+   let func = match desktop::settings_layer(image) {
+      Ok(func) => func,
+      Err(err) => {
+         log::warn!("desktop modal: {err}, modals stay under Settings");
+         return;
+      },
+   };
+   // SAFETY: from `prepare`, before Discord's threads run; the detour has the
+   // Settings layer render's sret signature.
+   match unsafe {
+      image.hook_entry(
+         func,
+         pro.pattern,
+         pro.len,
+         settings_layer_detour as *const () as usize,
+      )
+   } {
+      Ok(trampoline) => {
+         // SAFETY: `trampoline` replays the prologue of `func`.
+         let _ = ORIG_SETTINGS_LAYER
+            .set(unsafe { std::mem::transmute::<usize, SettingsLayerFn>(trampoline) });
+         log::info!("desktop modal: hooked Settings layer @ {func:#x}");
+      },
+      Err(err) => log::warn!("desktop modal: Settings layer hook failed: {err}"),
+   }
 }
 
 // ---------------------------------------------------------------------------
@@ -1113,14 +1158,81 @@ unsafe extern "C" fn overlay_render_detour(
    };
    // SAFETY: always render Discord's own overlay stack first.
    let out = unsafe { orig(sret, workspace, arg3, window, cx) };
-   if !MODAL_OPEN.load(Ordering::Acquire) || sret.is_null() || cx.is_null() {
+   // Settings drew last frame: the modal goes inside it, above it.
+   // ponytail: the frame Settings closes in draws no modal; the next redraw
+   // (any input) brings it back under `Workspace`.
+   let settings = SETTINGS_SHOWN.swap(false, Ordering::AcqRel);
+   WORKSPACE_DREW.store(false, Ordering::Release);
+   if settings || !MODAL_OPEN.load(Ordering::Acquire) || sret.is_null() || cx.is_null() {
       return out;
    }
 
    let _ = std::panic::catch_unwind(|| {
       // SAFETY: `[cx]` is `*mut App` inside `Context<Workspace>`.
       let app = unsafe { *(cx.cast::<*mut c_void>()) };
-      push_overlay_into(sret, window, app);
+      let Some(msym) = MODAL_SYM.get() else {
+         return;
+      };
+      let Some(scrim) = build_overlay(window, app) else {
+         return;
+      };
+      let mut scrim_any = MaybeUninit::<RawAnyElement>::uninit();
+      gpui::write_any(scrim, scrim_any.as_mut_ptr());
+      // SAFETY: `scrim_any` was initialized by `div_into_any` and
+      // `vec_push_any` is Discord's own `Vec::<AnyElement>::push`.
+      unsafe {
+         let mut scrim_any = scrim_any.assume_init();
+         (msym.vec_push_any)(sret, &raw mut scrim_any);
+      }
+      WORKSPACE_DREW.store(true, Ordering::Release);
+   });
+   out
+}
+
+unsafe extern "C" fn settings_layer_detour(
+   sret: *mut RawAnyElement,
+   layer: *mut c_void,
+   window: *mut c_void,
+   cx: *mut c_void,
+) -> *mut RawAnyElement {
+   let Some(orig) = ORIG_SETTINGS_LAYER.get().copied() else {
+      return sret;
+   };
+   // SAFETY: Discord's own render first, with its own arguments.
+   let out = unsafe { orig(sret, layer, window, cx) };
+   SETTINGS_SHOWN.store(true, Ordering::Release);
+   if !MODAL_OPEN.load(Ordering::Acquire) || sret.is_null() || cx.is_null() {
+      return out;
+   }
+   if WORKSPACE_DREW.swap(false, Ordering::AcqRel) {
+      // Settings opened this frame over the modal `Workspace` drew; the next
+      // frame draws it in here.
+      force_redraw();
+      return out;
+   }
+   let _ = std::panic::catch_unwind(|| {
+      // SAFETY: `[cx]` is `*mut App` inside the layer's `Context`.
+      let app = unsafe { *(cx.cast::<*mut c_void>()) };
+      let Some(scrim) = build_overlay(window, app) else {
+         return;
+      };
+      let Some(mut over) = gpui::raw_div() else {
+         return;
+      };
+      gpui::style_div(&mut over, |s| {
+         s.set(s.at.position, POSITION_ABSOLUTE);
+         s.lengths(&s.at.inset, gpui_px(0.0));
+         s.lengths(&s.at.size, W_FULL);
+      });
+      // SAFETY: takes the rendered Settings `AnyElement` out of `sret`; a
+      // replacement is written back below either way.
+      let mut settings = unsafe { ptr::read(sret) };
+      if !gpui::push_any(&mut over, &mut settings) {
+         // SAFETY: puts the untouched Settings element back.
+         unsafe { ptr::write(sret, settings) };
+         return;
+      }
+      gpui::write_any(gpui::push_div(over, scrim), sret);
    });
    out
 }
@@ -1394,10 +1506,8 @@ fn build_page_body(msym: &ModalSymbols, spec: &PageModalSpec) -> Option<RawDiv> 
    clippy::too_many_lines,
    reason = "assembles the single active native Mana Modal and scrim overlay"
 )]
-fn push_overlay_into(overlays: *mut RawVecAny, window: *mut c_void, app: *mut c_void) {
-   let Some(msym) = MODAL_SYM.get() else {
-      return;
-   };
+fn build_overlay(window: *mut c_void, app: *mut c_void) -> Option<RawDiv> {
+   let msym = MODAL_SYM.get()?;
 
    // Snapshot active modal & take any one-shot `pending_init` text to push into
    // the native GPUI `FieldState`.
@@ -1405,7 +1515,7 @@ fn push_overlay_into(overlays: *mut RawVecAny, window: *mut c_void, app: *mut c_
       let mut guard = ACTIVE_MODAL.lock().unwrap_or_else(PoisonError::into_inner);
       let Some(active) = guard.as_mut() else {
          MODAL_OPEN.store(false, Ordering::Release);
-         return;
+         return None;
       };
       let snapshot = match active {
          ActiveModal::Page { spec, .. } | ActiveModal::Choice { spec, .. } => {
@@ -1608,12 +1718,8 @@ fn push_overlay_into(overlays: *mut RawVecAny, window: *mut c_void, app: *mut c_
       },
    };
 
-   let Some(mut body_div) = body_opt else {
-      return;
-   };
-   let Some(close_rc) = gpui::alloc_rc_u64(0) else {
-      return;
-   };
+   let mut body_div = body_opt?;
+   let close_rc = gpui::alloc_rc_u64(0)?;
 
    // Build `mana_html::hosted::modal::Modal`.
    let at = &msym.layout;
@@ -1647,9 +1753,7 @@ fn push_overlay_into(overlays: *mut RawVecAny, window: *mut c_void, app: *mut c_
 
    // Build full-window scrim overlay (`position: absolute; inset: 0; flex;
    // center; bg rgba(0,0,0,0.68)`).
-   let Some(mut scrim) = gpui::raw_div() else {
-      return;
-   };
+   let mut scrim = gpui::raw_div()?;
    gpui::style_div(&mut scrim, |s| {
       s.set(s.at.position, POSITION_ABSOLUTE);
       s.lengths(&s.at.inset, gpui_px(0.0));
@@ -1661,28 +1765,15 @@ fn push_overlay_into(overlays: *mut RawVecAny, window: *mut c_void, app: *mut c_
    });
    // The card wraps the modal at its own size, so a press inside it can be told
    // apart from one on the scrim around it.
-   let Some(mut card) = gpui::raw_div() else {
-      return;
-   };
+   let mut card = gpui::raw_div()?;
    gpui::style_div(&mut card, |s| s.set(s.at.display, DISPLAY_FLEX));
    if !gpui::push_any(&mut card, &mut modal_any) {
-      return;
+      return None;
    }
    on_mouse_down(&mut scrim, &SCRIM_PRESS_VTBL);
    on_mouse_down(&mut card, &CARD_PRESS_VTBL);
-   scrim = gpui::push_div(scrim, card);
 
-   // Append the full-screen scrim overlay directly to Discord's
-   // `Vec<AnyElement>` overlay stack so it renders on top of chat, Settings,
-   // and any Discord modal without needing `LayerHost` to be open.
-   let mut scrim_any = MaybeUninit::<RawAnyElement>::uninit();
-   gpui::write_any(scrim, scrim_any.as_mut_ptr());
-   // SAFETY: `scrim_any` was initialized by `div_into_any` and `vec_push_any`
-   // is Discord's own `Vec::<AnyElement>::push`.
-   unsafe {
-      let mut scrim_any = scrim_any.assume_init();
-      (msym.vec_push_any)(overlays, &raw mut scrim_any);
-   }
+   Some(gpui::push_div(scrim, card))
 }
 
 #[cfg(test)]

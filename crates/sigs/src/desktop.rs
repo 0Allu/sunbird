@@ -2944,6 +2944,34 @@ pub fn text_fields(image: &Image<'_>) -> Found<TextFields> {
    })
 }
 
+/// The Settings layer's render, `fn(sret: *mut AnyElement, layer, window, cx)`.
+///
+/// The one function that loads both its `layer-trap-` focus-trap id and
+/// `settings-layer`. It draws above `Workspace::render_overlays`, so plugin
+/// modals opened over Settings go inside it.
+pub fn settings_layer(image: &Image<'_>) -> Found<usize> {
+   let trap = one("layer-trap- literal", &image.find_bytes(b"layer-trap-"))?;
+   let mut funcs: Vec<usize> = phoenix_hook::x86::literal_loads(image, trap)
+      .into_iter()
+      .map(|load| load.function)
+      .filter(|&func| {
+         image
+            .function_bounds(func)
+            .and_then(|(start, end)| image.read(start, end - start))
+            .is_some_and(|code| {
+               rip_leas(code, func)
+                  .any(|(_, target)| image.read(target, 14) == Some(b"settings-layer".as_slice()))
+            })
+      })
+      .collect();
+   funcs.dedup();
+   let func = one("settings layer render", &funcs)?;
+   if !prologues(image).frame.at(image, func) {
+      return Err("settings layer render prologue changed".to_owned());
+   }
+   Ok(func)
+}
+
 /// Locates `libdiscord_media::fetch` via its `tracing::Metadata` callsite.
 ///
 /// The callsite static names `"media_fetch"` / `"libdiscord_media::fetch"`,

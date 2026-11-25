@@ -157,6 +157,7 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
                None => Err("no http transport".to_owned()),
             },
          );
+         report("settings layer", desktop::settings_layer(image).map(at));
          report("access gate", desktop::access_gate(image).map(at));
          if abi == x86::Abi::SysV {
             report(
