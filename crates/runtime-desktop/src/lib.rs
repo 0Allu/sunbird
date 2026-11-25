@@ -7,6 +7,7 @@ mod accessories;
 mod badges;
 mod context_menu;
 mod discord;
+mod emoji;
 mod fetch;
 mod gpui;
 mod js;
@@ -111,6 +112,7 @@ pub fn prepare() -> Result<(), Error> {
    context_menu::install(&image);
    message::install(&image);
    badges::install(&image);
+   emoji::install(&image);
    <os::Os as os::DesktopOs>::install(&image);
    let registry = phoenix_runtime::hook(&image);
    if registry.is_ok() {
