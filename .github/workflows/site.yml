@@ -12,12 +12,20 @@ concurrency:
   group: site
   cancel-in-progress: false
 jobs:
+  ios:
+    uses: ./.github/workflows/ios.yml
   build:
+    needs: ios
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v31
       - run: nix develop --command nu scripts/site.nu web
+      - uses: actions/download-artifact@v4
+        with:
+          name: libphoenix-ios
+          path: ios
+      - run: mv ios/libphoenix.dylib web/plugins/libphoenix-ios.dylib
       - uses: actions/setup-node@v4
         with:
           node-version: 24

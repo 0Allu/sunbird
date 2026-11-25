@@ -5,7 +5,8 @@
 // It also writes web/version.json, what the site ships, for the runtime's update check (crates/runtime/src/update.rs):
 // the loader's baked version and each plugin bundle's CRC-32.
 // The native artifacts next to them come from `nu scripts/site.nu web`, which CI also runs:
-//   libphoenix-{arm64,armv7}.so and libshadowhook_nothing-{arm64,armv7}.so.
+//   libphoenix-{arm64,armv7}.so and libshadowhook_nothing-{arm64,armv7}.so. The site job adds
+//   libphoenix-ios.dylib from the macOS ios workflow.
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
