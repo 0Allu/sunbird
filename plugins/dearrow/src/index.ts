@@ -1,4 +1,4 @@
-// @description Replaces YouTube embed titles and thumbnails with DeArrow's
+// @description Replaces YouTube titles and thumbnails in embeds using DeArrow
 // @version 0.1.0
 // @author amaanq
 

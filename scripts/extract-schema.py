@@ -3,8 +3,9 @@
 
 Generates both machine-readable JSON (`docs/phoenix-<ver>.json`) and a concise
 Markdown lookup reference (`docs/phoenix-<ver>.md`) covering:
-  - All ViewKinds (`yq.<clinit>`)
-  - All prop/event wire keys (`lh/c2`) + overlay-specific props (`qo.s` / `overlays/d1`)
+  - All ViewKinds, from the static initializer that lists them
+  - All prop/event wire keys in wire order, from the static initializer that
+    lists them, compared against `crates/ui-mobile/src/props.in`
   - All `hh.jb` host module IDs, method IDs (`Module.method`), and `@event` IDs
   - All `res://ic_mana_*` drawable icons in `base.apk`
   - Known `accessibilityId` patterns referenced in phoenix-unlock
@@ -46,71 +47,88 @@ def parse_dex_strings(dex: bytes) -> list[str]:
     return strings
 
 
-def extract_class_method_strings(
-    dex: bytes, strings: list[str], target_classes: set[str]
-) -> dict[str, dict[str, list[str]]]:
-    t_size, t_off = struct.unpack_from("<II", dex, 64)
-    m_size, m_off = struct.unpack_from("<II", dex, 88)
+# Code units per Dalvik opcode, from the dex bytecode format table.
+INSN_UNITS = [1] * 256
+for _ops, _units in (
+    ((0x02, 0x05, 0x08, 0x13, 0x15, 0x16, 0x19, 0x1A, 0x1C, 0x1F, 0x20, 0x22, 0x23, 0x29, 0xFE, 0xFF), 2),
+    ((0x03, 0x06, 0x09, 0x14, 0x17, 0x1B, 0x24, 0x25, 0x26, 0x2A, 0x2B, 0x2C, 0xFC, 0xFD), 3),
+    ((0xFA, 0xFB), 4),
+    ((0x18,), 5),
+    (range(0x2D, 0x3E), 2),
+    (range(0x44, 0x6E), 2),
+    (range(0x6E, 0x73), 3),
+    (range(0x74, 0x79), 3),
+    (range(0x90, 0xB0), 2),
+    (range(0xD0, 0xE3), 2),
+):
+    for _op in _ops:
+        INSN_UNITS[_op] = _units
+
+
+def code_strings(dex: bytes, strings: list[str], code_off: int) -> list[str]:
+    """Strings loaded by `const-string` in one method body, in code order."""
+    units = struct.unpack_from("<I", dex, code_off + 12)[0]
+    base = code_off + 16
+    out: list[str] = []
+    k = 0
+    while k < units:
+        unit = struct.unpack_from("<H", dex, base + k * 2)[0]
+        op = unit & 0xFF
+        if unit == 0x0100:
+            k += struct.unpack_from("<H", dex, base + k * 2 + 2)[0] * 2 + 4
+            continue
+        if unit == 0x0200:
+            k += struct.unpack_from("<H", dex, base + k * 2 + 2)[0] * 4 + 2
+            continue
+        if unit == 0x0300:
+            width, size = struct.unpack_from("<HI", dex, base + k * 2 + 2)
+            k += (width * size + 1) // 2 + 4
+            continue
+        if op == 0x1A:
+            out.append(strings[struct.unpack_from("<H", dex, base + k * 2 + 2)[0]])
+        elif op == 0x1B:
+            out.append(strings[struct.unpack_from("<I", dex, base + k * 2 + 2)[0]])
+        k += INSN_UNITS[op]
+    return out
+
+
+def static_initializers(dex: bytes) -> dict[str, list[str]]:
+    """Each class's `<clinit>` strings, so tables are found by their contents
+    instead of by obfuscated class names that change every build."""
+    strings = parse_dex_strings(dex)
+    t_off = struct.unpack_from("<I", dex, 68)[0]
+    m_off = struct.unpack_from("<I", dex, 92)[0]
     c_size, c_off = struct.unpack_from("<II", dex, 96)
-
-    def get_type(idx: int) -> str:
-        return strings[struct.unpack_from("<I", dex, t_off + idx * 4)[0]]
-
-    def get_method_name(idx: int) -> str:
-        _, _, nidx = struct.unpack_from("<HHI", dex, m_off + idx * 8)
-        return strings[nidx]
-
-    out: dict[str, dict[str, list[str]]] = {}
+    out: dict[str, list[str]] = {}
     for ci in range(c_size):
-        cidx, _, _, _, _, _, cdata_off, _ = struct.unpack_from(
-            "<IIIIIIII", dex, c_off + ci * 32
-        )
+        cidx, *_, cdata_off, _ = struct.unpack_from("<IIIIIIII", dex, c_off + ci * 32)
         if cdata_off == 0:
             continue
-        cname = get_type(cidx)
-        if cname not in target_classes:
-            continue
         o = cdata_off
-        sf, o = read_uleb128(dex, o)
-        if_, o = read_uleb128(dex, o)
-        dm, o = read_uleb128(dex, o)
-        vm, o = read_uleb128(dex, o)
-        for _ in range(sf + if_):
+        static_fields, o = read_uleb128(dex, o)
+        instance_fields, o = read_uleb128(dex, o)
+        direct_methods, o = read_uleb128(dex, o)
+        _, o = read_uleb128(dex, o)
+        for _ in range(static_fields + instance_fields):
             _, o = read_uleb128(dex, o)
             _, o = read_uleb128(dex, o)
-        methods: dict[str, list[str]] = {}
         midx = 0
-        for idx in range(dm + vm):
-            if idx == dm:
-                midx = 0
+        for _ in range(direct_methods):
             diff, o = read_uleb128(dex, o)
             midx += diff
             _, o = read_uleb128(dex, o)
             code_off, o = read_uleb128(dex, o)
-            if code_off == 0:
-                continue
-            insns_size = struct.unpack_from("<I", dex, code_off + 12)[0]
-            insns_off = code_off + 16
-            k = 0
-            mstrs: list[str] = []
-            while k < insns_size:
-                op = dex[insns_off + k * 2]
-                if op == 0x1A and k + 1 < insns_size:
-                    sidx = struct.unpack_from("<H", dex, insns_off + (k + 1) * 2)[0]
-                    if sidx < len(strings):
-                        mstrs.append(strings[sidx])
-                    k += 2
-                elif op == 0x1B and k + 2 < insns_size:
-                    sidx = struct.unpack_from("<I", dex, insns_off + (k + 1) * 2)[0]
-                    if sidx < len(strings):
-                        mstrs.append(strings[sidx])
-                    k += 3
-                else:
-                    k += 1
-            if mstrs:
-                methods[get_method_name(midx)] = mstrs
-        out[cname] = methods
+            name = strings[struct.unpack_from("<HHI", dex, m_off + midx * 8)[2]]
+            if code_off and name == "<clinit>":
+                cls = strings[struct.unpack_from("<I", dex, t_off + cidx * 4)[0]]
+                out[cls] = code_strings(dex, strings, code_off)
     return out
+
+
+def table_holding(inits: dict[str, list[str]], markers: set[str]) -> list[str]:
+    """The longest static initializer holding every marker string."""
+    found = [strs for strs in inits.values() if markers <= set(strs)]
+    return max(found, key=len, default=[])
 
 
 def extract_accessibility_ids(repo_root: Path) -> list[str]:
@@ -131,12 +149,8 @@ def extract_accessibility_ids(repo_root: Path) -> list[str]:
     return sorted(patterns)
 
 
-def load_props_table(repo_root: Path) -> list[str]:
-    props_in = repo_root / "crates" / "ui" / "src" / "props.in"
-    if props_in.exists():
-        text = props_in.read_text("utf-8")
-        return re.findall(r'"([^"]+)"', text)
-    return []
+def load_props_in(repo_root: Path) -> list[str]:
+    return re.findall(r'"([^"]+)"', (repo_root / "crates" / "ui" / "src" / "props.in").read_text("utf-8"))
 
 
 WIRE_TYPE_HINTS: dict[str, list[str]] = {
@@ -325,6 +339,9 @@ def main() -> None:
 
     with zipfile.ZipFile(apk_path) as zf:
         dex = zf.read("classes.dex")
+        inits: dict[str, list[str]] = {}
+        for name in sorted(n for n in zf.namelist() if re.fullmatch(r"classes\d*\.dex", n)):
+            inits.update(static_initializers(zf.read(name)))
         mana_icons = sorted(
             {
                 Path(name).stem
@@ -334,21 +351,18 @@ def main() -> None:
         )
 
     strings = parse_dex_strings(dex)
-    cls_strs = extract_class_method_strings(
-        dex,
-        strings,
-        {
-            "Lcom/discord/nativeapp/modules/yq;",
-            "Lcom/discord/nativeapp/modules/qo;",
-            "Lcom/discord/nativeapp/modules/overlays/d1;",
-        },
-    )
-
-    # Extract ViewKinds from yq.<clinit> (filter out helper strings like getBytes(...))
-    raw_kinds = cls_strs.get("Lcom/discord/nativeapp/modules/yq;", {}).get("<clinit>", [])
     view_kinds = [
-        s for s in raw_kinds if re.fullmatch(r"[a-z][A-Za-z0-9_]*", s)
+        s
+        for s in table_holding(inits, {"view", "text", "sheet", "banner"})
+        if re.fullmatch(r"[a-z][A-Za-z0-9_]*", s)
     ]
+    props_table = table_holding(inits, {"absolute", "accessibilityActions"})
+    props_in = load_props_in(repo_root)
+    shifted = next((i for i, (a, b) in enumerate(zip(props_in, props_table)) if a != b), None)
+    if shifted is not None:
+        print(f"props.in index {shifted} is {props_in[shifted]!r}, the APK has {props_table[shifted]!r}: regenerate props.in")
+    elif len(props_table) != len(props_in):
+        print(f"the APK appends {len(props_table) - len(props_in)} props after props.in's {len(props_in)}")
 
     # Parse hh.jb modules, methods, and @events
     mod_re = re.compile(r"^([A-Z][A-Za-z0-9_]+) (\d+)$")
@@ -384,7 +398,6 @@ def main() -> None:
         if mod not in modules:
             modules[mod] = {"id": -1, "methods": dict(sorted(meths.items()))}
 
-    props_table = load_props_table(repo_root)
     aids = extract_accessibility_ids(repo_root)
 
     schema = {

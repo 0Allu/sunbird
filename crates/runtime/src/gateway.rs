@@ -20,11 +20,11 @@ use std::{
 
 use phoenix_hook::image::Image;
 use phoenix_sigs::{
-   Abi,
    GATEWAY_HANDLER_FIELD,
    GatewayEvent,
    GatewayHandler,
    HandlerResult,
+   REST_WORDS,
    RawStr,
    registry::{
       EventId,
@@ -39,13 +39,11 @@ use crate::{
    js::Before,
 };
 
-type HandlerFn = <GatewayHandler as Abi>::Fn;
-
 /// The registry's original handlers, in [`GatewayRegistry::iter`] order, and
 /// which events a plugin listens to.
 struct Gateway {
    registry:  GatewayRegistry,
-   originals: Vec<HandlerFn>,
+   originals: Vec<GatewayHandler>,
    hooked:    Vec<AtomicBool>,
 }
 
@@ -73,32 +71,34 @@ thread_local! {
 /// hook can feed Phoenix another event on the same store thread.
 #[derive(Clone, Copy)]
 struct Handling {
+   rest:  [u64; REST_WORDS],
    store: *mut c_void,
    ctx:   *mut c_void,
-   rest:  [u64; 4],
 }
 
-/// Points every registry entry at [`detour`]. Phoenix looks handlers up in the
-/// registry on each dispatch, so a pointer swap catches every event without
-/// patching code, and events no plugin listens to cost one atomic load.
+/// Points every registry entry at [`detour`].
+///
+/// Phoenix looks handlers up in the registry on each dispatch, so a pointer
+/// swap catches every event without patching code, and events no plugin
+/// listens to cost one atomic load.
 pub fn swap(
    image: &Image<'static>,
    registry: GatewayRegistry,
 ) -> Result<&'static GatewayRegistry, Error> {
    let writes = registry
       .iter()
-      .map(|(_, entry)| {
-         (
-            entry.slot + GATEWAY_HANDLER_FIELD,
-            detour as *const () as usize,
-         )
+      .flat_map(|(_, entry)| {
+         entry
+            .slots
+            .iter()
+            .map(|&slot| (slot + GATEWAY_HANDLER_FIELD, detour as *const () as usize))
       })
       .collect::<Vec<(usize, usize)>>();
    let originals = registry
       .iter()
       // SAFETY: the registry walk only accepts entries whose handler starts a
       // function, and every registry handler has this ABI.
-      .map(|(_, entry)| unsafe { std::mem::transmute::<usize, HandlerFn>(entry.handler) })
+      .map(|(_, entry)| unsafe { std::mem::transmute::<usize, GatewayHandler>(entry.handler) })
       .collect();
    let hooked = registry.iter().map(|_| AtomicBool::new(false)).collect();
 
@@ -115,61 +115,20 @@ pub fn swap(
    // and the host has not started dispatching while its constructors are
    // pending.
    let previous = unsafe { image.swap_words(&writes) }?;
-   for ((_, entry), found) in gateway.registry.iter().zip(previous) {
+   let expected = gateway
+      .registry
+      .iter()
+      .flat_map(|(_, entry)| entry.slots.iter().map(move |_| entry));
+   for (entry, found) in expected.zip(previous) {
       if found != entry.handler {
-         return Err(
-            phoenix_sigs::Error::Conflict {
-               sig: entry.name.clone(),
-               anchor: "registry swap".into(),
-               expected: entry.handler,
-               found,
-            }
-            .into(),
-         );
+         return Err(Error::SwapConflict {
+            event: entry.name.clone(),
+            expected: entry.handler,
+            found,
+         });
       }
    }
    Ok(&gateway.registry)
-}
-
-/// Checks the build table's rules against the registry walk. Code patterns
-/// scan all of `.text`, about 0.4 s each on Phoenix, so this runs off the
-/// host's startup path. Table anchors read the pointers [`swap`] already
-/// replaced and stop matching, so only code anchors count here.
-pub fn verify(state: &State) {
-   let gateway = GATEWAY
-      .get()
-      .expect("start swaps the registry before verifying");
-   for rule in state.build.map_or(&[][..], |build| build.gateway) {
-      let Some(entry) = gateway
-         .registry
-         .id(&rule.sig.name)
-         .map(|id| gateway.registry.entry(id))
-      else {
-         log::warn!("{}: no such event in the registry", rule.sig.name);
-         continue;
-      };
-
-      match rule.sig.resolve(&state.image) {
-         Ok(located) if located.addr == entry.handler => {
-            log::info!(
-               "{} at {:#x}, {}/{} anchors agree with the registry",
-               entry.name,
-               located.addr,
-               located.agreeing,
-               rule.sig.anchors.len(),
-            );
-         },
-         Ok(located) => {
-            log::error!(
-               "{}: the table rule found {:#x}, the registry holds {:#x}",
-               entry.name,
-               located.addr,
-               entry.handler,
-            );
-         },
-         Err(err) => log::error!("{err}"),
-      }
-   }
 }
 
 /// Runs `data` through Phoenix's own handler for `event`, skipping the
@@ -204,6 +163,66 @@ pub fn event(name: &str) -> Option<EventId> {
    GATEWAY.get()?.registry.id(name)
 }
 
+/// The host's original handler address for gateway event `name`.
+pub fn original_handler(name: &str) -> Option<usize> {
+   let gateway = GATEWAY.get()?;
+   let id = gateway.registry.id(name)?;
+   Some(gateway.registry.entry(id).handler)
+}
+
+/// Runs `MESSAGE_DELETE`'s JS `before` hooks for a same-client optimistic
+/// delete. Returns `true` when a plugin requested dropping the deletion.
+pub fn check_optimistic_delete(channel_id: u64, message_id: u64) -> bool {
+   let Some(gateway) = GATEWAY.get() else {
+      return false;
+   };
+   let Some(id) = gateway.registry.id("MESSAGE_DELETE") else {
+      return false;
+   };
+   if !gateway.hooked[id.index()].load(Ordering::Acquire) || IN_JS.get() {
+      return false;
+   }
+   let Some(state) = STATE.get() else {
+      return false;
+   };
+   let json = format!("{{\"id\":\"{message_id}\",\"channel_id\":\"{channel_id}\"}}");
+   matches!(
+      run_js(state, |engine| engine.before(id, "MESSAGE_DELETE", &json)),
+      Some(Before::Drop)
+   )
+}
+
+/// Runs plugin hooks on `data` for an event Phoenix's session applies without
+/// the registry, like `READY`, and returns the replacement JSON.
+///
+/// Its `after` hooks run before Phoenix applies it, and it cannot be dropped.
+pub fn intercept(event: EventId, data: &str) -> Option<String> {
+   let gateway = GATEWAY.get()?;
+   if !gateway.hooked[event.index()].load(Ordering::Acquire) || IN_JS.get() {
+      return None;
+   }
+   let state = STATE.get()?;
+   let name = &gateway.registry.entry(event).name;
+   let replaced = match run_js(state, |engine| engine.before(event, name, data))? {
+      Before::Keep => None,
+      Before::Drop => {
+         log::warn!("gateway: {name} cannot be dropped, it went through");
+         None
+      },
+      Before::Replace(json) => Some(json),
+   };
+   let applied = replaced.as_deref().unwrap_or(data);
+   run_js(state, |engine| engine.after(event, name, applied, true));
+   replaced
+}
+
+/// Whether a plugin hooks `event`.
+pub fn listened(event: EventId) -> bool {
+   GATEWAY
+      .get()
+      .is_some_and(|gateway| gateway.hooked[event.index()].load(Ordering::Acquire))
+}
+
 /// Runs `data` through Phoenix's own handler for `event` ahead of the next
 /// event Phoenix handles.
 pub fn enqueue(event: EventId, data: String) {
@@ -214,7 +233,7 @@ pub fn enqueue(event: EventId, data: String) {
    QUEUED.store(true, Ordering::Release);
 }
 
-fn flush(gateway: &Gateway, store: *mut c_void, ctx: *mut c_void, rest: [u64; 4]) {
+fn flush(gateway: &Gateway, store: *mut c_void, ctx: *mut c_void, rest: [u64; REST_WORDS]) {
    let queued = std::mem::take(&mut *QUEUE.lock().unwrap_or_else(PoisonError::into_inner));
    for (event, data) in queued {
       let name = &gateway.registry.entry(event).name;
@@ -264,15 +283,14 @@ unsafe extern "C" fn detour(
    event: *const GatewayEvent,
    ctx: *mut c_void,
 ) -> HandlerResult {
-   #[cfg(target_os = "android")]
-   crate::bridge::attach();
    let gateway = GATEWAY
       .get()
       .expect("slots point here only after GATEWAY is set");
    // SAFETY: the host passes a live event for the duration of the call.
    let event = unsafe { &*event };
-   // SAFETY: every registry handler takes the store state first.
-   unsafe { crate::staff::apply(store) };
+   if let Some(platform) = crate::platform() {
+      platform.gateway(store);
+   }
    if QUEUED.swap(false, Ordering::AcqRel) {
       flush(gateway, store, ctx, event.rest);
    }
@@ -282,6 +300,10 @@ unsafe extern "C" fn detour(
       log::error!("gateway event without a registry entry, dropped");
       return HandlerResult::OK;
    };
+   crate::remote::record(&crate::remote::Trace::Gateway {
+      event: name,
+      bytes: data.map_or(0, str::len),
+   });
    let original = gateway.originals[id.index()];
    // SAFETY: forwarded to the registry's own handler unchanged or with
    // replaced data.
@@ -296,7 +318,6 @@ unsafe extern "C" fn detour(
       ctx,
       rest: event.rest,
    }));
-   #[cfg(target_os = "android")]
    let original_data = data;
    let before = run_js(state, |engine| engine.before(id, name, data)).unwrap_or(Before::Keep);
    let (result, data) = match &before {
@@ -316,7 +337,6 @@ unsafe extern "C" fn detour(
          (call(&replaced), json.as_str())
       },
    };
-   #[cfg(target_os = "android")]
    if let (Before::Replace(json), "MESSAGE_CREATE" | "MESSAGE_UPDATE") = (&before, name) {
       remember_original(original_data, json);
    }
@@ -325,16 +345,14 @@ unsafe extern "C" fn detour(
    result
 }
 
-#[cfg(target_os = "android")]
 #[derive(serde::Deserialize)]
 struct Posted<'a> {
    #[serde(borrow)]
    content: Option<std::borrow::Cow<'a, str>>,
 }
 
-/// Hands the patches a message's text from before and after the plugin
+/// Tells the platform a message's text from before and after the plugin
 /// hooks, when they changed it.
-#[cfg(target_os = "android")]
 fn remember_original(before: &str, after: &str) {
    let (Ok(before), Ok(after)) = (
       serde_json::from_str::<Posted<'_>>(before),
@@ -344,8 +362,9 @@ fn remember_original(before: &str, after: &str) {
    };
    if let (Some(original), Some(shown)) = (before.content, after.content)
       && original != shown
+      && let Some(platform) = crate::platform()
    {
-      crate::patches::remember_original(shown.into_owned(), original.into_owned());
+      platform.rewritten(original.into_owned(), shown.into_owned());
    }
 }
 

@@ -54,18 +54,20 @@ fn build_and_run() -> misstep::Result<()> {
       .join("../..")
       .canonicalize()?;
    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-   // Separate invocations, so feature unification with the loader's
-   // dependencies cannot change the stand-in's bytes and with them the build ID
-   // in the sigs table.
-   for package in ["stand-in", "phoenix-loader"] {
-      let status = Command::new(&cargo)
-         .current_dir(&root)
-         .args(["build", "--release", "-p", package])
-         .status()
-         .context("running cargo")?;
-      if !status.success() {
-         bail!("cargo build -p {package} failed with {status}");
-      }
+   let status = Command::new(&cargo)
+      .current_dir(&root)
+      .args([
+         "build",
+         "--release",
+         "-p",
+         "stand-in",
+         "-p",
+         "phoenix-loader",
+      ])
+      .status()
+      .context("running cargo")?;
+   if !status.success() {
+      bail!("cargo build failed with {status}");
    }
 
    let target = root.join("target");

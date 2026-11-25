@@ -1,4 +1,4 @@
-// @description Stops Discord from sending typing indicators when you type
+// @description Prevents Discord from sending typing indicators
 // @version 1.0.0
 // @author mantikafasi
 

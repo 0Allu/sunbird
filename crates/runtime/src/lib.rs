@@ -13,36 +13,45 @@ use std::{
    sync::{
       Mutex,
       OnceLock,
+      atomic::{
+         AtomicBool,
+         Ordering,
+      },
    },
 };
 
-use phoenix_hook::image::Image;
+use phoenix_hook::image::{
+   BuildId,
+   Image,
+};
 use phoenix_sigs::{
-   Build,
    LIBRARIES,
-   registry::GatewayRegistry,
+   registry::{
+      self,
+      GatewayRegistry,
+   },
 };
 
-#[cfg(target_os = "android")] mod bridge;
 pub mod console;
-#[cfg(target_os = "android")] mod discord;
-#[cfg(target_os = "android")] mod fetch;
-mod gateway;
-#[cfg(target_os = "android")] mod highlight;
-mod js;
-#[cfg(target_os = "android")] mod jvm;
-mod local;
-#[cfg(target_os = "android")] mod patches;
-#[cfg(target_os = "android")] mod picker;
-#[cfg(target_os = "android")] mod remote;
-#[cfg(target_os = "android")] mod settings;
-mod staff;
-#[cfg(target_os = "android")] mod store;
-#[cfg(target_os = "android")] mod update;
+pub mod discord;
+pub mod fetch;
+pub mod gateway;
+pub mod highlight;
+pub mod js;
+pub mod local;
+mod platform;
+pub mod remote;
+pub mod store;
+pub mod update;
+
+pub use platform::{
+   Notice,
+   Platform,
+};
 
 #[derive(Debug, flub::Error)]
 pub enum Error {
-   #[error("no loaded library matches a known build or one of {LIBRARIES:?}")]
+   #[error("no loaded library is one of {LIBRARIES:?}")]
    NoTarget,
    #[error("the runtime is already running")]
    AlreadyStarted,
@@ -57,7 +66,13 @@ pub enum Error {
    #[error("javascript: {0}")]
    Js(String),
    #[error(transparent)]
-   Sig(#[from] phoenix_sigs::Error),
+   Registry(#[from] registry::Error),
+   #[error("{event}: the registry slot held {found:#x}, the walk read {expected:#x}")]
+   SwapConflict {
+      event:    String,
+      expected: usize,
+      found:    usize,
+   },
    #[error(transparent)]
    Hook(#[from] phoenix_hook::Error),
    #[error("{url}: plugins install from https:// URLs ending in a name like plugin.js")]
@@ -66,19 +81,40 @@ pub enum Error {
    PluginFile { name: String },
    #[error("{url}: the download is not UTF-8 text")]
    NotUtf8 { url: String },
-   #[cfg(target_os = "android")]
    #[error(transparent)]
    Fetch(#[from] fetch::FetchError),
+   #[error("update Phoenix Unlock to {version} first, the site's plugins need it")]
+   LoaderOutdated { version: String },
 }
 
-struct State {
-   image: Image<'static>,
-   build: Option<&'static Build>,
-   home:  PathBuf,
-   js:    Mutex<js::Engine>,
+pub struct State {
+   pub image: Image<'static>,
+   pub home:  PathBuf,
+   js:        Mutex<js::Engine>,
 }
 
 static STATE: OnceLock<State> = OnceLock::new();
+static PLATFORM: OnceLock<&'static dyn Platform> = OnceLock::new();
+/// Phoenix's Staff Settings page reads `(user.flags | flag_override) & 1`, and
+/// the platforms set that bit while this is on.
+static STAFF: AtomicBool = AtomicBool::new(true);
+
+/// The running runtime, once [`start`] published it.
+#[must_use]
+pub fn state() -> Option<&'static State> {
+   STATE.get()
+}
+
+/// The platform [`start`] runs on.
+#[must_use]
+pub fn platform() -> Option<&'static dyn Platform> {
+   PLATFORM.get().copied()
+}
+
+/// Sets the platform ahead of [`start`], for hooks that run before it.
+pub fn set_platform(platform: &'static dyn Platform) {
+   let _ = PLATFORM.set(platform);
+}
 
 /// A plugin bundle, an esbuild IIFE that receives the `phoenix` API.
 pub struct Plugin {
@@ -103,6 +139,9 @@ pub struct Header {
    pub description: Option<String>,
    pub version:     Option<String>,
    pub author:      Option<String>,
+   /// `// @enabled false`, for plugins that stay off until the user turns
+   /// them on.
+   pub default_off: bool,
 }
 
 impl From<&str> for Header {
@@ -123,11 +162,12 @@ impl From<&str> for Header {
          else {
             continue;
          };
-         let value = Some(value.trim().to_owned());
+         let value = value.trim();
          match key {
-            "description" => header.description = value,
-            "version" => header.version = value,
-            "author" => header.author = value,
+            "description" => header.description = Some(value.to_owned()),
+            "version" => header.version = Some(value.to_owned()),
+            "author" => header.author = Some(value.to_owned()),
+            "enabled" => header.default_off = value == "false",
             _ => {},
          }
       }
@@ -174,7 +214,7 @@ pub enum Chosen {
    Text(String),
 }
 
-fn engine() -> Option<std::sync::MutexGuard<'static, js::Engine>> {
+pub fn engine() -> Option<std::sync::MutexGuard<'static, js::Engine>> {
    Some(
       STATE
          .get()?
@@ -186,8 +226,8 @@ fn engine() -> Option<std::sync::MutexGuard<'static, js::Engine>> {
 
 /// Runs matching `phoenix.discord.onRequest` hooks on an outgoing Discord API
 /// request.
-#[cfg(target_os = "android")]
-pub(crate) fn intercept_request(
+#[must_use]
+pub fn intercept_request(
    matched: &[u64],
    method: &str,
    path: &str,
@@ -200,8 +240,7 @@ pub(crate) fn intercept_request(
 
 /// Runs matching `phoenix.discord.onResponse` hooks (sync or async) on an
 /// incoming Discord API reply and delivers the final body through `done`.
-#[cfg(target_os = "android")]
-pub(crate) fn intercept_response(
+pub fn intercept_response(
    matched: Vec<u64>,
    method: String,
    path: String,
@@ -216,40 +255,50 @@ pub(crate) fn intercept_response(
    }
 }
 
+/// Redraws the platform's settings pages.
+pub fn refresh_settings() {
+   if let Some(platform) = platform() {
+      platform.refresh();
+   }
+}
+
+pub fn toast(message: &str) {
+   if let Some(platform) = platform() {
+      platform.toast(message);
+   }
+}
+
 /// Every plugin found at start, enabled or not.
 #[must_use]
 pub fn plugins() -> Vec<PluginInfo> {
    engine().map_or_default(|engine| engine.plugins())
 }
 
-/// Whether the signed-in user has the staff flag.
+/// Whether the staff unlock is on.
 #[must_use]
 pub fn staff_enabled() -> bool {
-   staff::enabled()
+   STAFF.load(Ordering::Acquire)
 }
 
-/// Turns staff unlock on or off and remembers the choice across restarts.
+/// Turns the staff unlock on or off and remembers the choice across restarts.
 pub fn set_staff_enabled(enabled: bool) {
-   staff::set_enabled(enabled);
+   STAFF.store(enabled, Ordering::Release);
    if let Some(engine) = engine() {
       engine.save_choices();
    }
 }
 
 /// Whether the localhost debug shell (`127.0.0.1:4242`) is enabled.
-#[cfg(target_os = "android")]
 #[must_use]
 pub fn remote_shell_enabled() -> bool {
    remote::enabled()
 }
 
-#[cfg(target_os = "android")]
-pub(crate) fn set_remote_shell_flag(enabled: bool) {
+pub fn set_remote_shell_flag(enabled: bool) {
    remote::set_flag(enabled);
 }
 
 /// Turns the localhost debug shell on or off and remembers the choice.
-#[cfg(target_os = "android")]
 pub fn set_remote_shell_enabled(enabled: bool) {
    remote::set_enabled(enabled);
    if let Some(engine) = engine() {
@@ -315,7 +364,6 @@ pub fn evaluate(code: &str) {
 
 /// Downloads a plugin bundle into `home/plugins` and loads it, replacing a
 /// plugin of the same name. Returns the plugin's name.
-#[cfg(target_os = "android")]
 pub fn install(url: &str) -> Result<String, Error> {
    let bad_url = || {
       Error::PluginUrl {
@@ -341,7 +389,6 @@ pub fn install(url: &str) -> Result<String, Error> {
 }
 
 /// The plugin name a file name like `plugin.js` gives.
-#[cfg(target_os = "android")]
 fn plugin_name(file: &str) -> Option<&str> {
    file.strip_suffix(".js").filter(|name| {
       !name.is_empty()
@@ -353,7 +400,6 @@ fn plugin_name(file: &str) -> Option<&str> {
 
 /// Installs a bundle the user picked from the device, named by its file name.
 /// Returns the plugin's name.
-#[cfg(target_os = "android")]
 pub fn install_file(file: &str, bytes: Vec<u8>) -> Result<String, Error> {
    let name = plugin_name(file).ok_or_else(|| {
       Error::PluginFile {
@@ -371,7 +417,6 @@ pub fn install_file(file: &str, bytes: Vec<u8>) -> Result<String, Error> {
 
 /// Writes `source` to `home/plugins/<name>.js` and loads it, replacing the
 /// plugin's code, bundled or not.
-#[cfg(target_os = "android")]
 pub fn save_source(name: &str, source: String) -> Result<(), Error> {
    let state = STATE.get().ok_or(Error::NotStarted)?;
    let file = state.plugins_dir().join(format!("{name}.js"));
@@ -393,7 +438,6 @@ pub fn source(name: &str) -> Option<String> {
 }
 
 /// Deletes a plugin installed into `home/plugins` and unloads it.
-#[cfg(target_os = "android")]
 pub fn uninstall(name: &str) -> Result<(), Error> {
    let state = STATE.get().ok_or(Error::NotStarted)?;
    let file = state.plugins_dir().join(format!("{name}.js"));
@@ -411,85 +455,106 @@ pub fn reload(name: &str) {
    }
 }
 
-/// What [`start`] found and loaded.
-pub struct Started {
-   pub target:  String,
-   pub build:   Option<&'static str>,
-   pub plugins: Vec<String>,
+/// Reloads every currently enabled plugin.
+pub fn reload_all() {
+   let names = plugins()
+      .into_iter()
+      .filter(|plugin| plugin.enabled)
+      .map(|plugin| plugin.name)
+      .collect::<Vec<_>>();
+   for name in names {
+      reload(&name);
+   }
 }
 
-/// Starts phoenix against the first loaded library that matches a known build
-/// ID.
-///
-/// Falls back to the first library named in [`LIBRARIES`]. `bundled` plugins
-/// load first, and a file in `home/plugins` with the same name replaces one.
-pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
+/// The first loaded library named in [`LIBRARIES`].
+pub fn target() -> Result<Image<'static>, Error> {
    // SAFETY: the target is the host app's own library, which stays mapped for
    // the life of the process, and scans run before the host's threads touch its
    // data.
    let images = unsafe { Image::loaded() };
-   let known = |image: &Image<'_>| image.build_id.and_then(Build::find);
-   let image = match images.iter().position(|image| known(image).is_some()) {
-      Some(index) => images.into_iter().nth(index),
-      None => {
-         images
-            .into_iter()
-            .find(|image| LIBRARIES.contains(&image.file_name()))
-      },
-   }
-   .ok_or(Error::NoTarget)?;
-   let build = image.build_id.and_then(Build::find);
-   let walked = GatewayRegistry::locate(&image)?;
-   log::info!("gateway registry: {} events", walked.iter().count());
+   images
+      .into_iter()
+      .find(|image| LIBRARIES.contains(&image.file_name()))
+      .ok_or(Error::NoTarget)
+}
 
-   let registry = gateway::swap(&image, walked)?;
+/// Points the gateway registry's handlers at phoenix.
+pub fn hook(image: &Image<'static>) -> Result<&'static GatewayRegistry, Error> {
+   let walked = GatewayRegistry::locate(image)?;
+   log::info!("gateway registry: {} events", walked.iter().count());
+   gateway::swap(image, walked)
+}
+
+/// What [`start`] found and loaded.
+pub struct Started {
+   pub target:  String,
+   pub build:   Option<BuildId>,
+   pub plugins: Vec<String>,
+}
+
+/// Starts phoenix on `platform` against the first loaded library named in
+/// [`LIBRARIES`]. `bundled` plugins load first, and a file in `home/plugins`
+/// with the same name replaces one.
+pub fn start(
+   platform: &'static dyn Platform,
+   home: PathBuf,
+   bundled: Vec<Plugin>,
+) -> Result<Started, Error> {
+   let image = target()?;
+   let registry = hook(&image)?;
+   start_hooked(platform, image, registry, home, bundled)
+}
+
+/// [`start`] for a target whose registry [`hook`] already swapped.
+pub fn start_hooked(
+   platform: &'static dyn Platform,
+   image: Image<'static>,
+   registry: &'static GatewayRegistry,
+   home: PathBuf,
+   bundled: Vec<Plugin>,
+) -> Result<Started, Error> {
+   set_platform(platform);
    let engine = js::Engine::new(registry)?;
    let state = State {
       image,
-      build,
       home,
       js: Mutex::new(engine),
    };
    STATE.set(state).map_err(|_| Error::AlreadyStarted)?;
    let state = STATE.get().expect("STATE was set above");
-   std::thread::spawn(|| gateway::verify(state));
 
+   let first_run = !state.choices_path().exists();
+   platform.before_plugins(&state.home);
    let plugins = js::load_plugins(state, bundled)?;
-   #[cfg(target_os = "android")]
-   {
-      if remote_shell_enabled() {
-         remote::ensure_started();
-      }
-      settings::start();
-      patches::start();
-   }
+   remote::ensure_started();
+   platform.started(first_run, &plugins);
    Ok(Started {
       target: state.image.path.clone(),
-      build: state.build.map(|build| build.label),
+      build: state.image.build_id,
       plugins,
    })
 }
 
 impl State {
-   fn storage_path(&self, plugin: &str) -> PathBuf {
+   pub fn storage_path(&self, plugin: &str) -> PathBuf {
       self.home.join("storage").join(format!("{plugin}.json"))
    }
 
-   fn choices_path(&self) -> PathBuf {
+   pub fn choices_path(&self) -> PathBuf {
       self.home.join("plugins.json")
    }
 
-   /// The app's `files` directory, which holds phoenix's home and Phoenix's
-   /// store.
-   #[cfg(target_os = "android")]
-   fn files_dir(&self) -> PathBuf {
+   /// The app's data directory holding both phoenix's home and Phoenix's
+   /// `store/<account>/cache.sqlite`.
+   pub fn files_dir(&self) -> PathBuf {
       self
          .home
          .parent()
          .map_or_else(|| self.home.clone(), Path::to_path_buf)
    }
 
-   fn plugins_dir(&self) -> PathBuf {
+   pub fn plugins_dir(&self) -> PathBuf {
       self.home.join("plugins")
    }
 }

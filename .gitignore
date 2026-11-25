@@ -2,6 +2,7 @@
 
 !.cade
 !.editorconfig
+!.gitattributes
 !.gitignore
 !.rustfmt.toml
 !.tombi.toml
@@ -23,12 +24,10 @@
 !crates/*/src/
 !crates/*/src/**/
 !crates/*/src/**/*.rs
-!crates/runtime/java/
-!crates/runtime/java/phx/
-!crates/runtime/java/phx/*.java
 !crates/runtime/phoenix.d.ts
-!crates/ui/src/props.in
-!crates/ui/src/templates.json
+!crates/ui-desktop/src/dashboard.html
+!crates/ui-mobile/src/props.in
+!crates/ui-mobile/src/templates.json
 !crates/patcher/keys/
 !crates/patcher/keys/README.md
 !crates/patcher/keys/lineage
@@ -62,15 +61,8 @@
 !scripts/*.py
 
 !web/
-!web/*.html
-!web/*.js
-!web/signing-key.json
-!web/lib/
-!web/lib/*.js
 !web/tools/
-!web/tools/*.mjs
-!web/worker/
-!web/worker/*.js
+!web/tools/*.ts
 !web/plugins/
 !web/plugins/frida-*.js
 !web/plugins/frida-gadget-*.so.gz

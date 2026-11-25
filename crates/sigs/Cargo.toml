@@ -1,6 +1,6 @@
 [package]
 name              = "phoenix-sigs"
-description       = "Typed hook-point rules and the per-build signature table"
+description       = "Phoenix's gateway registry walk and handler ABI"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -11,6 +11,7 @@ file = [ "dep:object" ]
 
 [dependencies]
 flub         = { workspace = true }
+memchr       = { workspace = true }
 object       = { optional = true, workspace = true }
 phoenix-hook = { workspace = true }
 

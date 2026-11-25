@@ -1,10 +1,7 @@
 //! Function hooks and signature scanning for phoenix.
 //!
-//! - [`Hook`] is the inline-hook interface. [`Inline`] picks the backend for
-//!   the target, `ShadowHook` on Android ARM and Dobby everywhere else (iOS,
-//!   x86_64 Android and Linux).
-//! - [`PltHook`](plt::PltHook) rewrites GOT entries through `ByteHook` on
-//!   Android.
+//! - [`Hook`] is the inline-hook interface, and [`Inline`] is `ShadowHook` on
+//!   Android ARM, the one target that hooks code.
 //! - [`Image`](image::Image) views a loaded ELF module, scans it for
 //!   [`Pattern`](pattern::Pattern)s, and swaps pointers in its read-only data.
 
@@ -13,34 +10,18 @@ use std::{
    ptr::NonNull,
 };
 
-#[cfg(not(any(
-   windows,
-   all(
-      target_os = "android",
-      any(target_arch = "aarch64", target_arch = "arm")
-   )
-)))]
-pub mod dobby;
-// On Windows only the parts the host-side patcher reads build; the rest needs
-// dl_iterate_phdr.
-#[cfg_attr(windows, allow(dead_code, unused_imports))]
+// On wasm32 only the parts the host-side patcher reads build; live process
+// scanning uses dl_iterate_phdr on Unix and PE module enumeration on Windows.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code, unused_imports))]
 pub mod image;
 pub mod pattern;
-#[cfg(target_os = "android")] pub mod plt;
+#[cfg(target_arch = "x86_64")] pub mod x86;
 #[cfg(all(
    target_os = "android",
    any(target_arch = "aarch64", target_arch = "arm")
 ))]
 pub mod shadowhook;
 
-#[cfg(not(any(
-   windows,
-   all(
-      target_os = "android",
-      any(target_arch = "aarch64", target_arch = "arm")
-   )
-)))]
-pub type Inline = dobby::Dobby;
 #[cfg(all(
    target_os = "android",
    any(target_arch = "aarch64", target_arch = "arm")

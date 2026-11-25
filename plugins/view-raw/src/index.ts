@@ -1,4 +1,4 @@
-// @description Opens a full-screen syntax-highlighted viewer page for a message's raw text and JSON
+// @description Opens a message's raw text and JSON in a viewer
 // @version 1.2.0
 // @author cmdr-chara
 

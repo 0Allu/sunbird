@@ -1,5 +1,5 @@
-// @description Read, write, vote on and report ReviewDB reviews in a tab on user profiles
-// @version 0.2.0
+// @description Adds a ReviewDB tab to user profiles
+// @version 0.2.1
 // @author mantikafasi
 
 const API = "https://manti.vendicated.dev/api/reviewdb";
@@ -119,11 +119,9 @@ async function call<T extends Reply>(path: string, method = "GET", body?: object
 }
 
 async function me(): Promise<string> {
-  const known = phoenix.storage.get<string>("me");
-  if (known) return known;
-  const id = (await phoenix.discord.get("/users/@me")).json<{ id: string }>().id;
-  phoenix.storage.set("me", id);
-  return id;
+  const user = await phoenix.discord.me();
+  if (!user) throw new Error("Discord has not finished signing in");
+  return user.id;
 }
 
 async function login() {

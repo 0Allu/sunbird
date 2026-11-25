@@ -1,19 +1,13 @@
 //! Tells the user when the site ships a newer Phoenix Unlock: a newer loader,
 //! or plugin bundles that differ from the installed ones. The site publishes
-//! both in `version.json` (`web/tools/bundle-plugins.mjs`).
+//! both in `version.json` (`web/tools/bundle-plugins.ts`).
 //!
-//! Applying an update works in-app:
-//! - Plugin-only updates download each changed `plugins/<name>.js`, verify its
-//!   CRC-32 against `version.json`, write it to `files/phoenix/plugins/`, and
-//!   hot-reload it live with zero APK reinstall.
-//! - Loader updates download `plugins/libphoenix-arm64.so`, stream-repack the
-//!   currently installed APK swapping only `lib/<abi>/libplm.so` (16 KiB
-//!   aligned, zero re-compression), sign with APK Signature Scheme v3, and open
-//!   Android's native `PackageInstaller` update prompt.
+//! Plugin updates download each changed `plugins/<name>.js`, verify its CRC-32
+//! against `version.json` and hot-reload it. A loader update is the platform's
+//! ([`crate::Platform::update_loader`]).
 
 use std::{
    collections::BTreeMap,
-   str::FromStr,
    sync::{
       Mutex,
       PoisonError,
@@ -25,43 +19,20 @@ use std::{
    thread,
 };
 
-use memchr::memmem;
-
+use crate::Notice;
 /// This build's version, `<UTC commit date>-<short hash>` (`build.rs`).
 pub const VERSION: &str = env!("PHOENIX_VERSION");
 pub const SITE: &str = "https://sunbird.tools/";
+pub const ASSETS: &str = "https://assets.sunbird.tools/";
 
-/// Where `bundle-plugins.mjs` reads the version from the loader the site ships.
+/// Where `bundle-plugins.ts` reads the version from the loader the site ships.
 #[used]
 static MARKER: &str = concat!("phoenix-version:", env!("PHOENIX_VERSION"), ";");
-
-/// Public signing key used by the web patcher and local CLI so in-app updates
-/// preserve the signing identity (and Discord login).
-const SIGNING_KEY_JSON: &str = include_str!("../../../web/signing-key.json");
-
-const LOADER_ASSET: &str = if cfg!(target_arch = "x86_64") {
-   "plugins/libphoenix-x86_64.so"
-} else {
-   "plugins/libphoenix-arm64.so"
-};
 
 #[derive(serde::Deserialize)]
 struct Site {
    loader:  String,
    plugins: BTreeMap<String, u32>,
-}
-
-#[derive(serde::Deserialize)]
-struct SigningKeyPair {
-   pkcs8: String,
-   spki:  String,
-   cert:  String,
-}
-
-#[derive(serde::Deserialize)]
-struct SigningKey {
-   new:     SigningKeyPair,
-   lineage: String,
 }
 
 /// What the site has that this install lacks.
@@ -75,6 +46,25 @@ pub struct Update {
    pub plugin_crcs: BTreeMap<String, u32>,
 }
 
+/// A plugin the site offers, as `plugins/index.json` lists it.
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+pub struct Listed {
+   pub name:        String,
+   pub description: String,
+   #[serde(default)]
+   pub warning:     Option<String>,
+}
+
+/// The site's plugin list, fetched when the install page first opens.
+#[derive(Clone)]
+pub enum Catalog {
+   Unfetched,
+   Loading,
+   Loaded(Vec<Listed>),
+   Failed(String),
+}
+
+static CATALOG: Mutex<Catalog> = Mutex::new(Catalog::Unfetched);
 static FOUND: Mutex<Option<Update>> = Mutex::new(None);
 static STATUS: Mutex<Option<String>> = Mutex::new(None);
 static BUSY: AtomicBool = AtomicBool::new(false);
@@ -97,100 +87,143 @@ pub fn busy() -> bool {
    BUSY.load(Ordering::Relaxed)
 }
 
-fn set_status(message: Option<String>) {
+pub fn set_status(message: Option<String>) {
    *STATUS.lock().unwrap_or_else(PoisonError::into_inner) = message;
-   crate::settings::refresh();
+   crate::refresh_settings();
+}
+
+pub fn catalog() -> Catalog {
+   CATALOG
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .clone()
+}
+
+/// Fetches the site's plugin list in the background, unless it is loaded or
+/// on its way. A failed fetch is retried on the next call.
+pub fn fetch_catalog() {
+   {
+      let mut catalog = CATALOG.lock().unwrap_or_else(PoisonError::into_inner);
+      if matches!(*catalog, Catalog::Loading | Catalog::Loaded(_)) {
+         return;
+      }
+      *catalog = Catalog::Loading;
+   }
+   thread::spawn(|| {
+      let fetched = crate::fetch::get(&format!("{ASSETS}plugins/index.json"))
+         .map_err(|err| err.to_string())
+         .and_then(|body| {
+            serde_json::from_slice::<Vec<Listed>>(&body).map_err(|err| err.to_string())
+         });
+      *CATALOG.lock().unwrap_or_else(PoisonError::into_inner) = match fetched {
+         Ok(listed) => Catalog::Loaded(listed),
+         Err(err) => {
+            log::info!("plugin list: {err}");
+            Catalog::Failed(err)
+         },
+      };
+      crate::refresh_settings();
+   });
+}
+
+/// Installs a plugin the site lists. Site plugins can call API an older loader
+/// lacks, so they wait until the loader is current.
+pub fn install_listed(name: &str) -> Result<String, crate::Error> {
+   if let Some(version) = found().and_then(|update| update.loader) {
+      return Err(crate::Error::LoaderOutdated { version });
+   }
+   crate::install(&format!("{ASSETS}plugins/{name}.js"))
+}
+
+/// Asks the site what this install lacks, and remembers it for [`found`].
+/// `None` means up to date.
+fn query() -> Result<Option<Update>, String> {
+   let body = crate::fetch::get(&format!("{ASSETS}version.json")).map_err(|err| err.to_string())?;
+   let site =
+      serde_json::from_slice::<Site>(&body).map_err(|err| format!("version.json: {err}"))?;
+   let updates_loader = crate::platform().is_some_and(<dyn crate::Platform>::updates_loader);
+   let loader = (updates_loader && site.loader.as_str() > VERSION).then_some(site.loader);
+   // Plugins come along with a loader update, so one tap brings both.
+   let mut plugins = Vec::new();
+   let mut plugin_crcs = BTreeMap::new();
+   for plugin in crate::plugins() {
+      if let Some(&crc) = site.plugins.get(&plugin.name)
+         && crate::source(&plugin.name)
+            .is_some_and(|source| crc32fast::hash(source.as_bytes()) != crc)
+      {
+         plugin_crcs.insert(plugin.name.clone(), crc);
+         plugins.push(plugin.name);
+      }
+   }
+   let update = (loader.is_some() || !plugins.is_empty()).then_some(Update {
+      loader,
+      plugins,
+      plugin_crcs,
+   });
+   FOUND
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .clone_from(&update);
+   crate::refresh_settings();
+   Ok(update)
 }
 
 /// Asks the site in the background. Failures (offline) are only logged.
 pub fn check() {
    thread::spawn(|| {
-      let site = match crate::fetch::get(&format!("{SITE}version.json")) {
-         Ok(body) => serde_json::from_slice::<Site>(&body),
+      let update = match query() {
+         Ok(Some(update)) => update,
+         Ok(None) => {
+            log::info!("up to date ({VERSION})");
+            return;
+         },
          Err(err) => {
             log::info!("update check: {err}");
             return;
          },
       };
-      let site = match site {
-         Ok(site) => site,
-         Err(err) => {
-            log::info!("update check: version.json: {err}");
-            return;
-         },
-      };
-      let mut plugins = Vec::new();
-      let mut plugin_crcs = BTreeMap::new();
-      for plugin in crate::plugins() {
-         if let Some(&crc) = site.plugins.get(&plugin.name)
-            && crate::source(&plugin.name)
-               .is_some_and(|source| crc32fast::hash(source.as_bytes()) != crc)
-         {
-            plugin_crcs.insert(plugin.name.clone(), crc);
-            plugins.push(plugin.name);
-         }
-      }
-      let update = Update {
-         loader: (site.loader.as_str() > VERSION).then_some(site.loader),
-         plugins,
-         plugin_crcs,
-      };
-      if update.loader.is_none() && update.plugins.is_empty() {
-         log::info!("up to date ({VERSION})");
-         *FOUND.lock().unwrap_or_else(PoisonError::into_inner) = None;
-         crate::settings::refresh();
-         return;
-      }
       log::info!(
          "update available: loader {:?}, plugins {:?}",
          update.loader,
          update.plugins
       );
-      let body = match (&update.loader, update.plugins.is_empty()) {
-         (Some(version), true) => format!("Build {version} — tap to update in-app"),
-         (Some(version), false) => {
-            format!(
-               "Build {version} & {} plugin update{} — tap to update",
-               update.plugins.len(),
-               if update.plugins.len() == 1 { "" } else { "s" }
-            )
-         },
-         (None, false) => {
-            format!(
-               "Updated plugins: {} — tap to update now",
-               update.plugins.join(", ")
-            )
-         },
-         (None, true) => String::new(),
-      };
-      *FOUND.lock().unwrap_or_else(PoisonError::into_inner) = Some(update);
-      crate::settings::refresh();
-      crate::patches::banners::show_banner(
-         "Phoenix Unlock update available".to_owned(),
-         Some(body),
-         Some("res://ic_mana_puzzle_piece_retry".to_owned()),
-         Some(0xFF23_A55A),
-         8000,
-         crate::patches::banners::BannerAction::ApplyUpdate,
-      );
+      if let Some(platform) = crate::platform() {
+         platform.notify(Notice::UpdateAvailable(&update));
+      }
    });
 }
 
-/// Applies the pending update found by [`check`].
+/// Checks the site again and applies what this install lacks.
 ///
 /// Updates changed plugins over-the-air first (hot-reloading them live), then
 /// runs the in-app APK self-updater if a newer loader is available.
 pub fn apply() {
-   let Some(update) = found() else {
-      log::info!("update apply: no pending update");
-      return;
-   };
    if BUSY.swap(true, Ordering::AcqRel) {
       log::info!("update apply: already running");
-      let _ = crate::picker::toast("Update already in progress...");
+      crate::toast("Update already in progress...");
       return;
    }
-   thread::spawn(move || {
+   thread::spawn(|| {
+      // The last check ran when Discord started, and the site may have shipped
+      // since, so what it found can be out of date by the time this runs.
+      let update = query().unwrap_or_else(|err| {
+         log::info!("update apply: {err}, using the last check");
+         found()
+      });
+      let Some(update) = update else {
+         log::info!("update apply: up to date ({VERSION})");
+         BUSY.store(false, Ordering::Release);
+         crate::toast("Phoenix Unlock is up to date");
+         return;
+      };
+      // The site's plugins are built against its loader and can call API this
+      // one lacks, so with a loader update they wait in `plugins.next/` for it.
+      if let Some(version) = &update.loader
+         && let Some(platform) = crate::platform()
+      {
+         platform.update_loader(version, &update);
+         return;
+      }
       let mut updated_plugins = Vec::new();
       if !update.plugins.is_empty() {
          set_status(Some(format!(
@@ -231,43 +264,29 @@ pub fn apply() {
             let msg = format!("Plugin update failed: {}", failed.join("; "));
             set_status(Some(msg.clone()));
             BUSY.store(false, Ordering::Release);
-            let _ = crate::picker::toast(&msg);
+            crate::toast(&msg);
             return;
          }
-      }
-
-      if update.loader.is_some() {
-         run_loader_self_update();
-         return;
       }
 
       // Plugin-only OTA update completed cleanly.
       set_status(None);
       BUSY.store(false, Ordering::Release);
-      crate::settings::refresh();
-      crate::patches::banners::show_banner(
-         "Plugins updated".to_owned(),
-         Some(format!("Reloaded: {}", updated_plugins.join(", "))),
-         Some("res://ic_mana_checkmark_large".to_owned()),
-         Some(0xFF23_A55A),
-         4500,
-         crate::patches::banners::BannerAction::None,
-      );
+      crate::refresh_settings();
+      if let Some(platform) = crate::platform() {
+         platform.notify(Notice::PluginsUpdated(&updated_plugins));
+      }
    });
 }
 
-/// Runs the in-app loader self-update directly against the site's current
-/// `libphoenix-*.so` (also exposed to the gated localhost debug shell).
-pub fn self_update_from_site() {
-   if BUSY.swap(true, Ordering::AcqRel) {
-      log::info!("self-update: already running");
-      return;
-   }
-   thread::spawn(run_loader_self_update);
+fn update_plugin(name: &str, expected_crc: Option<u32>) -> Result<(), String> {
+   let source = download_plugin(name, expected_crc)?;
+   crate::save_source(name, source).map_err(|err| err.to_string())
 }
 
-fn update_plugin(name: &str, expected_crc: Option<u32>) -> Result<(), String> {
-   let url = format!("{SITE}plugins/{name}.js");
+/// The site's `plugins/<name>.js`, checked against its CRC-32.
+pub fn download_plugin(name: &str, expected_crc: Option<u32>) -> Result<String, String> {
+   let url = format!("{ASSETS}plugins/{name}.js");
    let bytes = crate::fetch::get(&url).map_err(|err| format!("fetch: {err}"))?;
    if let Some(expected) = expected_crc {
       let actual = crc32fast::hash(&bytes);
@@ -277,113 +296,16 @@ fn update_plugin(name: &str, expected_crc: Option<u32>) -> Result<(), String> {
          ));
       }
    }
-   let source = String::from_utf8(bytes).map_err(|err| format!("invalid UTF-8: {err}"))?;
-   crate::save_source(name, source).map_err(|err| err.to_string())
+   String::from_utf8(bytes).map_err(|err| format!("invalid UTF-8: {err}"))
 }
 
-fn run_loader_self_update() {
-   set_status(Some("Downloading loader...".to_owned()));
-   let _ = crate::picker::toast("Downloading Phoenix Unlock update...");
-
-   let url = format!("{SITE}{LOADER_ASSET}");
-   let bytes = match crate::fetch::get(&url) {
-      Ok(bytes) => bytes,
-      Err(err) => {
-         fail_self_update(&format!("Download failed: {err}"));
-         return;
-      },
-   };
-   if !bytes.starts_with(b"\x7fELF") || memmem::find(&bytes, b"phoenix-version:").is_none() {
-      fail_self_update("Downloaded loader is invalid");
-      return;
-   }
-
-   let keys: SigningKey = match serde_json::from_str(SIGNING_KEY_JSON) {
-      Ok(keys) => keys,
-      Err(err) => {
-         fail_self_update(&format!("Signing key config invalid: {err}"));
-         return;
-      },
-   };
-
-   set_status(Some("Repacking & signing APK...".to_owned()));
-   if let Err(err) = crate::picker::self_update(
-      &bytes,
-      &keys.new.pkcs8,
-      &keys.new.spki,
-      &keys.new.cert,
-      &keys.lineage,
-      SITE,
-   ) {
-      fail_self_update(&format!("Self-update failed: {err}"));
-   }
+/// Claims the update slot. False when an update already runs.
+pub fn begin() -> bool {
+   !BUSY.swap(true, Ordering::AcqRel)
 }
 
-fn fail_self_update(message: &str) {
-   log::error!("self-update: {message}");
-   set_status(Some(message.to_owned()));
+/// Releases the update slot with `status` shown.
+pub fn finish(status: Option<String>) {
    BUSY.store(false, Ordering::Release);
-   let _ = crate::picker::toast(message);
-}
-
-/// A state `phx.Updater` reports through `onUpdateStatus`.
-#[derive(Clone, Copy, Debug)]
-pub enum UpdaterState {
-   Repacking,
-   Installing,
-   Done,
-   Permission,
-   Fallback,
-   Cancelled,
-   Error,
-}
-
-#[derive(Debug, flub::Error)]
-#[error("phx.Updater reported an unknown state {0:?}")]
-pub struct UnknownUpdaterState(String);
-
-impl FromStr for UpdaterState {
-   type Err = UnknownUpdaterState;
-
-   fn from_str(state: &str) -> Result<Self, Self::Err> {
-      Ok(match state {
-         "repacking" => Self::Repacking,
-         "installing" => Self::Installing,
-         "done" => Self::Done,
-         "permission" => Self::Permission,
-         "fallback" => Self::Fallback,
-         "cancelled" => Self::Cancelled,
-         "error" => Self::Error,
-         _ => return Err(UnknownUpdaterState(state.to_owned())),
-      })
-   }
-}
-
-/// Callback invoked from `phx.Updater.onUpdateStatus(state, message)`.
-pub fn on_native_status(state: UpdaterState, message: &str) {
-   log::info!("self-update [{state:?}]: {message}");
-   match state {
-      UpdaterState::Done => {
-         *FOUND.lock().unwrap_or_else(PoisonError::into_inner) = None;
-         set_status(None);
-         BUSY.store(false, Ordering::Release);
-         crate::patches::banners::show_banner(
-            "Phoenix Unlock updated".to_owned(),
-            Some(message.to_owned()),
-            Some("res://ic_mana_checkmark_large".to_owned()),
-            Some(0xFF23_A55A),
-            4000,
-            crate::patches::banners::BannerAction::None,
-         );
-      },
-      UpdaterState::Permission
-      | UpdaterState::Fallback
-      | UpdaterState::Cancelled
-      | UpdaterState::Error => {
-         set_status(Some(message.to_owned()));
-         BUSY.store(false, Ordering::Release);
-         let _ = crate::picker::toast(message);
-      },
-      UpdaterState::Repacking | UpdaterState::Installing => set_status(Some(message.to_owned())),
-   }
+   set_status(status);
 }

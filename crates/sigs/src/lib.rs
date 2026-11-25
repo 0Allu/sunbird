@@ -1,38 +1,45 @@
-//! Hook points as YARA-style rules, plus a table of known builds keyed by build
-//! ID.
+//! Where Phoenix's gateway handlers live and how they are called.
 //!
-//! A [`Sig`] lists [`Anchor`]s. Every anchor is evaluated, each one that
-//! resolves must land on exactly one address, and all of them must agree. A
-//! build-specific byte pattern and a portable table lookup can sit in one rule,
-//! so a stale pattern is caught instead of hooked.
-//!
-//! The event set is never compiled in. [`GatewayRegistry`](registry::GatewayRegistry) walks the target's
-//! registry at load time, so a new Discord build brings its own events. Porting
-//! the build table is `cargo run -p sigscan -- liblibdiscord_wasm_host.so`,
-//! which dumps the registry and checks every rule. Unknown builds still load
-//! through [`Sig::gateway`].
+//! The event set is never compiled in. [`GatewayRegistry`](registry::GatewayRegistry)
+//! walks the target's registry at load time by event name, so a new Discord
+//! build brings its own events and needs no table entry.
+//! `cargo run -p sigscan -- liblibdiscord_wasm_host.so` dumps what it finds.
 
-use std::{
-   borrow::Cow,
-   ffi::c_void,
-   fmt,
-   marker::PhantomData,
-};
+use std::ffi::c_void;
 
-use phoenix_hook::{
-   image::{
-      BuildId,
-      Image,
-   },
-   pattern::Pattern,
-};
-
-pub mod builds;
+pub mod desktop;
 #[cfg(feature = "file")] pub mod file;
+pub mod http;
+pub mod ios;
+pub mod mobile;
 pub mod registry;
 
+/// What a locator found, or why this build does not match it.
+pub type Found<T> = Result<T, String>;
+
+/// The only match, or how many there were.
+fn one<T: Copy>(what: &str, found: &[T]) -> Found<T> {
+   match found {
+      [only] => Ok(*only),
+      _ => Err(format!("{what} matched {} times", found.len())),
+   }
+}
+
+/// `flag_override: Option<_>` in the store state, as the byte offsets of its
+/// tag and value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct StaffField {
+   pub tag:   usize,
+   pub value: usize,
+}
+
 /// Libraries that carry the gateway registry, Phoenix's and the stand-in's.
+#[cfg(not(any(target_os = "windows", target_os = "ios")))]
 pub const LIBRARIES: &[&str] = &["liblibdiscord_wasm_host.so", "libstand_in.so"];
+#[cfg(target_os = "ios")]
+pub const LIBRARIES: &[&str] = &["PhoenixFatClient"];
+#[cfg(target_os = "windows")]
+pub const LIBRARIES: &[&str] = &["Discord.exe", "stand_in.dll"];
 
 /// Name of the plugin bundle the patcher stores next to the loader in the APK's
 /// native library directory, a JSON object of plugin name to source.
@@ -42,38 +49,19 @@ pub const PLUGIN_BUNDLE: &str = "libplm.plugins.so";
 /// len, handler}`.
 pub const GATEWAY_HANDLER_FIELD: usize = 2 * size_of::<usize>();
 
-/// One way to find a hook point.
-#[derive(Clone, Debug)]
-pub enum Anchor<'a> {
-   /// Code matching `pattern`, shifted by `offset`.
-   Code { pattern: Pattern, offset: isize },
-   /// A `{name ptr, name len, ...}` table entry whose name is `key`. The result
-   /// is the code pointer `field` bytes into the entry.
-   Table { key: Cow<'a, str>, field: usize },
-}
-
-impl fmt::Display for Anchor<'_> {
-   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-      match self {
-         Self::Code { pattern, offset: 0 } => write!(formatter, "code {pattern}"),
-         Self::Code { pattern, offset } => write!(formatter, "code {pattern} {offset:+}"),
-         Self::Table { key, field } => write!(formatter, "table {key:?} +{field}"),
-      }
-   }
-}
-
-/// Calling convention of a hook point, which picks the detour the runtime
-/// installs.
-pub trait Abi {
-   type Fn: Copy;
-}
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RawStr {
    pub ptr: *const u8,
    pub len: usize,
 }
+
+/// Host fields after `name` and `data` that a handler reads and a synthetic
+/// event must carry. The arm32 handler reads only `name` and `data`.
+#[cfg(not(target_arch = "arm"))]
+pub const REST_WORDS: usize = 4;
+#[cfg(target_arch = "arm")]
+pub const REST_WORDS: usize = 0;
 
 /// Phoenix's gateway event, `name` and `data` are borrowed UTF-8 with `data`
 /// holding the raw dispatch JSON. `rest` is opaque and copied through
@@ -83,224 +71,66 @@ pub struct RawStr {
 pub struct GatewayEvent {
    pub name: RawStr,
    pub data: RawStr,
-   pub rest: [u64; 4],
+   pub rest: [u64; REST_WORDS],
 }
 
-/// A 32-byte Rust `Result`, returned through x8 on arm64 and a hidden pointer
-/// on x86_64.
+/// The Rust `Result` a handler returns through a hidden pointer:
+/// - 96 bytes (12 words) on Windows Desktop (`Discord.exe`), with `Ok` niche
+///   `u64::MAX - 1` (`0xffff_ffff_ffff_fffe`)
+/// - 32 bytes (4 words) on 64-bit Unix / Android, with `Ok` niche `u64::MAX`
+/// - 16 bytes (2 words) on armeabi-v7a, with `Ok` niche `u64::MAX`
+#[cfg(target_os = "windows")]
+pub const RESULT_WORDS: usize = 12;
+#[cfg(all(not(target_os = "windows"), not(target_arch = "arm")))]
+pub const RESULT_WORDS: usize = 4;
+#[cfg(target_arch = "arm")]
+pub const RESULT_WORDS: usize = 2;
+
+#[cfg(target_os = "windows")]
+const OK_TAG: u64 = u64::MAX - 1;
+#[cfg(not(target_os = "windows"))]
+const OK_TAG: u64 = u64::MAX;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct HandlerResult(pub [u64; 4]);
+pub struct HandlerResult(pub [u64; RESULT_WORDS]);
 
 impl HandlerResult {
-   pub const OK: Self = Self([u64::MAX, 0, 0, 0]);
+   pub const OK: Self = {
+      let mut words = [0; RESULT_WORDS];
+      words[0] = OK_TAG;
+      Self(words)
+   };
 
    #[must_use]
    pub const fn is_ok(&self) -> bool {
-      self.0[0] == u64::MAX
+      self.0[0] == OK_TAG
    }
 }
 
 /// A gateway registry handler, `handler(store, event, ctx)`.
-pub struct GatewayHandler;
+pub type GatewayHandler =
+   unsafe extern "C" fn(*mut c_void, *const GatewayEvent, *mut c_void) -> HandlerResult;
 
-impl Abi for GatewayHandler {
-   type Fn = unsafe extern "C" fn(*mut c_void, *const GatewayEvent, *mut c_void) -> HandlerResult;
-}
+#[cfg(test)]
+mod tests {
+   use super::*;
 
-#[derive(Debug)]
-pub struct Sig<'a, A: Abi> {
-   pub name:    Cow<'a, str>,
-   pub anchors: Cow<'a, [Anchor<'a>]>,
-   abi:         PhantomData<fn() -> A>,
-}
-
-impl<A: Abi> Clone for Sig<'_, A> {
-   fn clone(&self) -> Self {
-      Self {
-         name:    self.name.clone(),
-         anchors: self.anchors.clone(),
-         abi:     PhantomData,
+   #[test]
+   fn handler_result_abi_matches_target() {
+      assert!(HandlerResult::OK.is_ok());
+      let mut err = HandlerResult::OK;
+      err.0[0] = 0;
+      assert!(!err.is_ok());
+      #[cfg(target_os = "windows")]
+      {
+         assert_eq!(size_of::<HandlerResult>(), 96);
+         assert_eq!(HandlerResult::OK.0[0], 0xffff_ffff_ffff_fffe);
       }
-   }
-}
-
-impl<'a, A: Abi> Sig<'a, A> {
-   #[must_use]
-   pub const fn new(name: &'a str, anchors: &'a [Anchor<'a>]) -> Self {
-      Self {
-         name:    Cow::Borrowed(name),
-         anchors: Cow::Borrowed(anchors),
-         abi:     PhantomData,
+      #[cfg(all(not(target_os = "windows"), not(target_arch = "arm")))]
+      {
+         assert_eq!(size_of::<HandlerResult>(), 32);
+         assert_eq!(HandlerResult::OK.0[0], u64::MAX);
       }
-   }
-}
-
-impl Sig<'static, GatewayHandler> {
-   /// The portable rule for a gateway event, a registry lookup by the name
-   /// the target keys it under.
-   #[must_use]
-   pub fn gateway(event: &str) -> Self {
-      Self {
-         name:    Cow::Owned(event.to_owned()),
-         anchors: Cow::Owned(vec![Anchor::Table {
-            key:   Cow::Owned(event.to_owned()),
-            field: GATEWAY_HANDLER_FIELD,
-         }]),
-         abi:     PhantomData,
-      }
-   }
-}
-
-/// Where a rule resolved, which anchor found it first, and how many anchors
-/// agreed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Located {
-   pub addr:     usize,
-   pub anchor:   usize,
-   pub agreeing: usize,
-}
-
-#[derive(Debug, flub::Error)]
-pub enum Error {
-   #[error("{sig}: no anchor matched")]
-   NotFound { sig: String },
-   #[error("{sig}: `{anchor}` matched {} places ({})", .hits.len(), hex_list(.hits))]
-   Ambiguous {
-      sig:    String,
-      anchor: String,
-      hits:   Vec<usize>,
-   },
-   #[error("{sig}: `{anchor}` found {found:#x}, an earlier anchor found {expected:#x}")]
-   Conflict {
-      sig:      String,
-      anchor:   String,
-      expected: usize,
-      found:    usize,
-   },
-}
-
-fn hex_list(addrs: &[usize]) -> String {
-   addrs
-      .iter()
-      .take(8)
-      .map(|addr| format!("{addr:#x}"))
-      .collect::<Vec<_>>()
-      .join(", ")
-}
-
-impl<A: Abi> Sig<'_, A> {
-   pub fn resolve(&self, image: &Image<'_>) -> Result<Located, Error> {
-      let mut located = Option::<Located>::None;
-
-      for (index, anchor) in self.anchors.iter().enumerate() {
-         let mut hits = evaluate(anchor, image);
-         hits.sort_unstable();
-         hits.dedup();
-         let found = match hits[..] {
-            [] => continue,
-            [found] => found,
-            _ => {
-               return Err(Error::Ambiguous {
-                  sig: self.name.to_string(),
-                  anchor: anchor.to_string(),
-                  hits,
-               });
-            },
-         };
-         match &mut located {
-            None => {
-               located = Some(Located {
-                  addr:     found,
-                  anchor:   index,
-                  agreeing: 1,
-               });
-            },
-            Some(first) if first.addr != found => {
-               return Err(Error::Conflict {
-                  sig: self.name.to_string(),
-                  anchor: anchor.to_string(),
-                  expected: first.addr,
-                  found,
-               });
-            },
-            Some(first) => first.agreeing += 1,
-         }
-      }
-
-      located.ok_or_else(|| {
-         Error::NotFound {
-            sig: self.name.to_string(),
-         }
-      })
-   }
-}
-
-fn evaluate(anchor: &Anchor<'_>, image: &Image<'_>) -> Vec<usize> {
-   match anchor {
-      Anchor::Code { pattern, offset } => {
-         image
-            .scan(*pattern)
-            .into_iter()
-            .filter_map(|addr| addr.checked_add_signed(*offset))
-            .collect()
-      },
-      Anchor::Table { key, field } => {
-         table_entries(image, key, *field)
-            .into_iter()
-            .map(|(_, code)| code)
-            .collect()
-      },
-   }
-}
-
-/// `(slot, code)` for every `{name ptr, name len, ...}` entry named `key` whose
-/// pointer `field` bytes in starts a function.
-fn table_entries(image: &Image<'_>, key: &str, field: usize) -> Vec<(usize, usize)> {
-   // Stops at the first copy of `key` a table points at. Literals sit in
-   // `.rodata` at the front of the image, so the scan never reaches `.text`
-   // (most of the library) at startup. Every table pointing at that copy still
-   // counts, so callers still see ambiguity.
-   image
-      .find_bytes_iter(key.as_bytes())
-      .map(|string| {
-         image
-            .pointers_to(string)
-            .into_iter()
-            .filter(|slot| image.read_usize(slot + size_of::<usize>()) == Some(key.len()))
-            .filter_map(|slot| Some((slot, image.read_usize(slot + field)?)))
-            .filter(|(_, code)| image.is_function(*code))
-            .collect::<Vec<_>>()
-      })
-      .find(|entries| !entries.is_empty())
-      .unwrap_or_default()
-}
-
-/// A gateway handler rule in a [`Build`], named by the event's registry key.
-pub struct Gateway {
-   pub sig: Sig<'static, GatewayHandler>,
-}
-
-/// A build phoenix has rules for.
-pub struct Build {
-   pub id:      BuildId,
-   pub label:   &'static str,
-   pub library: &'static str,
-   pub gateway: &'static [Gateway],
-}
-
-impl Build {
-   #[must_use]
-   pub fn find(id: BuildId) -> Option<&'static Self> {
-      builds::BUILDS.iter().find(|build| build.id == id)
-   }
-
-   /// The table rule for `event`, or the portable registry lookup when the
-   /// table has none.
-   #[must_use]
-   pub fn gateway_sig(build: Option<&Self>, event: &str) -> Sig<'static, GatewayHandler> {
-      build
-         .and_then(|build| build.gateway.iter().find(|rule| rule.sig.name == event))
-         .map_or_else(|| Sig::gateway(event), |rule| rule.sig.clone())
    }
 }

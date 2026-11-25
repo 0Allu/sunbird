@@ -1,4 +1,4 @@
-// @description Marks messages that took a while to send
+// @description Flags messages with high send latency
 // @version 0.1.0
 // @author amaanq
 

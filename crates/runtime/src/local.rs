@@ -64,6 +64,7 @@ pub struct Options<'a> {
 
 /// Shows `content` in `channel_id` as an ephemeral message from `author` and
 /// returns its id. Nothing is sent to Discord.
+#[must_use]
 pub fn add(channel_id: &str, content: &str, options: &Options<'_>) -> Option<String> {
    let event = gateway::event("MESSAGE_CREATE")?;
    let now = SystemTime::now()
@@ -106,6 +107,7 @@ pub fn add(channel_id: &str, content: &str, options: &Options<'_>) -> Option<Str
 }
 
 /// Feeds `message`, a JSON message object, to Phoenix as an edit.
+#[must_use]
 pub fn update(message: String) -> bool {
    let Some(event) = gateway::event("MESSAGE_UPDATE") else {
       return false;
@@ -114,6 +116,7 @@ pub fn update(message: String) -> bool {
    true
 }
 
+#[must_use]
 pub fn delete(channel_id: &str, id: &str) -> bool {
    let Some(event) = gateway::event("MESSAGE_DELETE") else {
       return false;

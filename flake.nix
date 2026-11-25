@@ -7,22 +7,12 @@
       url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    shadowhook = {
-      url = "github:bytedance/android-inline-hook";
-      flake = false;
-    };
-    bytehook = {
-      url = "github:bytedance/bhook";
-      flake = false;
-    };
   };
 
   outputs =
     {
       nixpkgs,
       fenix,
-      shadowhook,
-      bytehook,
       ...
     }:
     let
@@ -53,7 +43,9 @@
               latest.rustc
               latest.rustfmt
               targets.aarch64-linux-android.latest.rust-std
+              targets.armv7-linux-androideabi.latest.rust-std
               targets.x86_64-linux-android.latest.rust-std
+              targets.wasm32-unknown-unknown.latest.rust-std
             ];
         in
         {
@@ -67,14 +59,13 @@
               pkgs.nushell
               pkgs.rust-analyzer
               pkgs.typescript
+              pkgs.wasm-bindgen-cli
             ];
 
             ANDROID_SDK_ROOT = android.sdkRoot;
             ANDROID_NDK_ROOT = android.ndkRoot;
             ANDROID_NDK_HOME = android.ndkRoot;
             LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-            SHADOWHOOK_SRC = "${shadowhook}/shadowhook/src/main/cpp";
-            BYTEHOOK_SRC = "${bytehook}/bytehook/src/main/cpp";
           };
         }
       );

@@ -1,16 +1,11 @@
-//! Discord's HTTP API through Phoenix's own `Networking` host module, so a
-//! plugin's request leaves on the app's `OkHttp` client with the app's session
-//! headers.
+//! Discord's HTTP API hooks and client requests.
 //!
-//! - Phoenix's Rust side sets every header, `authorization` included, and Java
-//!   only sends them. [`observe_call`] keeps the latest set and the API base
-//!   from Phoenix's own requests, in memory only.
-//! - [`send`] issues `Networking.request` with ids from [`FIRST_ID`], and
-//!   [`filter`] takes the `@http` replies for those ids out of the dispatch
-//!   stream before Phoenix sees them.
-//!
-//! Module, method and field numbers index the host's name table `hh.jb`,
-//! versionCode 356207.
+//! Everything but the transport lives here for every platform: the session
+//! Discord's own requests carry, `onRequest` filters and hooks, the requests
+//! whose responses `onResponse` hooks wait for, and a plugin request's URL and
+//! headers. A platform reads Discord's requests and responses, hands them to
+//! [`observe_request`], [`watch_response`], [`track_response`] and
+//! [`take_response`], and sends plugin requests through [`crate::Platform`].
 
 use std::{
    collections::HashMap,
@@ -19,15 +14,10 @@ use std::{
       Mutex,
       PoisonError,
       atomic::{
-         AtomicI32,
-         AtomicU64,
          AtomicUsize,
          Ordering,
       },
-      mpsc::{
-         self,
-         Sender,
-      },
+      mpsc,
    },
    time::{
       Duration,
@@ -35,83 +25,10 @@ use std::{
    },
 };
 
-use phoenix_wire::{
-   DispatchEvent,
-   HostCall,
-   Key,
-   Value,
-   decode_dispatch,
-   edit_frames,
-};
-use serde::Deserialize;
+use crate::fetch::Response;
 
-use crate::{
-   bridge::{
-      self,
-      Action,
-   },
-   console::url_encoded,
-   fetch::Response,
-};
-
-const NETWORKING: u16 = 43;
-const REQUEST: u16 = 168;
-const HTTP_EVENT: u16 = 321;
-
-const ERROR: Key = Key::new(403);
-const ID: Key = Key::new(417);
-const METHOD: Key = Key::new(421);
-const URL: Key = Key::new(422);
-const HEADERS: Key = Key::new(423);
-const STATUS: Key = Key::new(430);
-
-/// Far above the counter Phoenix numbers its own requests with.
-const FIRST_ID: i32 = 0x5000_0000;
-const TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Headers Phoenix sets per request, which a plugin's request must not
-/// inherit.
-const PER_REQUEST: [&str; 4] = [
-   "content-type",
-   "content-length",
-   "x-context-properties",
-   "x-audit-log-reason",
-];
-
-/// A plugin waiting for the user to authorize `client_id` in Phoenix's
-/// authorize screen, and Phoenix's request id once it sends the authorization.
-struct Authorizing {
-   client_id: String,
-   call:      Option<i32>,
-   waiter:    Sender<String>,
-   /// Tells this wait from a newer one.
-   turn:      u64,
-}
-
-static AUTHORIZING: Mutex<Option<Authorizing>> = Mutex::new(None);
-static TURN: AtomicU64 = AtomicU64::new(0);
-/// The user whose profile Phoenix fetched last, and when.
-static LAST_PROFILE: Mutex<Option<(String, Instant)>> = Mutex::new(None);
-
-/// The user `url` fetches the profile of, `…/users/<id>/profile`.
-fn profile_of(url: &str) -> Option<String> {
-   let after = &url[url.find("/users/")? + "/users/".len()..];
-   let (id, rest) = after.split_once('/')?;
-   (rest.starts_with("profile") && !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
-      .then(|| id.to_owned())
-}
-
-/// The user whose profile Phoenix fetched in the last few seconds, for a
-/// profile screen that shows no user id of its own.
-pub fn last_profile() -> Option<String> {
-   let (id, at) = LAST_PROFILE
-      .lock()
-      .unwrap_or_else(PoisonError::into_inner)
-      .clone()?;
-   (at.elapsed() < Duration::from_secs(5)).then_some(id)
-}
-
-const AUTHORIZE_TIMEOUT: Duration = Duration::from_secs(600);
+pub const TIMEOUT: Duration = Duration::from_secs(30);
+pub const AUTHORIZE_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Debug, flub::Error)]
 pub enum DiscordError {
@@ -121,6 +38,10 @@ pub enum DiscordError {
    Path { path: String },
    #[error("Phoenix's bridge is not up yet")]
    NoBridge,
+   #[error("this platform cannot reach Phoenix's session yet")]
+   Unsupported,
+   #[error("Phoenix's host names are not read yet")]
+   NoHostNames,
    #[error("{path}: no answer in {} seconds", TIMEOUT.as_secs())]
    Timeout { path: String },
    #[error("{path}: {message}")]
@@ -129,41 +50,12 @@ pub enum DiscordError {
    Open { message: String },
    #[error("authorize: the user did not authorize in {} minutes", AUTHORIZE_TIMEOUT.as_secs() / 60)]
    NotAuthorized,
+   #[error("phoenix has not started")]
+   NotStarted,
 }
 
-/// What Phoenix's own API requests carry.
-#[derive(Clone)]
-struct Session {
-   /// Up to and including the version, like `https://discord.com/api/v9`.
-   base:    String,
-   headers: Vec<(String, String)>,
-}
-
-/// `@http`'s fields and body.
-struct Reply {
-   status: i32,
-   error:  Option<String>,
-   body:   Vec<u8>,
-}
-
-static SESSION: Mutex<Option<Session>> = Mutex::new(None);
-static PENDING: LazyLock<Mutex<HashMap<i32, Sender<Reply>>>> = LazyLock::new(Mutex::default);
-static NEXT_ID: AtomicI32 = AtomicI32::new(FIRST_ID);
-static REQUEST_HOOKS: LazyLock<Mutex<Vec<RequestHook>>> = LazyLock::new(Mutex::default);
-static REQUEST_HOOK_COUNT: AtomicUsize = AtomicUsize::new(0);
-static RESPONSE_HOOKS: LazyLock<Mutex<Vec<RequestHook>>> = LazyLock::new(Mutex::default);
-static RESPONSE_HOOK_COUNT: AtomicUsize = AtomicUsize::new(0);
-static IN_FLIGHT: LazyLock<Mutex<HashMap<i32, InFlight>>> = LazyLock::new(Mutex::default);
-
-struct InFlight {
-   method: String,
-   path:   String,
-   hooks:  Vec<u64>,
-   at:     Instant,
-}
-
-/// Rust-side filter for `phoenix.discord.onRequest` so non-matching API calls
-/// never enter `QuickJS`.
+/// Rust-side filter for `phoenix.discord.onRequest` and `onResponse` so
+/// non-matching API calls never enter `QuickJS`.
 #[derive(Clone, Default)]
 pub struct RequestFilter {
    pub method:        Option<String>,
@@ -173,7 +65,8 @@ pub struct RequestFilter {
 }
 
 impl RequestFilter {
-   fn matches(&self, method: &str, path: &str) -> bool {
+   #[must_use]
+   pub fn matches(&self, method: &str, path: &str) -> bool {
       if let Some(expected) = &self.method
          && !method.eq_ignore_ascii_case(expected)
       {
@@ -200,16 +93,213 @@ impl RequestFilter {
 }
 
 struct RequestHook {
-   id:     u64,
-   plugin: String,
-   filter: RequestFilter,
+   pub id:     u64,
+   pub plugin: String,
+   pub filter: RequestFilter,
 }
+
+static REQUEST_HOOKS: LazyLock<Mutex<Vec<RequestHook>>> = LazyLock::new(Mutex::default);
+static REQUEST_HOOK_COUNT: AtomicUsize = AtomicUsize::new(0);
+static RESPONSE_HOOKS: LazyLock<Mutex<Vec<RequestHook>>> = LazyLock::new(Mutex::default);
+static RESPONSE_HOOK_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Outcome of running matching `phoenix.discord.onRequest` hooks.
 pub enum RequestAction {
    Pass,
    Drop,
    Replace(Vec<u8>),
+}
+
+/// Headers Discord sets per request, or the transport sets itself, which a
+/// plugin's request must not inherit.
+const PER_REQUEST: [&str; 8] = [
+   "accept-encoding",
+   "connection",
+   "content-length",
+   "content-type",
+   "host",
+   "transfer-encoding",
+   "x-audit-log-reason",
+   "x-context-properties",
+];
+
+/// What Discord's own API requests carry, in memory only.
+#[derive(Clone)]
+struct Session {
+   /// Up to and including the version, like `https://discord.com/api/v9`.
+   base:    String,
+   headers: Vec<(String, String)>,
+}
+
+static SESSION: Mutex<Option<Session>> = Mutex::new(None);
+
+/// A request whose response `onResponse` hooks wait for.
+pub struct InFlight {
+   method: String,
+   path:   String,
+   hooks:  Vec<u64>,
+   at:     Instant,
+}
+
+/// By the platform's id for the request.
+static IN_FLIGHT: LazyLock<Mutex<HashMap<u64, InFlight>>> = LazyLock::new(Mutex::default);
+static IN_FLIGHT_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Keeps the base and session headers of one of Discord's own API requests.
+/// Never logs them.
+fn record_session(url: &str, headers: &[(String, String)]) {
+   let Some(base) = api_base(url) else {
+      return;
+   };
+   let headers = headers
+      .iter()
+      .filter(|(name, _)| !PER_REQUEST.contains(&name.to_ascii_lowercase().as_str()))
+      .cloned()
+      .collect::<Vec<_>>();
+   if !headers
+      .iter()
+      .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+   {
+      return;
+   }
+   let mut session = SESSION.lock().unwrap_or_else(PoisonError::into_inner);
+   if session.is_none() {
+      log::info!("discord: API session found at {base}");
+   }
+   *session = Some(Session {
+      base: base.to_owned(),
+      headers,
+   });
+}
+
+/// Keeps the session of one of Discord's own API requests and runs matching
+/// `phoenix.discord.onRequest` hooks on it, filtered here so other requests
+/// never enter `QuickJS`. Session headers never reach JS.
+#[must_use]
+pub fn observe_request(
+   method: &str,
+   url: &str,
+   headers: &[(String, String)],
+   body: &[u8],
+) -> RequestAction {
+   record_session(url, headers);
+   let Some(path) = api_path(url) else {
+      return RequestAction::Pass;
+   };
+   // The query can hold search terms, so the trace keeps the path only.
+   crate::remote::record(&crate::remote::Trace::Http {
+      method,
+      path: path.split('?').next().unwrap_or(path),
+      bytes: body.len(),
+   });
+   let matched = matching_request_hooks(method, path);
+   if matched.is_empty() {
+      return RequestAction::Pass;
+   }
+   crate::intercept_request(&matched, method, path, body)
+}
+
+/// The `onResponse` hooks waiting for the response to `method url`, if any.
+#[must_use]
+pub fn watch_response(method: &str, url: &str) -> Option<InFlight> {
+   let path = api_path(url)?;
+   let hooks = matching_response_hooks(method, path);
+   (!hooks.is_empty()).then(|| {
+      InFlight {
+         method: method.to_owned(),
+         path: path.to_owned(),
+         hooks,
+         at: Instant::now(),
+      }
+   })
+}
+
+/// Holds `in_flight` until [`take_response`] asks for request `id`.
+pub fn track_response(id: u64, in_flight: InFlight) {
+   let mut tracked = IN_FLIGHT.lock().unwrap_or_else(PoisonError::into_inner);
+   if tracked.len() >= 64 {
+      tracked.retain(|_, entry| entry.at.elapsed() < Duration::from_secs(60));
+   }
+   tracked.insert(id, in_flight);
+   IN_FLIGHT_COUNT.store(tracked.len(), Ordering::Relaxed);
+}
+
+/// Whether any request waits for [`take_response`].
+pub fn responses_pending() -> bool {
+   IN_FLIGHT_COUNT.load(Ordering::Relaxed) > 0
+}
+
+/// The hooks tracked for request `id`, once its response arrives.
+pub fn take_response(id: u64) -> Option<InFlight> {
+   if !responses_pending() {
+      return None;
+   }
+   let mut tracked = IN_FLIGHT.lock().unwrap_or_else(PoisonError::into_inner);
+   let in_flight = tracked.remove(&id);
+   IN_FLIGHT_COUNT.store(tracked.len(), Ordering::Relaxed);
+   in_flight
+}
+
+/// Runs `in_flight`'s `onResponse` hooks on `body` and returns the body to
+/// deliver, the original when they take longer than 4 seconds. Blocks.
+#[must_use]
+pub fn run_response_hooks(in_flight: InFlight, status: i32, body: Vec<u8>) -> Vec<u8> {
+   let original = body.clone();
+   let (sender, receiver) = mpsc::channel::<Vec<u8>>();
+   crate::intercept_response(
+      in_flight.hooks,
+      in_flight.method.clone(),
+      in_flight.path.clone(),
+      status,
+      body,
+      sender,
+   );
+   receiver
+      .recv_timeout(Duration::from_secs(4))
+      .unwrap_or_else(|_| {
+         log::warn!(
+            "discord onResponse: {} {} timed out, delivering original",
+            in_flight.method,
+            in_flight.path
+         );
+         original
+      })
+}
+
+/// The URL and headers of a plugin's request to `path`: Discord's session
+/// headers, any of them replaced by `headers`.
+pub fn session_request(
+   path: &str,
+   headers: Vec<(String, String)>,
+) -> Result<(String, Vec<(String, String)>), DiscordError> {
+   if !path.starts_with('/') {
+      return Err(DiscordError::Path {
+         path: path.to_owned(),
+      });
+   }
+   let Session {
+      base,
+      headers: mut merged,
+   } = SESSION
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .clone()
+      .ok_or(DiscordError::NoSession)?;
+   merged.retain(|(name, _)| {
+      !headers
+         .iter()
+         .any(|(own, _)| own.eq_ignore_ascii_case(name))
+   });
+   merged.extend(headers);
+   Ok((format!("{base}{path}"), merged))
+}
+
+/// What [`authorize`] asks Discord for.
+pub struct Authorization {
+   pub client_id:     String,
+   pub redirect_uri:  String,
+   pub scopes:        Vec<String>,
+   pub response_type: String,
 }
 
 pub fn add_request_hook(id: u64, plugin: String, filter: RequestFilter) {
@@ -254,34 +344,39 @@ pub fn forget_response_hooks(plugin: &str) {
    RESPONSE_HOOK_COUNT.store(hooks.len(), Ordering::Relaxed);
 }
 
-/// Relative path under the API base (e.g. `https://discord.com/api/v9/foo` -> `/foo`).
-fn api_path(url: &str) -> Option<&str> {
-   let base = api_base(url)?;
-   let rest = &url[base.len()..];
-   rest.starts_with('/').then_some(rest)
+/// Returns the registered `onRequest` hook ids matching `(method, path)`.
+#[must_use]
+pub fn matching_request_hooks(method: &str, path: &str) -> Vec<u64> {
+   if REQUEST_HOOK_COUNT.load(Ordering::Relaxed) == 0 {
+      return Vec::new();
+   }
+   let hooks = REQUEST_HOOKS.lock().unwrap_or_else(PoisonError::into_inner);
+   hooks
+      .iter()
+      .filter(|hook| hook.filter.matches(method, path))
+      .map(|hook| hook.id)
+      .collect()
 }
 
-/// `Networking.request`'s `headers`, an array of `[name, value]` pairs.
-fn headers(args: &Value) -> Vec<(String, String)> {
-   let Some(Value::Arr(pairs)) = args.field(HEADERS) else {
+/// Returns the registered `onResponse` hook ids matching `(method, path)`.
+#[must_use]
+pub fn matching_response_hooks(method: &str, path: &str) -> Vec<u64> {
+   if RESPONSE_HOOK_COUNT.load(Ordering::Relaxed) == 0 {
       return Vec::new();
-   };
-   pairs
+   }
+   let hooks = RESPONSE_HOOKS
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner);
+   hooks
       .iter()
-      .filter_map(|pair| {
-         let Value::Arr(parts) = pair else {
-            return None;
-         };
-         match parts.as_slice() {
-            [Value::Str(name), Value::Str(value)] => Some((name.clone(), value.clone())),
-            _ => None,
-         }
-      })
+      .filter(|hook| hook.filter.matches(method, path))
+      .map(|hook| hook.id)
       .collect()
 }
 
 /// `https://host/api/v9` out of an API URL.
-fn api_base(url: &str) -> Option<&str> {
+#[must_use]
+pub fn api_base(url: &str) -> Option<&str> {
    let after = url.find("/api/v")? + "/api/v".len();
    let digits = url[after..]
       .find(|char: char| !char.is_ascii_digit())
@@ -289,419 +384,61 @@ fn api_base(url: &str) -> Option<&str> {
    (url.starts_with("https://") && digits > 0).then(|| &url[..after + digits])
 }
 
-/// Whether an `invoke` frame starting with `head` is one [`observe_call`]
-/// reads.
-pub fn wants(head: &[u8]) -> bool {
-   HostCall::target(head) == Some((NETWORKING, REQUEST))
+/// Relative path under the API base (e.g. `https://discord.com/api/v9/foo` -> `/foo`).
+#[must_use]
+pub fn api_path(url: &str) -> Option<&str> {
+   let base = api_base(url)?;
+   let rest = &url[base.len()..];
+   rest.starts_with('/').then_some(rest)
 }
 
-/// Observes one of Phoenix's own API requests and runs any matching
-/// `phoenix.discord.onRequest` hooks (filtered in Rust first so non-matching
-/// calls never enter `QuickJS`). Never exposes session headers to JS.
-pub fn intercept_call(frame: &[u8]) -> Action {
-   let Ok(mut call) = HostCall::decode(frame) else {
-      return Action::Pass;
-   };
-   observe_decoded(&call);
-   if REQUEST_HOOK_COUNT.load(Ordering::Relaxed) == 0 {
-      return Action::Pass;
-   }
-   let Some(method) = call
-      .args
-      .field(METHOD)
-      .and_then(Value::as_str)
-      .map(str::to_owned)
-   else {
-      return Action::Pass;
-   };
-   let Some(path) = call
-      .args
-      .field(URL)
-      .and_then(Value::as_str)
-      .and_then(api_path)
-      .map(str::to_owned)
-   else {
-      return Action::Pass;
-   };
-   let matched = {
-      let hooks = REQUEST_HOOKS.lock().unwrap_or_else(PoisonError::into_inner);
-      hooks
-         .iter()
-         .filter(|hook| hook.filter.matches(&method, &path))
-         .map(|hook| hook.id)
-         .collect::<Vec<_>>()
-   };
-   if matched.is_empty() {
-      return Action::Pass;
-   }
-   match crate::intercept_request(&matched, &method, &path, &call.body) {
-      RequestAction::Pass => Action::Pass,
-      RequestAction::Drop => Action::Drop,
-      RequestAction::Replace(body) => {
-         call.body = body;
-         // Drop any stale content-length header so `OkHttp` uses the new body
-         // length.
-         if let Value::Obj(ref mut fields) = call.args {
-            for (key, value) in fields.iter_mut() {
-               if *key == HEADERS
-                  && let Value::Arr(pairs) = value
-               {
-                  pairs.retain(|pair| {
-                     !matches!(pair, Value::Arr(parts) if matches!(parts.first(), Some(Value::Str(name)) if name.eq_ignore_ascii_case("content-length")))
-                  });
-               }
-            }
-         }
-         Action::Replace(call.encode())
-      },
-   }
-}
-
-/// Keeps the session of one of Phoenix's own API requests.
-fn observe_decoded(call: &HostCall) {
-   if RESPONSE_HOOK_COUNT.load(Ordering::Relaxed) > 0
-      && let Some(id) = call.args.field(ID).and_then(Value::as_i32)
-      && let Some(method) = call.args.field(METHOD).and_then(Value::as_str)
-      && let Some(path) = call
-         .args
-         .field(URL)
-         .and_then(Value::as_str)
-         .and_then(api_path)
-   {
-      let matched = {
-         let hooks = RESPONSE_HOOKS
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-         hooks
-            .iter()
-            .filter(|hook| hook.filter.matches(method, path))
-            .map(|hook| hook.id)
-            .collect::<Vec<_>>()
-      };
-      if !matched.is_empty() {
-         let mut in_flight = IN_FLIGHT.lock().unwrap_or_else(PoisonError::into_inner);
-         if in_flight.len() >= 64 {
-            in_flight.retain(|_, entry| entry.at.elapsed() < Duration::from_secs(60));
-         }
-         in_flight.insert(id, InFlight {
-            method: method.to_owned(),
-            path:   path.to_owned(),
-            hooks:  matched,
-            at:     Instant::now(),
-         });
-      }
-   }
-   if let Some(id) = call
-      .args
-      .field(URL)
-      .and_then(Value::as_str)
-      .and_then(profile_of)
-   {
-      *LAST_PROFILE.lock().unwrap_or_else(PoisonError::into_inner) = Some((id, Instant::now()));
-   }
-   if let Some(url) = call.args.field(URL).and_then(Value::as_str)
-      && url.contains("/oauth2/authorize?")
-      && call.args.field(METHOD).and_then(Value::as_str) == Some("POST")
-      && let Some(authorizing) = AUTHORIZING
-         .lock()
-         .unwrap_or_else(PoisonError::into_inner)
-         .as_mut()
-      && url
-         .split(['?', '&'])
-         .any(|pair| pair.strip_prefix("client_id=") == Some(authorizing.client_id.as_str()))
-   {
-      authorizing.call = call.args.field(ID).and_then(Value::as_i32);
-   }
-   let Some(base) = call
-      .args
-      .field(URL)
-      .and_then(Value::as_str)
-      .and_then(api_base)
-   else {
-      return;
-   };
-   let headers = headers(&call.args)
-      .into_iter()
-      .filter(|(name, _)| !PER_REQUEST.contains(&name.to_ascii_lowercase().as_str()))
-      .collect::<Vec<_>>();
-   if !headers
-      .iter()
-      .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
-   {
-      return;
-   }
-
-   let mut session = SESSION.lock().unwrap_or_else(PoisonError::into_inner);
-   if session.is_none() {
-      log::info!("discord: API session found at {base}");
-   }
-   *session = Some(Session {
-      base: base.to_owned(),
-      headers,
-   });
-}
-
-/// Takes the `@http` replies to phoenix's requests out of a `nativeDispatch`
-/// call, and defers replies matched by `phoenix.discord.onResponse` hooks.
-pub fn filter(bytes: &[u8]) -> Action {
-   let watching = AUTHORIZING
-      .lock()
-      .unwrap_or_else(PoisonError::into_inner)
-      .as_ref()
-      .is_some_and(|authorizing| authorizing.call.is_some());
-   let has_in_flight = RESPONSE_HOOK_COUNT.load(Ordering::Relaxed) > 0
-      && !IN_FLIGHT
-         .lock()
-         .unwrap_or_else(PoisonError::into_inner)
-         .is_empty();
-   if !watching
-      && !has_in_flight
-      && PENDING
-         .lock()
-         .unwrap_or_else(PoisonError::into_inner)
-         .is_empty()
-   {
-      return Action::Pass;
-   }
-   let Ok(items) = decode_dispatch(bytes) else {
-      return Action::Pass;
-   };
-   let count = items.len();
-   let taken = items
-      .into_iter()
-      .filter_map(|item| {
-         let DispatchEvent::Host {
-            event: HTTP_EVENT,
-            args,
-            body,
-         } = item.event
-         else {
-            return None;
-         };
-         let id = args.field(ID).and_then(Value::as_i32)?;
-         if id < FIRST_ID {
-            let frame = &bytes[item.offset..item.offset + item.len];
-            if let Some(new) = authorized(id, frame, &body) {
-               return Some((item.offset, Some(new)));
-            }
-            let in_flight = IN_FLIGHT
-               .lock()
-               .unwrap_or_else(PoisonError::into_inner)
-               .remove(&id);
-            if let Some(in_flight) = in_flight {
-               let status = args
-                  .field(STATUS)
-                  .and_then(Value::as_i32)
-                  .unwrap_or_default();
-               let owned_frame = frame.to_vec();
-               std::thread::spawn(move || run_response_hooks(in_flight, status, owned_frame, body));
-               return Some((item.offset, None));
-            }
-            return None;
-         }
-         let waiter = PENDING
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&id);
-         // With no waiter the request timed out, and the reply goes nowhere.
-         if let Some(waiter) = waiter {
-            let _ = waiter.send(Reply {
-               status: args
-                  .field(STATUS)
-                  .and_then(Value::as_i32)
-                  .unwrap_or_default(),
-               error: args.field(ERROR).and_then(Value::as_str).map(str::to_owned),
-               body,
-            });
-         }
-         Some((item.offset, None))
-      })
-      .collect::<Vec<_>>();
-
-   let dropped = taken.iter().filter(|(_, new)| new.is_none()).count();
-   match taken.len() {
-      0 => Action::Pass,
-      _ if dropped == count => Action::Drop,
-      _ => Action::Replace(edit_frames(bytes, &taken)),
-   }
-}
-
-/// Runs matched `phoenix.discord.onResponse` hooks off the `wasm-guest` thread,
-/// then re-dispatches the rewritten (or original on timeout) `@http` frame.
-fn run_response_hooks(in_flight: InFlight, status: i32, frame: Vec<u8>, body: Vec<u8>) {
-   let (sender, receiver) = mpsc::channel::<Vec<u8>>();
-   let orig_len = body.len();
-   crate::intercept_response(
-      in_flight.hooks,
-      in_flight.method.clone(),
-      in_flight.path.clone(),
-      status,
-      body,
-      sender,
-   );
-   let Ok(new_body) = receiver.recv_timeout(Duration::from_secs(4)) else {
-      log::warn!(
-         "discord onResponse: {} {} timed out, delivering original",
-         in_flight.method,
-         in_flight.path
-      );
-      bridge::dispatch_deferred(frame);
-      return;
-   };
-   let head = &frame[..frame.len().saturating_sub(orig_len)];
-   let mut out = Vec::with_capacity(head.len() + new_body.len());
-   out.extend_from_slice(head);
-   out.extend_from_slice(&new_body);
-   bridge::dispatch_deferred(out);
-}
-
-/// Sends `method path` with Phoenix's session headers, any of them replaced
-/// by `headers`, and waits for the answer. Runs on a worker thread.
+/// Sends `method path` with Phoenix's session headers and waits for the answer.
 pub fn send(
    method: &str,
    path: &str,
    headers: Vec<(String, String)>,
    body: Vec<u8>,
 ) -> Result<Response, DiscordError> {
-   if !path.starts_with('/') {
-      return Err(DiscordError::Path {
-         path: path.to_owned(),
-      });
-   }
-   let Session {
-      base,
-      headers: mut merged,
-   } = SESSION
-      .lock()
-      .unwrap_or_else(PoisonError::into_inner)
-      .clone()
-      .ok_or(DiscordError::NoSession)?;
-   let url = format!("{base}{path}");
-   merged.retain(|(name, _)| {
-      !headers
-         .iter()
-         .any(|(own, _)| own.eq_ignore_ascii_case(name))
-   });
-   merged.extend(headers);
-
-   let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-   let pairs = merged
-      .into_iter()
-      .map(|(name, value)| Value::Arr(vec![Value::Str(name), Value::Str(value)]))
-      .collect();
-   let call = HostCall {
-      module: NETWORKING,
-      method: REQUEST,
-      args: Value::Obj(vec![
-         (ID, Value::I32(id)),
-         (METHOD, Value::Str(method.to_owned())),
-         (URL, Value::Str(url)),
-         (HEADERS, Value::Arr(pairs)),
-      ]),
-      body,
-   };
-
-   let (sender, receiver) = mpsc::channel();
-   PENDING
-      .lock()
-      .unwrap_or_else(PoisonError::into_inner)
-      .insert(id, sender);
-   let forget = || {
-      PENDING
-         .lock()
-         .unwrap_or_else(PoisonError::into_inner)
-         .remove(&id);
-   };
-   if !bridge::invoke(&call.encode()) {
-      forget();
-      return Err(DiscordError::NoBridge);
-   }
-   let Ok(reply) = receiver.recv_timeout(TIMEOUT) else {
-      forget();
-      return Err(DiscordError::Timeout {
-         path: path.to_owned(),
-      });
-   };
-   if reply.status == 0 {
-      return Err(DiscordError::Network {
-         path:    path.to_owned(),
-         message: reply.error.unwrap_or_else(|| "no response".to_owned()),
-      });
-   }
-   Ok(Response {
-      status: reply.status,
-      body:   reply.body,
-   })
+   crate::platform()
+      .ok_or(DiscordError::NotStarted)?
+      .discord(method, path, headers, body)
 }
 
-/// What [`authorize`] asks Discord for.
-pub struct Authorization {
-   pub client_id:     String,
-   pub redirect_uri:  String,
-   pub scopes:        Vec<String>,
-   pub response_type: String,
-}
-
-/// Opens Phoenix's own `OAuth2` authorize screen for `request` and waits for
-/// the user to authorize. Phoenix's authorize request is then answered with
-/// Discord's own "authorized" page instead of the redirect, so the code stays
-/// in the app, and the redirect URL with the code comes back here. The URL
-/// holds a credential and is never logged.
+/// Opens Phoenix's `OAuth2` authorize flow for `request` and returns the
+/// redirect URL.
 pub fn authorize(request: &Authorization) -> Result<String, DiscordError> {
-   let link = format!(
-      "discord://action/oauth2/authorize?client_id={}&response_type={}&redirect_uri={}&scope={}",
-      url_encoded(&request.client_id),
-      url_encoded(&request.response_type),
-      url_encoded(&request.redirect_uri),
-      url_encoded(&request.scopes.join(" ")),
-   );
-   let turn = TURN.fetch_add(1, Ordering::Relaxed);
-   let (sender, receiver) = mpsc::channel();
-   // A newer authorize drops the older one's sender, which rejects it.
-   *AUTHORIZING.lock().unwrap_or_else(PoisonError::into_inner) = Some(Authorizing {
-      client_id: request.client_id.clone(),
-      call: None,
-      waiter: sender,
-      turn,
-   });
-   if let Err(message) = crate::picker::open(&link) {
-      AUTHORIZING
-         .lock()
-         .unwrap_or_else(PoisonError::into_inner)
-         .take();
-      return Err(DiscordError::Open { message });
-   }
-   let location = receiver.recv_timeout(AUTHORIZE_TIMEOUT);
-   let mut authorizing = AUTHORIZING.lock().unwrap_or_else(PoisonError::into_inner);
-   if authorizing
-      .as_ref()
-      .is_some_and(|current| current.turn == turn)
-   {
-      authorizing.take();
-   }
-   drop(authorizing);
-   location.map_err(|_| DiscordError::NotAuthorized)
+   crate::platform()
+      .ok_or(DiscordError::NotStarted)?
+      .authorize(request)
 }
 
-/// Discord's answer to an authorize request.
-#[derive(Deserialize)]
-struct Authorized {
-   location: String,
-}
+#[cfg(test)]
+mod tests {
+   use super::*;
 
-/// Rewrites the reply to Phoenix's own authorize request while a plugin waits
-/// for it. Returns the replacement frame.
-fn authorized(id: i32, frame: &[u8], body: &[u8]) -> Option<Vec<u8>> {
-   let mut authorizing = AUTHORIZING.lock().unwrap_or_else(PoisonError::into_inner);
-   if authorizing.as_ref()?.call != Some(id) {
-      return None;
+   #[test]
+   fn parses_api_base_and_path() {
+      assert_eq!(
+         api_base("https://discord.com/api/v9/users/@me/badges"),
+         Some("https://discord.com/api/v9")
+      );
+      assert_eq!(
+         api_path("https://discord.com/api/v9/users/@me/badges"),
+         Some("/users/@me/badges")
+      );
+      assert_eq!(api_path("https://example.com/users/1/badges"), None);
    }
-   let current = authorizing.take()?;
-   drop(authorizing);
-   let reply = serde_json::from_slice::<Authorized>(body).ok()?;
-   let _ = current.waiter.send(reply.location);
-   let head = &frame[..frame.len() - body.len()];
-   let mut out = head.to_vec();
-   out.extend_from_slice(br#"{"location":"https://discord.com/oauth2/authorized"}"#);
-   Some(out)
+
+   #[test]
+   fn matches_request_filter() {
+      let filter = RequestFilter {
+         method:        Some("GET".to_owned()),
+         path_prefix:   Some("/users/".to_owned()),
+         path_suffix:   Some("/badges".to_owned()),
+         path_includes: None,
+      };
+      assert!(filter.matches("get", "/users/@me/badges?with_hidden=true"));
+      assert!(!filter.matches("POST", "/users/@me/badges"));
+      assert!(!filter.matches("GET", "/users/@me/profile"));
+   }
 }

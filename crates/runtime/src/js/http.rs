@@ -18,7 +18,9 @@ use crate::{
          in_background,
       },
       intercept::add_discord_hooks,
+      state,
    },
+   store,
 };
 
 /// `{status, ok, text(), json()}`, a subset of the web's `Response`.
@@ -161,6 +163,15 @@ pub fn discord_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Obj
                .unwrap_or_else(|| "code".to_owned()),
          };
          in_background(&ctx, move || Settlement::Text(discord::authorize(&request)))
+      })?,
+   )?;
+   object.set(
+      "me",
+      Function::new(ctx.clone(), |ctx: Ctx<'js>| {
+         let files = state().files_dir();
+         in_background(&ctx, move || {
+            Settlement::Json(store::database(&files).and_then(|db| store::meta(&db, "me")))
+         })
       })?,
    )?;
    object.set(

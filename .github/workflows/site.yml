@@ -1,0 +1,53 @@
+name: site
+on:
+  push:
+    branches: [main]
+    paths: ['web/**', 'plugins/**', 'crates/**', 'frida/**', 'Cargo.*', 'flake.*', 'nix/**', 'scripts/site.nu', '.github/workflows/site.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: site
+  cancel-in-progress: false
+jobs:
+  ios:
+    uses: ./.github/workflows/ios.yml
+  build:
+    needs: ios
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - run: nix develop --command nu scripts/site.nu web
+      - uses: actions/download-artifact@v4
+        with:
+          name: libphoenix-ios
+          path: ios
+      - run: mv ios/libphoenix.dylib web/plugins/libphoenix-ios.dylib
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # The plugins stay TypeScript in plugins/*/src; assets.sunbird.tools serves them bundled.
+      - run: npm install --no-save --no-package-lock esbuild@0.25.12
+      - run: node web/tools/bundle-plugins.ts
+        env:
+          ESBUILD: node_modules/.bin/esbuild
+      - run: |
+          mkdir -p dist
+          touch dist/.nojekyll
+          cp -r web/pkg web/plugins web/version.json dist/
+          tar czf dist/site.tar.gz -C web pkg plugins version.json
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: dist
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v5

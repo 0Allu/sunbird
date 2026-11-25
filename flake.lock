@@ -1,21 +1,5 @@
 {
   "nodes": {
-    "bytehook": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1781592272,
-        "narHash": "sha256-y4bJT0+JY0I7IGQ1JstP9aTw1D8+uhWUSBkFA3wRcoo=",
-        "owner": "bytedance",
-        "repo": "bhook",
-        "rev": "a8bd254f6e53022b65136f40d10ae3763b6ef8ad",
-        "type": "github"
-      },
-      "original": {
-        "owner": "bytedance",
-        "repo": "bhook",
-        "type": "github"
-      }
-    },
     "fenix": {
       "inputs": {
         "nixpkgs": [
@@ -55,10 +39,8 @@
     },
     "root": {
       "inputs": {
-        "bytehook": "bytehook",
         "fenix": "fenix",
-        "nixpkgs": "nixpkgs",
-        "shadowhook": "shadowhook"
+        "nixpkgs": "nixpkgs"
       }
     },
     "rust-analyzer-src": {
@@ -75,22 +57,6 @@
         "owner": "rust-lang",
         "ref": "nightly",
         "repo": "rust-analyzer",
-        "type": "github"
-      }
-    },
-    "shadowhook": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1794291640,
-        "narHash": "sha256-1ZPNoYUxfPLEwc9wosWdc+cBxzVhJYtVJ3jRNh1KUHI=",
-        "owner": "bytedance",
-        "repo": "android-inline-hook",
-        "rev": "5a3721710b088435369fd79a2bb8f5b32df82dcd",
-        "type": "github"
-      },
-      "original": {
-        "owner": "bytedance",
-        "repo": "android-inline-hook",
         "type": "github"
       }
     }

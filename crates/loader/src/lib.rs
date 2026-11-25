@@ -1,48 +1,28 @@
-//! `libphoenix.so`, injected through a `DT_NEEDED` entry on Android and as a
-//! dylib on iOS.
+//! `libphoenix.so` / `phoenix.dll`, injected through `DT_NEEDED` on Android,
+//! as a dylib on iOS, or loaded into Desktop Phoenix on Windows.
 //!
-//! The constructor runs once the host library is mapped and relocated, before
-//! the host's own constructors and before the app touches the gateway, so hooks
-//! are in place for the first dispatch. Plugins come from the bundle the
-//! patcher stores beside this library, then from `$PHOENIX_HOME/plugins`.
-//! `$PHOENIX_HOME` defaults to the app's `files/phoenix` on Android.
+//! On Unix the constructor runs once the host library is mapped and relocated.
+//! On Windows `DllMain` spawns a thread so startup never runs under the OS
+//! loader lock. Plugins come from the bundle stored beside this library (when
+//! present) plus `$PHOENIX_HOME/plugins`.
 
 use std::{
-   collections::BTreeMap,
    env,
-   ffi::{
-      CStr,
-      c_void,
-   },
-   fs::{
-      self,
-      File,
-   },
-   io::{
-      ErrorKind,
-      Read,
-   },
    panic::{
       self,
       AssertUnwindSafe,
    },
-   path::{
-      Path,
-      PathBuf,
-   },
+   path::PathBuf,
 };
 
-use misstep::ResultExt;
 use phoenix_runtime::{
+   Error,
    Plugin,
+   Started,
    console::Tee,
 };
-use phoenix_sigs::PLUGIN_BUNDLE;
-use zip::{
-   ZipArchive,
-   result::ZipError,
-};
 
+#[cfg(unix)]
 #[used]
 #[cfg_attr(not(target_vendor = "apple"), unsafe(link_section = ".init_array"))]
 #[cfg_attr(
@@ -51,18 +31,58 @@ use zip::{
 )]
 static CONSTRUCTOR: extern "C" fn() = init;
 
+/// # Safety
+///
+/// Only the Windows loader calls this, under its loader lock.
+#[cfg(windows)]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn DllMain(
+   module: *mut std::ffi::c_void,
+   reason: u32,
+   _reserved: *mut std::ffi::c_void,
+) -> i32 {
+   const DLL_PROCESS_ATTACH: u32 = 1;
+
+   #[link(name = "kernel32")]
+   unsafe extern "system" {
+      fn DisableThreadLibraryCalls(module: *mut std::ffi::c_void) -> i32;
+   }
+
+   if reason == DLL_PROCESS_ATTACH {
+      // SAFETY: `module` is the HINSTANCE handed to DllMain.
+      unsafe { DisableThreadLibraryCalls(module) };
+      logging();
+      let started = std::time::Instant::now();
+      if let Err(err) = phoenix_runtime_desktop::prepare() {
+         log::error!("phoenix could not hook Discord: {err}");
+      }
+      log::info!("hooked Discord in {:?}", started.elapsed());
+      let _ = std::thread::Builder::new()
+         .name("sunbird-init".to_owned())
+         .spawn(|| init());
+   }
+   1
+}
+
 extern "C" fn init() {
    logging();
+   #[cfg(target_os = "ios")]
+   ios::start_with_phoenix();
+   #[cfg(not(target_os = "ios"))]
+   run();
+}
+
+fn run() {
    // Unwinding out of a constructor aborts the host, so a bug here costs
    // plugins, not the app.
-   match panic::catch_unwind(AssertUnwindSafe(|| {
-      phoenix_runtime::start(home(), bundled())
-   })) {
+   match panic::catch_unwind(AssertUnwindSafe(|| start(home(), bundled()))) {
       Ok(Ok(started)) => {
          log::info!(
             "phoenix started on {} ({}), plugins: {:?}",
             started.target,
-            started.build.unwrap_or("unknown build, portable rules"),
+            started
+               .build
+               .map_or_else(|| "no build ID".to_owned(), |id| id.to_string()),
             started.plugins,
          );
       },
@@ -71,74 +91,238 @@ extern "C" fn init() {
    }
 }
 
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
+   phoenix_runtime_mobile::start(home, bundled)
+}
+
+#[cfg(windows)]
+fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
+   phoenix_runtime_desktop::start(home, bundled)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios", windows)))]
+fn start(_home: PathBuf, _bundled: Vec<Plugin>) -> Result<Started, Error> {
+   Err(Error::NoTarget)
+}
+
 fn home() -> PathBuf {
    if let Some(home) = env::var_os("PHOENIX_HOME") {
       return PathBuf::from(home);
    }
-   // /proc/self/cmdline starts with the package name, plus `:process` for
-   // secondary processes.
-   let package = fs::read("/proc/self/cmdline")
-      .ok()
-      .and_then(|cmdline| {
-         let name = cmdline.split(|byte| *byte == 0).next()?.to_vec();
-         String::from_utf8(name).ok()
-      })
-      .map_or_default(|name| name.split(':').next().unwrap_or_default().to_owned());
-   PathBuf::from(format!("/data/data/{package}/files/phoenix"))
-}
-
-fn bundled() -> Vec<Plugin> {
-   match read_bundle() {
-      Ok(plugins) => plugins,
-      Err(err) => {
-         log::error!("plugin bundle: {err}");
-         Vec::new()
-      },
-   }
-}
-
-/// Reads [`PLUGIN_BUNDLE`] from beside this library. Android maps native
-/// libraries straight out of the APK, so `dladdr` names `<apk>!/lib/<abi>/...`
-/// and the bundle is a stored entry in the same split.
-fn read_bundle() -> misstep::Result<Vec<Plugin>> {
-   let mut info = libc::Dl_info {
-      dli_fname: std::ptr::null(),
-      dli_fbase: std::ptr::null_mut(),
-      dli_sname: std::ptr::null(),
-      dli_saddr: std::ptr::null_mut(),
-   };
-   // SAFETY: dladdr fills `info` for an address inside a loaded module.
-   if unsafe { libc::dladdr(init as *const c_void, &raw mut info) } == 0 || info.dli_fname.is_null()
+   #[cfg(target_os = "ios")]
    {
-      return Ok(Vec::new());
+      // Beside Phoenix's `store`, which `files_dir` expects to be the parent.
+      env::var_os("HOME")
+         .map_or_else(env::temp_dir, PathBuf::from)
+         .join("Library/Application Support/phoenix")
    }
-   // SAFETY: dli_fname is NUL-terminated and lives as long as the module.
-   let path = unsafe { CStr::from_ptr(info.dli_fname) }.to_str()?;
+   #[cfg(all(unix, not(target_os = "ios")))]
+   {
+      // /proc/self/cmdline starts with the package name, plus `:process` for
+      // secondary processes.
+      let package = std::fs::read("/proc/self/cmdline")
+         .ok()
+         .and_then(|cmdline| {
+            let name = cmdline.split(|byte| *byte == 0).next()?.to_vec();
+            String::from_utf8(name).ok()
+         })
+         .map_or_default(|name| name.split(':').next().unwrap_or_default().to_owned());
+      PathBuf::from(format!("/data/data/{package}/files/phoenix"))
+   }
+   #[cfg(windows)]
+   {
+      // Sits directly under `%LOCALAPPDATA%\DiscordPhoenix\sunbird` so its
+      // parent matches Phoenix's `store/<account>/cache.sqlite` root.
+      let base = env::var_os("LOCALAPPDATA").map_or_else(env::temp_dir, PathBuf::from);
+      base.join("DiscordPhoenix").join("sunbird")
+   }
+}
 
-   let bytes = if let Some((apk, inner)) = path.split_once("!/") {
-      let dir = inner.rsplit_once('/').map_or("", |(dir, _)| dir);
-      let mut archive =
-         ZipArchive::new(File::open(apk).with_context(|| format!("opening {apk}"))?)?;
-      let mut entry = match archive.by_name(&format!("{dir}/{PLUGIN_BUNDLE}")) {
-         Ok(entry) => entry,
-         Err(ZipError::FileNotFound) => return Ok(Vec::new()),
-         Err(err) => return Err(err.into()),
-      };
-      let mut bytes = Vec::new();
-      entry.read_to_end(&mut bytes)?;
-      bytes
-   } else {
-      match fs::read(Path::new(path).with_file_name(PLUGIN_BUNDLE)) {
-         Ok(bytes) => bytes,
-         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-         Err(err) => return Err(err.into()),
+#[cfg_attr(
+   not(unix),
+   allow(
+      clippy::missing_const_for_fn,
+      reason = "only the unix body reads a bundle"
+   )
+)]
+fn bundled() -> Vec<Plugin> {
+   #[cfg(unix)]
+   {
+      match unix::read_bundle() {
+         Ok(plugins) => plugins,
+         Err(err) => {
+            log::error!("plugin bundle: {err}");
+            Vec::new()
+         },
       }
+   }
+   #[cfg(not(unix))]
+   {
+      Vec::new()
+   }
+}
+
+#[cfg(unix)]
+mod unix {
+   use std::{
+      collections::BTreeMap,
+      ffi::{
+         CStr,
+         c_void,
+      },
+      fs::{
+         self,
+         File,
+      },
+      io::{
+         ErrorKind,
+         Read,
+      },
+      path::Path,
    };
-   let plugins: BTreeMap<String, String> = serde_json::from_slice(&bytes)?;
-   Ok(plugins
-      .into_iter()
-      .map(|(name, source)| Plugin { name, source })
-      .collect())
+
+   use misstep::ResultExt;
+   use phoenix_runtime::Plugin;
+   use phoenix_sigs::PLUGIN_BUNDLE;
+   use zip::{
+      ZipArchive,
+      result::ZipError,
+   };
+
+   /// Reads [`PLUGIN_BUNDLE`] from beside this library. Android maps native
+   /// libraries straight out of the APK, so `dladdr` names
+   /// `<apk>!/lib/<abi>/...` and the bundle is a stored entry in the same
+   /// split.
+   pub fn read_bundle() -> misstep::Result<Vec<Plugin>> {
+      let mut info = libc::Dl_info {
+         dli_fname: std::ptr::null(),
+         dli_fbase: std::ptr::null_mut(),
+         dli_sname: std::ptr::null(),
+         dli_saddr: std::ptr::null_mut(),
+      };
+      // SAFETY: dladdr fills `info` for an address inside a loaded module.
+      if unsafe { libc::dladdr(super::init as *const c_void, &raw mut info) } == 0
+         || info.dli_fname.is_null()
+      {
+         return Ok(Vec::new());
+      }
+      // SAFETY: dli_fname is NUL-terminated and lives as long as the module.
+      let path = unsafe { CStr::from_ptr(info.dli_fname) }.to_str()?;
+
+      let bytes = if let Some((apk, inner)) = path.split_once("!/") {
+         let dir = inner.rsplit_once('/').map_or("", |(dir, _)| dir);
+         let mut archive =
+            ZipArchive::new(File::open(apk).with_context(|| format!("opening {apk}"))?)?;
+         let mut entry = match archive.by_name(&format!("{dir}/{PLUGIN_BUNDLE}")) {
+            Ok(entry) => entry,
+            Err(ZipError::FileNotFound) => return Ok(Vec::new()),
+            Err(err) => return Err(err.into()),
+         };
+         let mut bytes = Vec::new();
+         entry.read_to_end(&mut bytes)?;
+         bytes
+      } else {
+         match fs::read(Path::new(path).with_file_name(PLUGIN_BUNDLE)) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(err.into()),
+         }
+      };
+      let plugins: BTreeMap<String, String> = serde_json::from_slice(&bytes)?;
+      Ok(plugins
+         .into_iter()
+         .map(|(name, source)| Plugin { name, source })
+         .collect())
+   }
+}
+
+#[cfg(target_os = "ios")]
+mod ios {
+   use std::{
+      ffi::{
+         CStr,
+         c_void,
+      },
+      sync::atomic::{
+         AtomicBool,
+         Ordering,
+      },
+   };
+
+   unsafe extern "C" {
+      fn _dyld_register_func_for_add_image(added: extern "C" fn(*const c_void, isize));
+   }
+
+   static STARTED: AtomicBool = AtomicBool::new(false);
+
+   /// The loader is a dependency of the app's executable, so its constructor
+   /// can run before dyld maps `PhoenixFatClient`. dyld calls `added` for
+   /// every image already mapped and for each one mapped later.
+   pub fn start_with_phoenix() {
+      // SAFETY: `added` lives as long as the process.
+      unsafe { _dyld_register_func_for_add_image(added) };
+   }
+
+   extern "C" fn added(header: *const c_void, _slide: isize) {
+      let mut info = libc::Dl_info {
+         dli_fname: std::ptr::null(),
+         dli_fbase: std::ptr::null_mut(),
+         dli_sname: std::ptr::null(),
+         dli_saddr: std::ptr::null_mut(),
+      };
+      // SAFETY: `header` is the Mach-O header of an image dyld just added.
+      if unsafe { libc::dladdr(header, &raw mut info) } == 0 || info.dli_fname.is_null() {
+         return;
+      }
+      // SAFETY: dli_fname is NUL-terminated and lives as long as the image.
+      let path = unsafe { CStr::from_ptr(info.dli_fname) };
+      if !path.to_bytes().ends_with(b"/PhoenixFatClient") || STARTED.swap(true, Ordering::AcqRel) {
+         return;
+      }
+      // dyld holds its lock while it runs this, and starting walks its image
+      // list.
+      if let Err(err) = std::thread::Builder::new()
+         .name("phoenix-start".to_owned())
+         .spawn(super::run)
+      {
+         log::error!("phoenix could not start a thread: {err}");
+      }
+   }
+}
+
+#[cfg(target_os = "ios")]
+fn logging() {
+   struct Syslog;
+
+   impl log::Log for Syslog {
+      fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+         metadata.level() <= log::Level::Info
+      }
+
+      fn log(&self, record: &log::Record<'_>) {
+         if !self.enabled(record.metadata()) {
+            return;
+         }
+         let priority = match record.level() {
+            log::Level::Error => libc::LOG_ERR,
+            log::Level::Warn => libc::LOG_WARNING,
+            _ => libc::LOG_NOTICE,
+         };
+         let line = format!("phoenix: {}", record.args()).replace('\0', " ");
+         let Ok(line) = std::ffi::CString::new(line) else {
+            return;
+         };
+         // SAFETY: a `%s` format with one NUL-terminated argument.
+         unsafe { libc::syslog(priority, c"%s".as_ptr(), line.as_ptr()) };
+      }
+
+      fn flush(&self) {}
+   }
+
+   if log::set_logger(&Tee(Syslog)).is_ok() {
+      log::set_max_level(log::LevelFilter::Info);
+   }
 }
 
 #[cfg(target_os = "android")]
@@ -152,7 +336,7 @@ fn logging() {
    }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn logging() {
    struct Stderr;
 

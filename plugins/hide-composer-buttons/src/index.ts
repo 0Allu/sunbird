@@ -1,4 +1,4 @@
-// @description Hides clutter buttons from the chat composer (Gift, Voice Message, etc.)
+// @description Hides extra buttons in the message bar (Gift, Voice Message, etc.)
 // @version 1.0.0
 // @author mantikafasi
 

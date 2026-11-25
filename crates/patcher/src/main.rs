@@ -1,15 +1,16 @@
-//! `patcher --out <dir> --loader <libphoenix.so> [--lib <extra.so>]...
-//! [--plugin <name.js>]... <split.apk>...`
+//! `patcher --out <dir> [--loader <libphoenix.so> [--lib
+//! [<name>=]<extra.so>]... [--plugin <name.js>]...] [--frida <gadget.so[.gz]>
+//! --frida-bootstrap <bootstrap.js> [--frida-script <x.js>]...] <split.apk>...`
 //!
-//! Rewrites Discord's split APKs so Phoenix starts with phoenix inside it. The
-//! base split's launcher always picks Phoenix, the host library's access gate
-//! returns true and loads the loader through a renamed `DT_NEEDED` entry, and
-//! the loader, any extra libraries and the plugin bundle land next to the host
-//! library in its ABI split. Every split is then zipaligned and signed with phoenix's key, so
-//! `adb install-multiple <dir>/*.apk` installs the set.
-
-mod dex;
-mod host;
+//! Writes the signed splits to `<dir>`, for `adb install-multiple <dir>/*.apk`.
+//! With `--merge`, `--out` names one APK merged from the splits instead, which
+//! `--package` and `--label` install next to Discord. Without `--loader` only
+//! the access patches go in.
+//!
+//! `patcher --swap --loader <libphoenix.so> --out <file.apk> <patched.apk>`
+//! replaces the loader in an APK this patcher merged, such as the one installed
+//! on a phone (`adb shell pm path com.discord`), and signs it again, so a new
+//! loader installs over it without the splits it was made from.
 
 use std::{
    collections::BTreeMap,
@@ -19,14 +20,13 @@ use std::{
       File,
    },
    io::{
-      Read,
+      BufWriter,
       Write,
    },
    path::{
       Path,
       PathBuf,
    },
-   process::Command,
 };
 
 use misstep::{
@@ -35,284 +35,198 @@ use misstep::{
    bail,
    ensure,
 };
-use phoenix_sigs::{
-   PLUGIN_BUNDLE,
-   file::{
-      ElfFile,
-      Machine,
-   },
-};
-use zip::{
-   CompressionMethod,
-   ZipArchive,
-   ZipWriter,
-   write::SimpleFileOptions,
+use patcher::{
+   Apk,
+   Frida,
+   LOADER,
+   Library,
+   PackageName,
+   Payload,
+   Runtime,
 };
 
+const USAGE: &str = "usage: patcher --out <dir or file.apk> [--merge [--package <name>] [--label \
+                     <name>]] [--loader <libphoenix.so> [--lib [<name>=]<extra.so>]... [--plugin \
+                     <name.js>]...] [--frida <gadget.so[.gz]> --frida-bootstrap <bootstrap.js> \
+                     [--frida-script <x.js>]...] <split.apk>...\n       patcher --swap --loader \
+                     <libphoenix.so> --out <file.apk> <patched.apk>";
+
+#[derive(Default)]
 struct Args {
-   out:     PathBuf,
-   loader:  PathBuf,
-   extra:   Vec<PathBuf>,
-   plugins: Vec<PathBuf>,
-   apks:    Vec<PathBuf>,
+   out:       Option<PathBuf>,
+   merge:     bool,
+   swap:      bool,
+   package:   Option<String>,
+   label:     Option<String>,
+   loader:    Option<PathBuf>,
+   libraries: Vec<PathBuf>,
+   plugins:   Vec<PathBuf>,
+   gadget:    Option<PathBuf>,
+   bootstrap: Option<PathBuf>,
+   scripts:   Vec<PathBuf>,
+   apks:      Vec<PathBuf>,
 }
 
 impl Args {
    fn parse() -> misstep::Result<Self> {
-      const USAGE: &str =
-         "usage: patcher --out <dir> --loader <libphoenix.so> [--lib <extra.so>]... [--plugin <name.js>]... <split.apk>...";
-      let (mut out, mut loader) = (None, None);
-      let (mut extra, mut plugins, mut apks) = (Vec::new(), Vec::new(), Vec::new());
+      let mut parsed = Self::default();
       let mut args = env::args_os().skip(1);
       while let Some(arg) = args.next() {
          let mut value = || args.next().map(PathBuf::from).context(USAGE);
          match arg.to_str() {
-            Some("--out") => out = Some(value()?),
-            Some("--loader") => loader = Some(value()?),
-            Some("--lib") => extra.push(value()?),
-            Some("--plugin") => plugins.push(value()?),
+            Some("--out") => parsed.out = Some(value()?),
+            Some("--merge") => parsed.merge = true,
+            Some("--swap") => parsed.swap = true,
+            Some("--package") => parsed.package = Some(text(value()?)?),
+            Some("--label") => parsed.label = Some(text(value()?)?),
+            Some("--loader") => parsed.loader = Some(value()?),
+            Some("--lib") => parsed.libraries.push(value()?),
+            Some("--plugin") => parsed.plugins.push(value()?),
+            Some("--frida") => parsed.gadget = Some(value()?),
+            Some("--frida-bootstrap") => parsed.bootstrap = Some(value()?),
+            Some("--frida-script") => parsed.scripts.push(value()?),
             Some(flag) if flag.starts_with("--") => bail!("unknown flag {flag}\n{USAGE}"),
-            _ => apks.push(PathBuf::from(arg)),
+            _ => parsed.apks.push(PathBuf::from(arg)),
          }
       }
-      ensure!(!apks.is_empty(), "{USAGE}");
-      Ok(Self {
-         out: out.context(USAGE)?,
-         loader: loader.context(USAGE)?,
-         extra,
-         plugins,
-         apks,
-      })
+      ensure!(!parsed.apks.is_empty() && parsed.out.is_some(), "{USAGE}");
+      ensure!(
+         parsed.merge || (parsed.package.is_none() && parsed.label.is_none()),
+         "--package and --label need --merge"
+      );
+      ensure!(
+         !parsed.swap || (parsed.loader.is_some() && parsed.apks.len() == 1 && !parsed.merge),
+         "--swap takes --loader and one patched APK\n{USAGE}"
+      );
+      Ok(parsed)
+   }
+
+   fn payload(&self) -> misstep::Result<Payload> {
+      let runtime = self
+         .loader
+         .as_ref()
+         .map(|loader| -> misstep::Result<Runtime> {
+            let mut libraries = vec![Library::new(LOADER, read(loader)?)?];
+            for arg in &self.libraries {
+               let text = arg.to_str().context("--lib is not UTF-8")?;
+               let (name, path) = match text.split_once('=') {
+                  Some((name, path)) => (name.to_owned(), Path::new(path)),
+                  None => (file_name(arg)?, arg.as_path()),
+               };
+               libraries.push(Library::new(name, read(path)?)?);
+            }
+            let mut plugins = BTreeMap::new();
+            for path in &self.plugins {
+               let name = path
+                  .file_stem()
+                  .and_then(|stem| stem.to_str())
+                  .context("plugin path has no UTF-8 file name")?;
+               plugins.insert(name.to_owned(), read_text(path)?);
+            }
+            Ok(Runtime { libraries, plugins })
+         })
+         .transpose()?;
+
+      let frida = self
+         .gadget
+         .as_ref()
+         .map(|gadget| -> misstep::Result<Frida> {
+            let bootstrap = self
+               .bootstrap
+               .as_ref()
+               .context("--frida needs --frida-bootstrap")?;
+            let scripts = self
+               .scripts
+               .iter()
+               .map(|path| Ok((file_name(path)?, read_text(path)?)))
+               .collect::<misstep::Result<Vec<(String, String)>>>()?;
+            let script = patcher::frida::script(&scripts, &read_text(bootstrap)?);
+            Ok(Frida::new(read(gadget)?, script)?)
+         })
+         .transpose()?;
+      Ok(Payload { runtime, frida })
    }
 }
 
-/// A library added to the ABI split, under its name in the APK.
-struct Library {
-   name:    String,
-   machine: Machine,
-   bytes:   Vec<u8>,
+fn text(path: PathBuf) -> misstep::Result<String> {
+   path
+      .into_os_string()
+      .into_string()
+      .ok()
+      .context("argument is not UTF-8")
 }
 
-impl Library {
-   fn read(path: &Path, name: Option<&str>) -> misstep::Result<Self> {
-      let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-      let display = path.display().to_string();
-      let machine = ElfFile::parse(&display, &bytes)?.machine;
-      let name = match name {
-         Some(name) => name.to_owned(),
-         None => {
-            path
-               .file_name()
-               .and_then(|name| name.to_str())
-               .context("library path has no UTF-8 file name")?
-               .to_owned()
-         },
-      };
-      Ok(Self {
-         name,
-         machine,
-         bytes,
-      })
-   }
+fn file_name(path: &Path) -> misstep::Result<String> {
+   Ok(path
+      .file_name()
+      .and_then(|name| name.to_str())
+      .context("path has no UTF-8 file name")?
+      .to_owned())
 }
 
-#[derive(Default)]
-struct Progress {
-   dex:  bool,
-   host: Vec<Machine>,
+fn read(path: &Path) -> misstep::Result<Vec<u8>> {
+   Ok(fs::read(path).with_context(|| format!("reading {}", path.display()))?)
+}
+
+fn read_text(path: &Path) -> misstep::Result<String> {
+   Ok(fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)
 }
 
 fn main() -> misstep::Result<()> {
    misstep::install_panic_hook();
    let args = Args::parse()?;
-   let tools = BuildTools::find()?;
-   fs::create_dir_all(&args.out)?;
-
-   let mut libraries = vec![Library::read(&args.loader, Some(host::INJECTED))?];
-   for path in &args.extra {
-      libraries.push(Library::read(path, None)?);
+   let out = args.out.as_deref().context(USAGE)?;
+   if args.swap {
+      let loader = Library::new(LOADER, read(args.loader.as_deref().context(USAGE)?)?)?;
+      let apk = read(&args.apks[0])?;
+      save(out, &patcher::swap_loader(&apk, &loader)?)?;
+      println!("wrote {}", out.display());
+      return Ok(());
    }
-   let mut bundle = BTreeMap::new();
-   for path in &args.plugins {
-      let name = path
-         .file_stem()
-         .and_then(|stem| stem.to_str())
-         .context("plugin path has no UTF-8 file name")?;
-      let source = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-      bundle.insert(name.to_owned(), source);
-   }
-   let bundle = serde_json::to_vec(&bundle)?;
+   let prepared = args.payload()?.prepare()?;
+   let mut log = |line: &str| println!("{line}");
 
-   let mut progress = Progress::default();
-   for apk in &args.apks {
-      let name = apk.file_name().context("APK path has no file name")?;
-      let unsigned = args.out.join(name).with_extension("unsigned");
-      rewrite(apk, &unsigned, &libraries, &bundle, &mut progress)
-         .with_context(|| format!("rewriting {}", apk.display()))?;
-      tools.align_and_sign(&unsigned, &args.out.join(name))?;
-      println!("signed {}", name.display());
-   }
-   ensure!(
-      progress.dex && !progress.host.is_empty(),
-      "incomplete, launcher patched: {}, host patched for {:?}. Pass base.apk and the ABI split.",
-      progress.dex,
-      progress.host,
-   );
-   Ok(())
-}
-
-fn rewrite(
-   source: &Path,
-   destination: &Path,
-   libraries: &[Library],
-   bundle: &[u8],
-   progress: &mut Progress,
-) -> misstep::Result<()> {
-   let mut archive = ZipArchive::new(File::open(source)?)?;
-   let mut writer = ZipWriter::new(File::create(destination)?);
-   let mut abi_dirs = Vec::new();
-
-   for index in 0..archive.len() {
-      let (name, method) = {
-         let file = archive.by_index_raw(index)?;
-         (file.name()?.into_owned(), file.compression())
+   if args.merge {
+      let package = match &args.package {
+         Some(name) => name.parse::<PackageName>()?,
+         None => PackageName::default(),
       };
-      if is_v1_signature(&name) {
-         continue;
-      }
-      let is_dex = !progress.dex
-         && name
-            .strip_prefix("classes")
-            .is_some_and(|rest| rest.strip_suffix(".dex").is_some());
-      let host_dir = name
-         .strip_suffix(host::LIBRARY)
-         .filter(|dir| dir.starts_with("lib/"));
-      if !is_dex && host_dir.is_none() {
-         writer.raw_copy_file(archive.by_index_raw(index)?)?;
-         continue;
-      }
-
-      let mut data = Vec::new();
-      archive.by_index(index)?.read_to_end(&mut data)?;
-      if let Some(dir) = host_dir {
-         let patched = host::patch(&name, &mut data)?;
-         println!(
-            "{name}: access evaluator {:#x} returns true, liblog.so -> {}",
-            patched.access,
-            host::INJECTED
-         );
-         abi_dirs.push((dir.to_owned(), patched.machine));
-         progress.host.push(patched.machine);
-      } else if let Some(code) = dex::patch(&mut data)? {
-         println!("{name}: launcher at {code:#x} returns true");
-         progress.dex = true;
-      }
-      writer.start_file(
-         &name,
-         SimpleFileOptions::default().compression_method(method),
-      )?;
-      writer.write_all(&data)?;
-   }
-
-   // Stored, so the linker maps them straight out of the APK like the others.
-   let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
-   for (dir, machine) in &abi_dirs {
-      for library in libraries
+      let mut apks = args
+         .apks
          .iter()
-         .filter(|library| library.machine == *machine)
-      {
-         let name = format!("{dir}{}", library.name);
-         ensure!(
-            archive.index_for_name(&name).is_none(),
-            "{name} is already in the APK"
-         );
-         writer.start_file(&name, stored)?;
-         writer.write_all(&library.bytes)?;
-         println!("added {name}");
-      }
-      let name = format!("{dir}{PLUGIN_BUNDLE}");
-      writer.start_file(&name, stored)?;
-      writer.write_all(bundle)?;
-      println!("added {name}");
+         .map(|path| read(path))
+         .collect::<misstep::Result<Vec<Vec<u8>>>>()?;
+      let apk = patcher::merge(
+         &mut apks,
+         &prepared,
+         &package,
+         args.label.as_deref(),
+         &mut log,
+      )?;
+      save(out, &apk)?;
+      println!("wrote {}", out.display());
+      return Ok(());
    }
-   writer.finish()?;
+
+   let mut apks = args
+      .apks
+      .iter()
+      .map(|path| Ok((file_name(path)?, read(path)?)))
+      .collect::<misstep::Result<Vec<(String, Vec<u8>)>>>()?;
+   let signed = patcher::splits(&mut apks, &prepared, &mut log)?;
+   fs::create_dir_all(out)?;
+   for (name, apk) in signed {
+      save(&out.join(name), &apk)?;
+   }
    Ok(())
 }
 
-/// JAR signature files, which apksigner would otherwise keep beside a stale
-/// manifest digest.
-fn is_v1_signature(name: &str) -> bool {
-   let Some(file) = name.strip_prefix("META-INF/") else {
-      return false;
-   };
-   !file.contains('/')
-      && (file == "MANIFEST.MF"
-         || [".SF", ".RSA", ".DSA", ".EC"]
-            .iter()
-            .any(|suffix| file.ends_with(suffix)))
-}
-
-struct BuildTools {
-   dir:  PathBuf,
-   keys: PathBuf,
-}
-
-impl BuildTools {
-   fn find() -> misstep::Result<Self> {
-      let sdk = env::var_os("ANDROID_SDK_ROOT")
-         .context("ANDROID_SDK_ROOT is unset, enter the devshell with `nix develop`")?;
-      let mut versions = fs::read_dir(Path::new(&sdk).join("build-tools"))?
-         .map(|entry| entry.map(|entry| entry.path()))
-         .collect::<Result<Vec<PathBuf>, _>>()?;
-      versions.sort();
-
-      Ok(Self {
-         dir:  versions.pop().context("no Android build-tools installed")?,
-         keys: Path::new(env!("CARGO_MANIFEST_DIR")).join("keys"),
-      })
+fn save(path: &Path, apk: &Apk<'_>) -> misstep::Result<()> {
+   let mut file =
+      BufWriter::new(File::create(path).with_context(|| format!("writing {}", path.display()))?);
+   for part in apk.parts() {
+      file.write_all(part)?;
    }
-
-   /// Signs with phoenix's key and the proof of rotation from the key earlier
-   /// builds used (see `keys/README.md`), so either kind of install updates in
-   /// place. v3 only: v1 and v2 would need the old private key, so Android 9+.
-   fn align_and_sign(&self, unsigned: &Path, signed: &Path) -> misstep::Result<()> {
-      let aligned = unsigned.with_extension("aligned");
-      // -P 16 page-aligns stored libraries for 16 KiB page kernels.
-      self.run(
-         Command::new(self.dir.join("zipalign"))
-            .args(["-P", "16", "-f", "4"])
-            .arg(unsigned)
-            .arg(&aligned),
-      )?;
-      let apksigner = if cfg!(windows) { "apksigner.bat" } else { "apksigner" };
-      let key = |name: &str| self.keys.join(name);
-      self.run(
-         Command::new(self.dir.join(apksigner))
-            .args(["sign", "--v1-signing-enabled", "false", "--v2-signing-enabled", "false", "--key"])
-            .arg(key("phoenix.pk8"))
-            .arg("--cert")
-            .arg(key("phoenix.der"))
-            .arg("--lineage")
-            .arg(key("lineage"))
-            .args(["--rotation-min-sdk-version", "28", "--out"])
-            .arg(signed)
-            .arg(&aligned),
-      )?;
-      fs::remove_file(unsigned)?;
-      fs::remove_file(aligned)?;
-      Ok(())
-   }
-
-   #[expect(clippy::unused_self, reason = "keeps the tool invocations together")]
-   fn run(&self, command: &mut Command) -> misstep::Result<()> {
-      let status = command
-         .status()
-         .with_context(|| format!("running {}", command.get_program().display()))?;
-      ensure!(
-         status.success(),
-         "{} failed with {status}",
-         command.get_program().display()
-      );
-      Ok(())
-   }
+   file.flush()?;
+   Ok(())
 }

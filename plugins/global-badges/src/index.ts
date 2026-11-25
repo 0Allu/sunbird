@@ -1,19 +1,19 @@
-// @description Badges from other client mods, shown on profiles and in the badge directory
-// @version 0.5.3
+// @description Shows user badges from other Discord client mods on profiles
+// @version 0.5.5
 // @author iFlex0x, wolfieeeeeeee
-// @warning Downloads the public badge directory from Equibadges (badges.equicord.org)
+// @warning Fetches badges from Equibadges (badges.equicord.org)
 
 const API = "https://badges.equicord.org/users";
-const TTL = 60 * 60 * 1000;
+const TTL = 6 * 60 * 60 * 1000;
 const RETRY_DELAY = 30 * 1000;
 const BADGE_ID_BASE = 900_000;
 
-type Badge = { uri: string; name: string; source: string; rarity: number };
+type Badge = { uri: string; name: string; source: string };
 
 const settings = phoenix.settings.define({
   showCustom: {
     type: "switch",
-    title: "Custom badges",
+    title: "Badge source",
     description: "Show where community badges came from in Badge Directory",
     default: true,
   },
@@ -23,37 +23,28 @@ const settings = phoenix.settings.define({
     description: "Show the mod name before each badge",
     default: true,
   },
+  badgeVault: {
+    type: "switch",
+    title: "BadgeVault badges",
+    description: "Show BadgeVault badges, which any user can make",
+    default: false,
+  },
 });
 
 let users: Record<string, unknown> = {};
+let loaded = false;
 let refreshAt = 0;
-let pending: Promise<void> | undefined;
+let refreshing: Promise<void> | undefined;
 
 const providerNames = new Map(Object.entries({
   aliucord: "Aliucord", equicord: "Equicord",
   nekocord: "Nekocord", raincord: "Raincord", replugged: "Replugged",
   reviewdb: "ReviewDB", vencord: "Vencord", enmity: "Enmity",
   velocity: "Velocity", aero: "Aero",
+  goosemod: "GooseMod", vendroidenhanced: "Vendroid Enhanced", paicord: "Paicord",
+  revenge: "Revenge", betterdiscord: "BetterDiscord", record: "ReCord",
+  bunny: "Bunny",
 }));
-let selfId: string | null = null;
-
-if (phoenix.gateway.ready) {
-  phoenix.on(phoenix.gateway.ready as Phoenix.Sig<{ user?: { id?: string } }>, (payload) => {
-    if (payload?.user?.id) selfId = payload.user.id;
-  });
-}
-
-async function resolveSelfId(): Promise<string | null> {
-  if (selfId) return selfId;
-  try {
-    const res = await phoenix.discord.get("/users/@me");
-    if (res.ok) {
-      const me = res.json<{ id?: string }>();
-      if (me?.id) selfId = me.id;
-    }
-  } catch {}
-  return selfId;
-}
 
 function toHex(text: string): string {
   let out = "";
@@ -81,7 +72,7 @@ function badgeUrl(uri: string, animated = false): string {
 async function userIdFromPath(path: string): Promise<string | null> {
   const m = path.match(/^\/users\/(@me|\d+)\/(?:profile|badges)(?:[?#]|$)/);
   if (!m) return null;
-  return m[1] === "@me" ? resolveSelfId() : m[1];
+  return m[1] === "@me" ? ((await phoenix.discord.me())?.id ?? null) : m[1];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -97,37 +88,48 @@ function parseBadges(entries: unknown): Badge[] {
     if (!isRecord(entry) || typeof entry.mod !== "string" ||
       typeof entry.badge !== "string" || typeof entry.tooltip !== "string") continue;
     const mod = entry.mod.trim().toLowerCase();
-    if (!mod || mod === "discord" || mod === "badgevault") continue;
+    if (!mod || mod === "discord" || (mod === "badgevault" && !settings.badgeVault)) continue;
     const source = providerNames.get(mod) ?? entry.mod.trim();
     const uri = entry.badge.trim();
     const name = entry.tooltip.trim();
     if (!name || !/^https?:\/\/[^/\s]+/i.test(uri) || seen.has(uri)) continue;
     seen.add(uri);
-    const rarity = typeof entry.rarity === "number" && Number.isInteger(entry.rarity)
-      && entry.rarity >= 1 && entry.rarity <= 5 ? entry.rarity : 5;
-    badges.push({ uri, name, source, rarity });
+    badges.push({ uri, name, source });
   }
   return badges;
 }
 
 async function refreshUsers(): Promise<void> {
-  const res = await phoenix.fetch(API);
-  if (!res.ok) throw new Error(`Equibadges HTTP ${res.status}`);
-  const body = res.json<unknown>();
-  if (!isRecord(body) || !isRecord(body.users)) throw new Error("Invalid Equibadges response");
-  users = body.users;
-  refreshAt = Date.now() + TTL;
+  if (!refreshing) {
+    refreshing = (async () => {
+      const res = await phoenix.fetch(API);
+      if (!res.ok) throw new Error(`Equibadges HTTP ${res.status}`);
+      const body = res.json<unknown>();
+      if (!isRecord(body) || !isRecord(body.users)) throw new Error("Invalid Equibadges response");
+      if (!Object.keys(body.users).length) throw new Error("Empty Equibadges response");
+      users = body.users;
+      loaded = true;
+      refreshAt = Date.now() + TTL;
+    })()
+      .catch(() => { refreshAt = Date.now() + RETRY_DELAY; })
+      .finally(() => { refreshing = undefined; });
+  }
+  return refreshing;
 }
 
 async function badgesFor(userId: string): Promise<Badge[]> {
   if (Date.now() >= refreshAt) {
-    pending ??= refreshUsers()
-      .catch(() => { refreshAt = Date.now() + RETRY_DELAY; })
-      .finally(() => { pending = undefined; });
-    await pending;
+    const refresh = refreshUsers();
+    // Serve the old map while a refresh runs: only the first load may wait,
+    // so a profile hook stays under the loader's 4 second cutoff.
+    if (!loaded) await refresh;
   }
   return parseBadges(users[userId]);
 }
+
+// Warm the map at plugin load so the first profile does not pay for the 1.9 MB
+// download. A failure leaves `loaded` false and retries after RETRY_DELAY.
+void refreshUsers();
 
 function badgeLabel({ source, name }: Badge): string {
   return settings.showPrefix && !name.toLowerCase().startsWith(source.toLowerCase() + " ")
@@ -173,7 +175,7 @@ phoenix.discord.onResponse(
       name: badgeLabel(b),
       description: settings.showCustom ? `Badge from ${b.source}.` : "",
       ...(settings.showCustom ? { info_label: b.source } : {}),
-      rarity: b.rarity,
+      rarity: 5,
       simple_icon_url: badgeUrl(b.uri),
       simple_icon_raster_url: badgeUrl(b.uri),
       complex_icon_static_url: badgeUrl(b.uri),

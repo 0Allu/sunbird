@@ -376,7 +376,7 @@ impl HostCall {
          module,
          method,
          args,
-         body,
+         body: body.to_vec(),
       })
    }
 
@@ -398,7 +398,7 @@ impl HostCall {
 
 /// The module, method, args and body of a host frame of `kind`. An empty args
 /// record reads as [`Value::Null`].
-fn host_frame(frame: &[u8], kind: u8) -> Result<(u16, u16, Value, Vec<u8>), DecodeError> {
+fn host_frame(frame: &[u8], kind: u8) -> Result<(u16, u16, Value, &[u8]), DecodeError> {
    let mut reader = Reader::new(frame);
    let found = reader.u8()?;
    if found != kind {
@@ -418,20 +418,20 @@ fn host_frame(frame: &[u8], kind: u8) -> Result<(u16, u16, Value, Vec<u8>), Deco
    } else {
       Reader::new(record).value()?
    };
-   Ok((module, method, args, frame[reader.pos..].to_vec()))
+   Ok((module, method, args, &frame[reader.pos..]))
 }
 
 /// One frame of a dispatch call. `offset` and `len` are its byte range in the
 /// input.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Dispatch {
+pub struct Dispatch<'a> {
    pub offset: usize,
    pub len:    usize,
-   pub event:  DispatchEvent,
+   pub event:  DispatchEvent<'a>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum DispatchEvent {
+pub enum DispatchEvent<'a> {
    View {
       node:    i32,
       event:   Key,
@@ -441,7 +441,7 @@ pub enum DispatchEvent {
    Host {
       event: u16,
       args:  Value,
-      body:  Vec<u8>,
+      body:  &'a [u8],
    },
    Other,
 }
@@ -458,18 +458,18 @@ fn u32_at(bytes: &[u8], pos: usize) -> Option<usize> {
 /// `00 00 00 00 01 01 i32 node u16 event` and an optional tagged payload. A
 /// host event frame is laid out like a [`HostCall`] with kind 3 and the event
 /// in the method field.
-pub fn decode_dispatch(bytes: &[u8]) -> Result<Vec<Dispatch>, DecodeError> {
+pub fn decode_dispatch(bytes: &[u8]) -> Result<Vec<Dispatch<'_>>, DecodeError> {
    let mut out = Vec::new();
    walk(bytes, 0, bytes.len(), 0, &mut out)?;
    Ok(out)
 }
 
-fn walk(
-   bytes: &[u8],
+fn walk<'a>(
+   bytes: &'a [u8],
    offset: usize,
    len: usize,
    depth: usize,
-   out: &mut Vec<Dispatch>,
+   out: &mut Vec<Dispatch<'a>>,
 ) -> Result<(), DecodeError> {
    if depth > MAX_DEPTH {
       return Err(DecodeError::TooDeep { at: offset });

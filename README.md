@@ -1,5 +1,7 @@
 # Phoenix Unlock
 
+[![discord][discord]](https://discord.gg/jEmw3bC2m7)
+
 Patches Phoenix, the native Rust client in Discord's Android alpha builds (356.7, versionCode
 356207), so it opens without the access gate. It also adds a plugin runtime: TypeScript plugins
 that hook gateway events, add buttons, rows and slash commands to Discord's own UI, and get their
@@ -31,7 +33,8 @@ settings, install more from a URL or a file, edit their code and use the JS cons
   (`crates/loader`). It starts the runtime as soon as Phoenix's library loads.
 - **Hooks**: gateway events are hooked by swapping handler pointers in Phoenix's event registry,
   which is found from the event names. The UI is driven through Phoenix's own UI-op bridge
-  between Rust and Java. ShadowHook (arm64) and bytehook are linked in for native hooks.
+  between Rust and Java. ShadowHook, through the [sunhook](https://github.com/sunbird-tools/sunhook)
+  fork, is linked in for native hooks on arm64 and armv7.
 - **Signing**: every build is signed with the key in `crates/patcher/keys/`, using APK Signature
   Scheme v3 with a proof of rotation from the key older builds used. The key is public; it only
   lets builds update each other.
@@ -64,21 +67,25 @@ Leading `// @` lines describe the plugin. Besides gateway hooks there are `setti
 `commands`, `messages` (local-only messages, send interceptors), `stores` (Phoenix's cache),
 `fetch` and Discord API helpers.
 
-The bundled plugins live in `plugins/*/src/index.ts`. The site builds them with esbuild when it
-deploys (`web/tools/bundle-plugins.mjs`).
+The bundled plugins live in `plugins/*/src/index.ts`. CI bundles them with esbuild
+(`web/tools/bundle-plugins.ts`) and publishes them to https://assets.sunbird.tools/.
 
 ## Repository
 
 | Path | What |
 |---|---|
 | `crates/loader` | The injected library (`libplm.so`). |
-| `crates/runtime` | The QuickJS plugin runtime, the `phoenix` API and the Settings → Phoenix Unlocker pages. |
-| `crates/hook`, `crates/sigs`, `crates/sigscan` | Native hooks, hook-point rules, the per-build table. |
-| `crates/ui`, `crates/wire` | Codecs for Phoenix's UI ops and bridge frames. |
+| `crates/runtime` | The QuickJS plugin runtime and the `phoenix` API, shared by every platform. |
+| `crates/runtime-mobile` | The runtime's Android and iOS side: Phoenix's UI-op bridge, the Settings → Phoenix Unlocker pages and the UI patches. |
+| `crates/runtime-desktop` | The runtime's Desktop Phoenix side. |
+| `crates/hook`, `crates/sigs`, `crates/sigscan` | Native hooks, the gateway registry walk, a registry dump CLI. |
+| `crates/ui-mobile`, `crates/wire` | Mobile (Android/iOS) UI-op and bridge frame codecs. |
+| `crates/ui-desktop` | Desktop UI host primitives (clipboard, URLs, notifications, GPUI hooks). |
 | `crates/patcher` | The command-line patcher. |
+| `crates/patcher-web` | The same patcher built to wasm for the site. |
 | `crates/stand-in*` | A fake Phoenix gateway library for testing hooks without Discord. |
 | `plugins/` | The bundled plugins. |
-| `web/` | The browser patcher, a JS port of `crates/patcher` that gives byte-identical results. `web/tools/node-build.mjs` runs it from the command line. |
+| `web/` | What CI deploys to assets.sunbird.tools: the patcher wasm, loader libraries and plugin bundles. |
 | `frida/` | The Frida gadget bootstrap. |
 
 ## Building
@@ -90,11 +97,11 @@ nix develop
 nu scripts/phoenix.nu base.apk config.arm64_v8a.apk config.xxhdpi.apk config.en.apk
 ```
 
+Pass `config.armeabi_v7a.apk` in place of the arm64 split for a 32-bit phone.
 This builds the loader and the patcher, bundles the plugins, patches the splits and installs them
 with adb. [AGENTS.md](AGENTS.md) covers building on Windows, the web patcher and testing.
 
-The site's downloads go through `web/worker/proxy.js`, a Cloudflare Worker that adds CORS headers
-to the APK tracker. Run the site locally with `node web/tools/dev-server.mjs <dir with the splits>`.
+The page itself lives in [sunbird-tools/site](https://github.com/sunbird-tools/site).
 
 ## Contributors
 
@@ -102,3 +109,5 @@ to the APK tracker. Run the site locally with `node web/tools/dev-server.mjs <di
 - [Amaan Qureshi](https://github.com/amaanq)
 
 Not affiliated with Discord.
+
+[discord]: https://img.shields.io/discord/917308687423533086?logo=discord&label=discord

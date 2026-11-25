@@ -106,10 +106,8 @@ impl<L: Log> Log for Tee<L> {
          }
          lines.push_back(line);
       }
-      // A warning from refreshing the page would refresh it again, forever.
-      #[cfg(target_os = "android")]
-      if !record.target().starts_with("phoenix_runtime::settings") {
-         crate::settings::log_changed();
+      if let Some(platform) = crate::platform() {
+         platform.logged(record.target());
       }
    }
 
@@ -119,9 +117,9 @@ impl<L: Log> Log for Tee<L> {
 }
 
 /// The local time of day.
-#[cfg_attr(not(target_os = "android"), allow(clippy::missing_const_for_fn))]
+#[cfg_attr(not(any(unix, windows)), allow(clippy::missing_const_for_fn))]
 fn clock() -> String {
-   #[cfg(target_os = "android")]
+   #[cfg(unix)]
    {
       // SAFETY: `time` accepts null, and `localtime_r` only writes `tm`.
       let tm = unsafe {
@@ -132,7 +130,40 @@ fn clock() -> String {
       };
       format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
    }
-   #[cfg(not(target_os = "android"))]
+   #[cfg(windows)]
+   {
+      #[repr(C)]
+      struct SystemTime {
+         year:         u16,
+         month:        u16,
+         day_of_week:  u16,
+         day:          u16,
+         hour:         u16,
+         minute:       u16,
+         second:       u16,
+         milliseconds: u16,
+      }
+
+      #[link(name = "kernel32")]
+      unsafe extern "system" {
+         fn GetLocalTime(out: *mut SystemTime);
+      }
+
+      let mut st = SystemTime {
+         year:         0,
+         month:        0,
+         day_of_week:  0,
+         day:          0,
+         hour:         0,
+         minute:       0,
+         second:       0,
+         milliseconds: 0,
+      };
+      // SAFETY: `GetLocalTime` fills the `SYSTEMTIME` struct.
+      unsafe { GetLocalTime(&raw mut st) };
+      format!("{:02}:{:02}:{:02}", st.hour, st.minute, st.second)
+   }
+   #[cfg(not(any(unix, windows)))]
    String::new()
 }
 

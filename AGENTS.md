@@ -19,8 +19,8 @@ Read this file before changing code. Every fact here cost someone hours to learn
 - Real accounts. Never send account-mutating requests (friend adds, settings PATCHes, guild
   joins) to test something. Test `phoenix.discord` writes against paths that return 404.
   Never inject fake messages into real channels.
-- Signing. Every APK, from `crates/patcher`, the site or `node-build.mjs`, is signed with
-  `crates/patcher/keys/` (the site carries the same key in `web/signing-key.json`). v3 only, with
+- Signing. Every APK, from the patcher CLI, the site or the in-app updater, is signed with
+  `crates/patcher/keys/`, which the runtime links through the patcher crate. v3 only, with
   the rotation proof from the old Valenced test key, so builds install over each other and keep
   the login. Never add the old private key. Read `keys/README.md` before touching signing.
 - Plugin API lives in Rust. UI ops, patch targets, settings pages, stores and HTTP live in the
@@ -29,8 +29,8 @@ Read this file before changing code. Every fact here cost someone hours to learn
 - Typed boundaries. Plugins get opaque handles (`phoenix.gateway.messageCreate`), not strings
   like `"MESSAGE_CREATE"`. Read lists of events, props and handlers live from the binary. Never
   add a hand-maintained list file.
-- No committed build output. `picker.dex` is built by `crates/runtime/build.rs`,
-  `web/plugins/lib*.so` by `scripts/loader.nu`, plugin bundles by `web/tools/bundle-plugins.mjs`.
+- No committed build output. `web/plugins/lib*.so` and `web/pkg/` are built by
+  `scripts/site.nu`, plugin bundles by `web/tools/bundle-plugins.ts`.
   The Frida gadgets in `web/plugins/frida-*` are the one exception, kept for x86 WSA debugging.
 - Test on a device before pushing. A clean build proves nothing about the bridge.
 
@@ -39,40 +39,46 @@ Read this file before changing code. Every fact here cost someone hours to learn
 | Path | What |
 |---|---|
 | `crates/loader` | `libphoenix.so`, injected into the APK as `libplm.so`. Its constructor starts the runtime. |
-| `crates/runtime` | QuickJS plugin runtime and the `phoenix` API. `phoenix.d.ts` is the plugin API reference. |
+| `crates/runtime` | QuickJS plugin runtime and the `phoenix` API every platform shares. `phoenix.d.ts` is the plugin API reference. `platform.rs` is the `Platform` trait the platform crates implement. |
 | `crates/runtime/src/gateway.rs` | Gateway event hooks by swapping handler pointers in Phoenix's event registry. |
-| `crates/runtime/src/bridge.rs` | JNI table patch on `GuestHost.invoke`/`applyOps` and the `nativeDispatch` rebind. Sinks return `Action::{Pass, Drop, Replace}`. |
-| `crates/runtime/src/settings/` | The Phoenix Unlock settings pages, built from UI ops. |
-| `crates/runtime/src/patches/` | UI patch targets, slash commands, profile tabs, emoji picker. |
-| `crates/runtime/src/discord.rs` | `phoenix.discord`, Discord's API through Phoenix's own `Networking` module and session. |
-| `crates/runtime/src/picker.rs`, `java/phx/` | File picker, link opening and the APK self-updater (`Updater.java`) through a small in-memory dex. |
-| `crates/runtime/src/update.rs` | Update checks against the site, one-tap plugin updates and the APK self-update. |
-| `crates/runtime/src/remote.rs` | The debug shell on `127.0.0.1:4242`, off by default, switched on in Settings, Phoenix Unlocker, Debug. |
-| `crates/ui` | Typed codec for Phoenix's UI-op batches. `src/props.in` is Phoenix's prop table, `templates.json` holds captured layouts, `motion.rs` drives native springs, `mirror.rs` keeps a live copy of the view tree that host tests can drive. |
+| `crates/runtime/src/discord.rs` | `phoenix.discord`, Discord's API with Phoenix's own session. The platforms carry the requests. |
+| `crates/runtime/src/update.rs` | Update checks against the site and one-tap plugin updates. |
+| `crates/runtime/src/remote.rs` | The debug shell on `127.0.0.1:4242`, off by default on Android, switched on in Settings, Phoenix Unlocker, Debug. The platforms add their own endpoints. |
+| `crates/runtime-mobile` | phoenix on Phoenix's Android and iOS clients, started by the loader there. iOS has no installer or staff hook, and uses Foundation HTTP and a bundled SQLite. |
+| `crates/runtime-mobile/src/bridge/` | The sinks every guest/host frame passes, returning `Action::{Pass, Drop, Replace}`. `jni.rs` patches the JNI table on `GuestHost.invoke`/`applyOps` and rebinds `nativeDispatch`. `ios.rs` swaps the dispatch slot in the guest's vtable and the call slot in the host callbacks' vtable. |
+| `crates/runtime-mobile/src/settings/` | The Phoenix Unlock settings pages, built from UI ops. |
+| `crates/runtime-mobile/src/patches/` | UI patch targets, slash commands, profile tabs, emoji picker. |
+| `crates/runtime-mobile/src/discord.rs` | Plugin requests to Discord through Phoenix's own `Networking` module. |
+| `crates/runtime-mobile/src/host.rs` | Phoenix's host call, event and field numbers, read at startup from the name table in the installed APK's dex, or the host's Swift name table on iOS. `host::send` and `host::ask` call host modules. |
+| `crates/runtime-mobile/src/picker.rs` | File picker, toasts, clipboard and links through Phoenix's host modules. |
+| `crates/runtime-mobile/src/install.rs`, `loader.rs` | The APK self-update, and Android's installer opened on it through Discord's `FileProvider`. |
+| `crates/runtime-desktop` | phoenix on Desktop Phoenix (`Discord.exe`): the access gate, the HTTP transport hooks, the Sunbird pages in User Settings, message accessories and the tray. |
+| `crates/ui-mobile` | Typed codec for mobile (Android/iOS) Phoenix UI-op batches. `src/props.in` is Phoenix's prop table, `templates.json` holds captured layouts, `motion.rs` drives native springs, `mirror.rs` keeps a live copy of the view tree that host tests can drive. |
+| `crates/ui-desktop` | Desktop UI host primitives (clipboard, URLs, notifications, GPUI surface hooks). |
 | `crates/wire` | Tagged values and bridge frames (`HostCall`, `DispatchEvent`). |
-| `crates/hook` | Image scanner, `swap_words`, ShadowHook and bytehook (linked, unused). |
-| `crates/sigs`, `crates/sigscan` | Hook-point rules and a CLI that evaluates them against a library. |
-| `crates/patcher` | Patches the split APKs and signs them. |
+| `crates/hook` | Image scanner, `swap_words`, ShadowHook through `sunhook-sys` on Android ARM. |
+| `crates/sigs`, `crates/sigscan` | The gateway registry walk and handler ABI, and every other locator the runtime patches from (`desktop.rs`, `mobile.rs`). `sigscan` dumps a library's registry, runs `check` (every locator for that platform, exit 1 on a miss) and looks up strings, references and disassembly in `Discord.exe`. |
+| `crates/patcher` | Patches the split APKs and signs them, as a library with a CLI. One APK merged from the splits or each split signed on its own. |
+| `crates/patcher-web` | `crates/patcher` as wasm for the site. |
 | `crates/stand-in*` | A fake gateway library and a demo, to test hooks without Discord. |
-| `plugins/*/src/index.ts` | Bundled plugins. Leading `// @` lines are the bundle banner and metadata, and `// @warning` shows a warning on the site. |
+| `plugins/*/src/index.ts` | Bundled plugins. Leading `// @` lines are the bundle banner and metadata, `// @warning` shows a warning on the site, and `// @unlisted` keeps a plugin out of the site and its updates. |
 | `docs/phoenix-356207.*` | Phoenix's schema pulled from the APK by `scripts/extract-schema.py`: 29 view kinds, 855 props, 79 host modules with 433 methods, 109 events, 286 `ic_mana_*` icons and the accessibility ids. Read it before decompiling. |
-| `web/` | Browser patcher (GitHub Pages). A JS port of `crates/patcher` whose output must match it byte for byte, signature aside. |
+| `web/` | What CI deploys to assets.sunbird.tools, with a `site.tar.gz` of it that sunbird-tools/site builds from: patcher wasm, loader libraries, plugin bundles, `version.json`. Builds before 76bc0d7 fetch the last three from sunbird.tools, so the site keeps serving them at the same paths. |
 | `frida/` | Optional Frida gadget bootstrap, for debugging on x86. |
-| `scripts/*.nu` | `phoenix.nu` builds, patches and installs on a phone. `loader.nu` builds the site's native libs. |
+| `scripts/*.nu` | `phoenix.nu` builds, patches and installs on a phone. `site.nu` builds the site's native libs and wasm. |
 | `scripts/dev.ps1` | The Windows dev loop, described below. |
 
 ## Building
 
 - Linux. `nix develop`, then
-  `nu scripts/phoenix.nu base.apk config.arm64_v8a.apk config.<dpi>.apk config.<lang>.apk`.
-  The devshell pins ShadowHook and bytehook through `flake.lock` and provides the SDK, NDK and JDK.
+  `nu scripts/phoenix.nu base.apk config.<abi>.apk config.<dpi>.apk config.<lang>.apk`, where the
+  ABI split is `config.arm64_v8a` or `config.armeabi_v7a` and picks the loader's target.
+  The devshell provides the SDK, NDK and JDK.
   `phoenix.nu` ends in a blocking `adb logcat` tail, so run it in the background from a tool.
 - Windows, without Nix.
   - Rust `stable-x86_64-pc-windows-gnu` with the `aarch64-linux-android` target, `cargo-ndk`, an
     NDK, a JDK and an Android SDK with a platform and build-tools in `ANDROID_SDK_ROOT`.
-  - Fetch bytedance `android-inline-hook` and `bhook` at the `flake.lock` revisions. Point
-    `SHADOWHOOK_SRC` at `.../shadowhook/src/main/cpp` and `BYTEHOOK_SRC` at
-    `.../bytehook/src/main/cpp`.
+  - Cargo fetches ShadowHook as `sunhook-sys`.
   - Set `LIBCLANG_PATH` to an LLVM `bin` holding `libclang.dll`, and set
     `BINDGEN_EXTRA_CLANG_ARGS_aarch64-linux-android="--target=aarch64-linux-android28 --sysroot=<ndk>/toolchains/llvm/prebuilt/windows-x86_64/sysroot -isystem <ndk>/.../lib/clang/<ver>/include"`
     with `env`, since the name has hyphens.
@@ -80,16 +86,18 @@ Read this file before changing code. Every fact here cost someone hours to learn
     a directory with only `dlltool.exe` (from the toolchain's `self-contained`) and `as.exe` with
     its DLLs on `PATH`.
   - `cargo +stable-x86_64-pc-windows-gnu ndk -t arm64-v8a -P 28 --link-builtins build --release -p phoenix-loader`,
-    then `cargo build --release -p patcher`. The patcher calls `apksigner.bat` on Windows.
-- Site. `nu scripts/loader.nu web/plugins`, `node web/tools/bundle-plugins.mjs` (set `ESBUILD`
-  if esbuild is not on `PATH`), then `node web/tools/dev-server.mjs <dir with the splits> [port]`.
-  CI does the same on pushes to `main`.
+    then `cargo build --release -p patcher`.
+- iOS. `.github/workflows/ios.yml` builds `libphoenix.dylib` for `aarch64-apple-ios` on macOS,
+  since the SDK ships only with Xcode.
+- Site. `nu scripts/site.nu web` and `node web/tools/bundle-plugins.ts` (set `ESBUILD`
+  if esbuild is not on `PATH`), then `nu scripts/fetch.nu <this checkout>` in sunbird-tools/site.
+  CI deploys the same files to assets.sunbird.tools on pushes to `main`, and the site picks them up within 10 minutes.
 
 ## Fast loop
 
 1. Look up Phoenix internals in `docs/phoenix-356207.md` or `.json` first. After a Discord update,
    regenerate them with `python scripts/extract-schema.py <dir with the splits>`.
-2. `.\scripts\dev.ps1 -Test` runs `cargo test -p phoenix-ui -p phoenix-wire` on the host in
+2. `.\scripts\dev.ps1 -Test` runs `cargo test -p phoenix-ui-mobile -p phoenix-ui-desktop -p phoenix-wire` on the host in
    under a second.
 3. Turn on the debug shell once on the phone. `dev.ps1` forwards port 4242. Then:
    - `-HotReload <plugin>` reloads a plugin in about 200 ms without rebuilding the APK.
@@ -102,6 +110,21 @@ Read this file before changing code. Every fact here cost someone hours to learn
 4. `.\scripts\dev.ps1` builds with the `dev-fast` profile (about 15 s incremental), patches,
    installs and launches. `-SkipBuild` only rebundles plugins and repatches. `-Release` makes a
    release build.
+5. Desktop Phoenix. `.\scripts\dev.ps1 -Desktop` builds the DLL, copies the plugins and restarts
+   Discord through the injector. Every debug-shell switch above takes `-Desktop` and skips adb.
+   Desktop has no UI-op stream, so `-Ops` and `-Tree` stay Android-only. Reverse it with:
+   - `.\scripts\dev.ps1 -Sigscan check|strings|refs|dis ...` on the `Discord.exe` file. A panic
+     message or event name usually leads to the function that uses it.
+   - `phoenix.native` in `-Eval` (the console only, never plugins): `strings`, `refs`, `fn`, `dis`,
+     `scan`, `read`, `readU64`, `readStr`, and `hook(addr, limit)` / `unhook(id)` / `hooks()`.
+     A hook logs each call's `rcx rdx r8 r9`, the bytes behind them and the caller to `-Events`.
+     Addresses print as RVAs like `+0x7711630`, the same `sigscan` prints.
+   - `-Events` also shows every gateway event by name and size and Discord's API requests by path.
+6. Keep agent/subagent turns fast:
+   - Iterate with `dev-fast` (`.\scripts\dev.ps1 -Desktop`, no `-Release`). Only run `-Release` once at the end before committing or shipping.
+   - Batch reads, edits, and shell commands (`test && build && launch` in one command); avoid one-off `grep`/`sed`/`fmt` turns.
+   - Use compiled `sigscan.exe` (`check`, `strings`, `refs`, `dis`) or `phoenix.native` for binary lookups — never scan the 515 MB `Discord.exe` `.text` section with Python loops/regexes.
+   - Reserve high-effort subagents for hard reverse-engineering only; use `medium` effort / `fastMode` for routine edits and debugging, and pass exact file paths + build env in the brief.
 
 The debug shell answers anyone on the phone's loopback, and `/eval` runs JS with the Discord
 session. Leave it off outside development.
@@ -110,11 +133,14 @@ session. Leave it off outside development.
 
 - Rust is edition 2024, three-space indent, width 100, pinned in `.rustfmt.toml`. Run
   `rustfmt --edition 2024 <files you touched>`. Never run `cargo fmt`, it reformats the whole tree.
-- Clippy must stay clean on the host and on `aarch64-linux-android`. Never widen the workspace
-  lint list. Scope an `#[expect(lint, reason = "...")]` to the one function that needs it.
+- Clippy must stay clean on the host, `aarch64-linux-android` and `armv7-linux-androideabi`.
+  Never widen the workspace lint list. Scope an `#[expect(lint, reason = "...")]` to the one function that needs it.
 - Errors use `flub` in libraries and `misstep` in binaries. Untrusted input, including anything
   read from Phoenix, returns an error and never panics. A panic inside Discord's process kills the
   app.
+- Code that finds something in Discord's binaries lives in `crates/sigs` and returns `Found`, so
+  `sigscan check` and the `check` workflow cover it on every new build. Never fall back to an
+  offset seen on one build: when it does not decode, leave that feature off.
 - Return named enums over nested `Option`s. Use serde structs over raw `serde_json::Value`.
 - Comments say why, and only when the reason is not in the code: a host quirk, a measured number,
   a version. No comments that restate the code or narrate history.
@@ -135,8 +161,6 @@ session. Leave it off outside development.
 - Owners deploy to the same phone while you work. When expected logs vanish, check the pid and the
   startup log to see whose build runs before debugging. Ask before installing over theirs.
 - Never enter passwords. Remove test plugins and files you add.
-- Compare the site against the Rust patcher by unzipping both outputs. Every entry but the
-  signature must match.
 - Git Bash on Windows turns `/word` into a path in adb arguments. Set `MSYS_NO_PATHCONV=1` and
   pass local paths through `cygpath -w`.
 
@@ -145,11 +169,17 @@ session. Leave it off outside development.
 Read the decompiled host before guessing or bisecting.
 `jadx -q -j 16 --no-res -d out <base apk>` decompiles the Java side. The native host is
 `lib/arm64-v8a/liblibdiscord_wasm_host.so`, 97 MB and stripped, with JNI exports visible to
-`nm -D`.
+`nm -D`. The armeabi-v7a split's copy is 68 MB of Thumb-2, and inlines differently, so an arm64
+byte pattern says nothing about arm32.
 
-- Update risks. `crates/ui/src/props.in` (props are named by index, so a new prop shifts them),
-  `GuestHost.d(byte[], Function0)` (an obfuscated name), `templates.json`, and every module,
-  method and field number below. Everything else is found by names, strings and patterns.
+- Inline hooks. ShadowHook comes from the `sunhook-sys` crate of sunbird-tools/sunhook. On arm32
+  no island fits inside the host library, so a hook rewrites the first 8 or 10 bytes of its
+  target in place. Install hooks from the loader's constructor, before any thread can be inside
+  the target, and pass Thumb targets with bit 0 set or ShadowHook writes an ARM jump.
+- Update risks. `crates/ui-mobile/src/props.in` (props are named by index, so a new prop shifts them),
+  `GuestHost.d(byte[], Function0)` (an obfuscated name) and `templates.json`. Host module,
+  method, event and field numbers are read at startup by `host.rs`, so the numbers below are
+  for reading frames by hand. Everything else is found by names, strings and patterns.
 - Threads. Never send UI ops from the main thread, since Rust may hold the UI lock while it waits
   on Java. The settings worker sends them. Java only honors `WasmRuntime.nativeDispatch` on the
   `wasm-guest` HandlerThread, and a call from another thread is silently ignored. Queue a frame

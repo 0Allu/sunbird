@@ -19,6 +19,18 @@ declare namespace Phoenix {
     public_flags?: number;
   }
 
+  /// The signed-in user as Phoenix cached it, resources/user#user-object with the private fields.
+  interface CurrentUser extends User {
+    email?: string | null;
+    verified?: boolean;
+    mfa_enabled?: boolean;
+    premium_type?: number;
+    flags?: number;
+    locale?: string;
+    nsfw_allowed?: boolean | null;
+    age_verification_status?: number;
+  }
+
   /// `expires_at` is a Unix timestamp, not ISO.
   interface AvatarDecorationData {
     asset: string;
@@ -861,8 +873,18 @@ declare namespace Phoenix {
     readonly [sig]: P;
   }
 
+  /// Partial READY, topics/gateway-events#ready. Phoenix applies it outside the registry, so its
+  /// `after` hooks run before the app has applied it, and a hook cannot drop it.
+  interface Ready {
+    v: number;
+    user: CurrentUser;
+    session_id: string;
+  }
+
   /// Payload types for gateway events, keyed like `phoenix.gateway`.
   interface GatewayPayloads {
+    ready: Ready;
+    userUpdate: CurrentUser;
     messageCreate: GatewayMessage;
     /// A full message per the docs, with `tts` always false.
     messageUpdate: GatewayMessage;
@@ -1057,6 +1079,8 @@ declare namespace Phoenix {
       filter: RequestFilter,
       handler: (res: InterceptedResponse) => ResponseHookResult | Promise<ResponseHookResult>
     ): Remover;
+    /// The signed-in user from the app's cache, or null before the first login has synced.
+    me(): Promise<CurrentUser | null>;
     request(path: string, init?: FetchInit): Promise<FetchResponse>;
     get(path: string, init?: FetchInit): Promise<FetchResponse>;
     delete(path: string, init?: FetchInit): Promise<FetchResponse>;
@@ -1392,7 +1416,7 @@ declare namespace Phoenix {
     notify(options: NotifyOptions): () => void;
     /// Copies `text` to the device clipboard.
     copy(text: string): void;
-    /// A short message at the bottom of the screen.
+    /// A short message at the bottom of the screen, or in a banner at the top on iOS.
     toast(text: string): void;
   }
 

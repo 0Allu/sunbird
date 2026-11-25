@@ -1,4 +1,4 @@
-// @description Double-tap a message to reply, or double-tap your own message to edit it
+// @description Double-tap a message to reply, or your own to edit
 // @version 1.0.0
 // @author mantikafasi
 
