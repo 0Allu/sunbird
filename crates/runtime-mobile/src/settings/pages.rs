@@ -68,7 +68,11 @@ pub fn main_sections(plugins: &[PluginInfo]) -> Vec<Tree> {
             value_row("Version", phoenix_runtime::update::VERSION),
             value_row("Runtime", "rquickjs"),
             value_row("Gateway hooks", "registry pointer swap"),
-            value_row("Hook library", "ShadowHook"),
+            // iOS hooks nothing inline: it swaps the bridge's vtable slots.
+            value_row(
+               "Hook library",
+               if cfg!(target_os = "ios") { "vtable slot swap" } else { "ShadowHook" },
+            ),
             value_row("Enabled", &format!("{enabled} of {}", plugins.len())),
          ]),
       ])
