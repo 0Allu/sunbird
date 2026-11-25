@@ -23,9 +23,9 @@ use phoenix_runtime::fetch::{
    TIMEOUT_MS,
 };
 
-const RTLD_NOW: c_int = 2;
 const CURL_GLOBAL_DEFAULT: c_long = 3;
-const CURLPROTO_HTTP_HTTPS: c_long = 1 | 2;
+const CURLPROTO_HTTP: c_long = 1;
+const CURLPROTO_HTTPS: c_long = 2;
 
 const CURLOPT_WRITEDATA: c_int = 10_001;
 const CURLOPT_URL: c_int = 10_002;
@@ -53,11 +53,6 @@ type Easy = *mut c_void;
 type Slist = *mut c_void;
 type WriteFn = extern "C" fn(*const c_char, usize, usize, *mut c_void) -> usize;
 
-unsafe extern "C" {
-   fn dlopen(file: *const c_char, flags: c_int) -> *mut c_void;
-   fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-}
-
 struct Curl {
    easy_init:      unsafe extern "C" fn() -> Easy,
    easy_setopt:    unsafe extern "C" fn(Easy, c_int, ...) -> c_int,
@@ -75,7 +70,7 @@ struct Curl {
 unsafe fn sym<T>(lib: *mut c_void, name: &CStr) -> Option<T> {
    const { assert!(size_of::<T>() == size_of::<*mut c_void>()) };
    // SAFETY: `lib` is a live `dlopen` handle and `name` is NUL-terminated.
-   let found = unsafe { dlsym(lib, name.as_ptr()) };
+   let found = unsafe { libc::dlsym(lib, name.as_ptr()) };
    // SAFETY: the caller names `T` as this symbol's type, and the sizes match.
    (!found.is_null()).then(|| unsafe { std::mem::transmute_copy::<*mut c_void, T>(&found) })
 }
@@ -88,7 +83,7 @@ fn curl() -> Option<&'static Curl> {
       .get_or_init(|| {
          // SAFETY: each symbol is read with its type from `curl/curl.h`.
          let curl = unsafe {
-            let lib = dlopen(c"libcurl.so.4".as_ptr(), RTLD_NOW);
+            let lib = libc::dlopen(c"libcurl.so.4".as_ptr(), libc::RTLD_NOW);
             if lib.is_null() {
                log::warn!("fetch: libcurl.so.4 is not installed, HTTP is off");
                return None;
@@ -180,15 +175,13 @@ pub fn send(request: &Request) -> Result<Response, FetchError> {
    let mut headers = Headers(curl, ptr::null_mut());
    let mut lines = Vec::with_capacity(request.headers.len() + 2);
    for (name, value) in &request.headers {
-      // A line break would smuggle extra headers in. The value is never
-      // echoed, it may be a token.
-      if [name, value]
-         .iter()
-         .any(|part| part.contains(['\r', '\n', '\0']))
-      {
-         return Err(fail(format!("header {name} has a line break or NUL")));
-      }
-      lines.push(format!("{name}: {value}"));
+      // `Name:` with nothing after it tells curl to drop the header; `Name;`
+      // sends it empty, as WinHTTP does.
+      lines.push(if value.is_empty() {
+         format!("{name};")
+      } else {
+         format!("{name}: {value}")
+      });
    }
    // Keep curl from adding a form content type to bodies and from waiting
    // on `100-continue`.
@@ -241,8 +234,10 @@ pub fn send(request: &Request) -> Result<Response, FetchError> {
 
    let mut codes = vec![
       set_ptr(CURLOPT_URL, url_cstr.as_ptr().cast()),
-      set_long(CURLOPT_PROTOCOLS, CURLPROTO_HTTP_HTTPS),
-      set_long(CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP_HTTPS),
+      set_long(CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS),
+      // Never from https down to http, where session headers would go out
+      // in the clear, as WinHTTP refuses too.
+      set_long(CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTPS),
       set_long(CURLOPT_FOLLOWLOCATION, 1),
       set_long(CURLOPT_MAXREDIRS, 10),
       set_long(CURLOPT_NOSIGNAL, 1),
