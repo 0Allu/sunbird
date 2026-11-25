@@ -25,8 +25,8 @@ const STAFF: u64 = 1;
 static LOCATED: OnceLock<Option<Field>> = OnceLock::new();
 static LOGGED: AtomicBool = AtomicBool::new(false);
 
-/// Scans `Discord.exe` synchronously during `DllMain` so `flag_override` is
-/// ready before the first gateway event fires.
+/// Scans Discord synchronously from `prepare` so `flag_override` is ready
+/// before the first gateway event fires.
 pub fn prepare(image: &Image<'_>) {
    LOCATED.get_or_init(|| locate(image));
 }
@@ -36,10 +36,6 @@ pub fn start(image: &'static Image<'static>) {
 }
 
 fn locate(image: &Image<'_>) -> Option<Field> {
-   // The override stays Windows-only.
-   if cfg!(not(windows)) {
-      return None;
-   }
    let field = phoenix_sigs::desktop::staff(image)
       .inspect_err(|err| log::warn!("staff: {err}, leaving flag_override as is"))
       .ok()?;

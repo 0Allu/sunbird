@@ -170,13 +170,10 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
                }),
             );
          }
-         // The staff overrides are only patched on Windows.
-         if abi == x86::Abi::Win64 {
-            report(
-               "staff flag",
-               desktop::staff(image).map(|field| format!("{field:x?}")),
-            );
-         }
+         report(
+            "staff flag",
+            desktop::staff(image).map(|field| format!("{field:x?}")),
+         );
          report(
             "settings label",
             desktop::settings_label_parts(image)

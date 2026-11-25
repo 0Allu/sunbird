@@ -1575,30 +1575,41 @@ pub fn optimistic_delete(image: &Image<'_>, message_delete: usize) -> Found<usiz
 /// `(user.flags | flag_override) & 1`:
 ///
 /// ```text
-/// cmp dword ptr [reg + tag], 1     ; 83 B8..BF <tag> 01
+/// cmp dword ptr [base + tag], 1    ; (41) 83 B8..BF <tag> 01
 /// jne +0x0e
-/// mov rax, qword ptr [reg + value] ; 48 8B 80..87 <value>
-/// cmp reg2, 1; je +9; jmp +0xe; xor eax, eax; cmp reg2, 1; jne +7
-/// or rax, qword ptr [reg + flags]  ; 48 0B 80..87 <flags>
+/// mov r64, qword ptr [base + value] ; 48..4F 8B <modrm> <value>
+/// cmp reg2, 1; je +9; jmp +0xe; xor r32, r32; cmp reg2, 1; jne +7
+/// or r64, qword ptr [base + flags]  ; 48..4F 0B <modrm> <flags>
 /// ```
 ///
+/// The Linux build reads it off `r15`, behind REX prefixes, and lays
+/// `StoreState` out differently, so the base register is decoded with them.
 /// Reads off `&RwLock<StoreState>` sit 0x10 bytes higher, behind the lock, so
 /// the lower pair is the one gateway handlers see.
 pub fn staff(image: &Image<'_>) -> Found<StaffField> {
    const CHECK: Pattern = Pattern::new(
-      "83 ?? ?? ?? ?? ?? 01 75 0E 48 8B ?? ?? ?? ?? ?? 83 ?? 01 74 09 EB 0E 31 C0 83 ?? 01 75 07 \
-       48 0B ?? ?? ?? ?? ??",
+      "83 ?? ?? ?? ?? ?? 01 75 0E ?? 8B ?? ?? ?? ?? ?? 83 ?? 01 74 09 EB 0E 31 ?? 83 ?? 01 75 07 \
+       ?? 0B ?? ?? ?? ?? ??",
    );
    const LOCK_HEADER: usize = 0x10;
-   let disp32 = |modrm: u8, base: u8| (base..base + 8).contains(&modrm) && modrm != base + 4;
+   // `[base + disp32]` with no SIB byte, as `base` with REX.B folded in.
+   let base = |rex: u8, modrm: u8| {
+      (modrm >> 6 == 0b10 && modrm & 7 != 4).then_some(modrm & 7 | (rex & 1) << 3)
+   };
+   let rex_w = |byte: u8| (0x48..=0x4F).contains(&byte).then_some(byte);
    let mut found = image
       .scan(CHECK)
       .into_iter()
       .filter_map(|at| {
-         let bytes = image.read(at, 33)?;
-         let (cmp, mov, or) = (bytes[1], bytes[11], bytes[32]);
-         let same_base = cmp & 7 == mov & 7 && mov & 7 == or & 7;
-         if !(disp32(cmp, 0xB8) && disp32(mov, 0x80) && disp32(or, 0x80) && same_base) {
+         let bytes = image.read(at, 37)?;
+         let cmp_rex = match at.checked_sub(1).and_then(|before| image.read(before, 1)) {
+            Some([0x41]) => 0x41,
+            _ => 0x40,
+         };
+         let cmp = (bytes[1] & 0x38 == 0x38).then(|| base(cmp_rex, bytes[1]))??;
+         let mov = base(rex_w(bytes[9])?, bytes[11])?;
+         let or = base(rex_w(bytes[30])?, bytes[32])?;
+         if cmp != mov || mov != or {
             return None;
          }
          let (tag, value) = (imm32(image, at + 2)?, imm32(image, at + 12)?);
