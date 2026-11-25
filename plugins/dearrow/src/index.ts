@@ -1,5 +1,5 @@
 // @description Replaces YouTube titles and thumbnails in embeds using DeArrow
-// @version 0.1.0
+// @version 0.1.1
 // @author amaanq
 
 const { gateway } = phoenix;
@@ -60,6 +60,8 @@ const lookup = (id: string) => {
         phoenix.log.warn(`dearrow ${id}: ${err}`);
         return {};
       });
+    // One entry per video seen, so drop the oldest past a few hundred.
+    if (cache.size >= 512) cache.delete(cache.keys().next().value!);
     cache.set(id, pending);
   }
   return pending;
