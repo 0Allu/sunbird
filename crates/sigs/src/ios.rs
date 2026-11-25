@@ -210,9 +210,11 @@ fn swift_string<'a>(image: &'a Image<'_>, low: [u8; 8], high: [u8; 8]) -> Option
 /// gate: patching only one crashes the client, since they share a lock.
 ///
 /// Read on 357.0 (build 124398). The experiment-table reference locates one of
-/// them, so the body is the anchor that also catches its twin.
+/// them, so the body is the anchor that also catches its twin. The two loads'
+/// field offsets are wildcards: the `ldrb` moved from 0x42d to 0x83d on the
+/// 2026-11-24 build while the code around it stayed the same.
 const ACCESS_GATE: Pattern = Pattern::new(
-   "09 01 40 F9 3F 09 00 F1 C0 00 00 54 08 A9 47 F9 1F 05 00 B1 60 00 00 54 08 B4 50 39 68 00 00 \
+   "09 01 40 F9 3F 09 00 F1 C0 00 00 54 08 ?? ?? F9 1F 05 00 B1 60 00 00 54 08 ?? ?? 39 68 00 00 \
     36",
 );
 
