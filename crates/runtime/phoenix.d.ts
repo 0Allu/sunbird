@@ -1416,7 +1416,7 @@ declare namespace Phoenix {
     notify(options: NotifyOptions): () => void;
     /// Copies `text` to the device clipboard.
     copy(text: string): void;
-    /// A short message at the bottom of the screen.
+    /// A short message at the bottom of the screen, or in a banner at the top on iOS.
     toast(text: string): void;
   }
 

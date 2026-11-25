@@ -20,6 +20,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 pub type Picked = Result<Option<(String, Vec<u8>)>, String>;
 
 /// Shows `text` briefly at the bottom of the screen.
+#[cfg(target_os = "android")]
 pub fn toast(text: &str) -> Result<(), String> {
    host::send(
       Method::SystemOverlayToast,
@@ -28,6 +29,29 @@ pub fn toast(text: &str) -> Result<(), String> {
    )
    .map_err(|err| err.to_string())
 }
+
+/// Shows `text` briefly in a banner at the top of the screen, since iOS
+/// Phoenix takes `SystemOverlay.toast` and shows nothing.
+#[cfg(target_os = "ios")]
+#[expect(
+   clippy::unnecessary_wraps,
+   reason = "the same signature as Android's, which can fail"
+)]
+pub fn toast(text: &str) -> Result<(), String> {
+   crate::patches::banners::show_banner(
+      text.to_owned(),
+      None,
+      None,
+      None,
+      TOAST_MS,
+      crate::patches::banners::BannerAction::None,
+   );
+   Ok(())
+}
+
+/// About Android's `Toast.LENGTH_SHORT`, 2 s.
+#[cfg(target_os = "ios")]
+const TOAST_MS: u64 = 2500;
 
 /// Copies `text` to the Android clipboard.
 pub fn copy(text: &str) -> Result<(), String> {
