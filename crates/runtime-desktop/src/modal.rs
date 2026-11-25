@@ -1366,6 +1366,9 @@ const POSITION_ABSOLUTE: u8 = 1;
 const DISPLAY_FLEX: u8 = 1;
 const ALIGN_CENTER: u8 = 4;
 
+/// Lines the plugin code editor shows; it scrolls past them.
+const EDITOR_ROWS: u8 = 30;
+
 fn set_mono_font(s: &Style, font_px: f32, line_px: f32) {
    s.length(s.at.font_size, gpui_px(font_px));
    s.length(s.at.line_height, gpui_px(line_px));
@@ -1710,6 +1713,11 @@ fn build_overlay(window: *mut c_void, app: *mut c_void) -> Option<RawDiv> {
                let mut ta_any = unsafe {
                   let mut ta = RawTextArea::zeroed();
                   (tf.text_area_new)(&raw mut ta, &raw const ent);
+                  // Unset, Mana shows a few lines; fix it at a page of code.
+                  if let Some(rows) = tf.layout.text_area_rows {
+                     ta.put(rows, [1u8, EDITOR_ROWS]);
+                     ta.put(rows + 2, [1u8, EDITOR_ROWS]);
+                  }
                   let mut any = MaybeUninit::<RawAnyElement>::uninit();
                   (tf.text_area_into_any)(any.as_mut_ptr(), &raw mut ta);
                   any.assume_init()
@@ -1717,9 +1725,6 @@ fn build_overlay(window: *mut c_void, app: *mut c_void) -> Option<RawDiv> {
                if let Some(mut wrap) = gpui::v_stack(4.0) {
                   gpui::style_div(&mut wrap, |s| {
                      s.length(s.at.size[0], W_FULL);
-                     // Size 3 is the widest modal Discord has, so give the
-                     // code the height instead.
-                     s.length(s.at.min_size[1], gpui_px(560.0));
                      s.shared_string(s.at.font_family, SharedString::from_static(MONO_FONT));
                      s.length(s.at.font_size, gpui_px(12.5));
                   });

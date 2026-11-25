@@ -2530,6 +2530,9 @@ pub struct FieldLayout {
    pub text_input_entity: usize,
    pub text_area_size:    usize,
    pub text_area_entity:  usize,
+   /// `TextArea`'s `min_rows: Option<u8>`, with `max_rows` 2 bytes on, or
+   /// `None` when `TextArea::new` no longer shows them.
+   pub text_area_rows:    Option<usize>,
    /// `FieldState`'s `Option<SharedString>` slots: the two placeholders and
    /// the value `set_value` clears.
    pub placeholders:      [usize; 2],
@@ -2927,6 +2930,9 @@ pub fn text_fields(image: &Image<'_>) -> Found<TextFields> {
    let (text_area_into_any, text_area_size) = find_into_any(image, &leas, TEXT_AREA_TYPE)?;
    let (text_input_new, text_input_entity) = hosted_new(text_input_size, "hosted TextInput::new")?;
    let (text_area_new, text_area_entity) = hosted_new(text_area_size, "hosted TextArea::new")?;
+   let text_area_rows = function_code(image, text_area_new, "hosted TextArea::new")
+      .ok()
+      .and_then(|code| text_area_rows(code, text_area_size));
 
    // `FieldState::new` ends by writing `None` into its three
    // `Option<SharedString>`s; the one `set_value` clears is the pending value.
@@ -2978,12 +2984,33 @@ pub fn text_fields(image: &Image<'_>) -> Found<TextFields> {
          text_input_entity,
          text_area_size,
          text_area_entity,
+         text_area_rows,
          placeholders: [first, second],
          pending_value,
          app_entities,
          weak_ptr,
       },
    })
+}
+
+/// `TextArea::new` sets `min_rows` and `max_rows`, two `Option<u8>`s side by
+/// side, to `None`: the one pair of `mov byte [reg + disp32], 0` stores 2 bytes
+/// apart. Discord's callers then store `Some(3)` to `Some(20)` words there.
+fn text_area_rows(code: &[u8], size: usize) -> Option<usize> {
+   let zeroed: HashSet<usize> = code
+      .windows(7)
+      .filter(|w| w[0] == 0xC6 && w[1] & 0xF8 == 0x80 && w[1] != 0x84 && w[6] == 0)
+      .map(|w| u32::from_le_bytes([w[2], w[3], w[4], w[5]]) as usize)
+      .collect();
+   let pairs: Vec<usize> = zeroed
+      .iter()
+      .copied()
+      .filter(|&rows| zeroed.contains(&(rows + 2)) && rows + 4 <= size)
+      .collect();
+   match pairs[..] {
+      [rows] => Some(rows),
+      _ => None,
+   }
 }
 
 /// The Settings layer's render, `fn(sret: *mut AnyElement, layer, window, cx)`.
