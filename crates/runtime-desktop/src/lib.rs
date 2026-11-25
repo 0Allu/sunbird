@@ -249,9 +249,6 @@ impl Platform for Desktop {
          "Sunbird ready",
          Some("Open User Settings -> Sunbird, or press Ctrl+Shift+I for DevTools"),
       );
-      if first_run && plugins.is_empty() {
-         phoenix_ui_desktop::open_settings();
-      }
       phoenix_runtime::update::check();
    }
 
