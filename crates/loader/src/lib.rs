@@ -91,7 +91,7 @@ fn run() {
    }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    phoenix_runtime_mobile::start(home, bundled)
 }
@@ -99,11 +99,6 @@ fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
 #[cfg(windows)]
 fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    phoenix_runtime_desktop::start(home, bundled)
-}
-
-#[cfg(target_os = "ios")]
-fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
-   phoenix_runtime_ios::start(home, bundled)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios", windows)))]

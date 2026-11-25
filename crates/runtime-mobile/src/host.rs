@@ -1,11 +1,14 @@
-//! Numbers of the Phoenix host calls, events and fields phoenix uses. Phoenix
-//! numbers them through a name table of `"<name> <number>"` strings in its
-//! dex, which a Discord build can renumber, so they are read from the
-//! installed APK at startup.
+//! Numbers of the Phoenix host calls, events and fields phoenix uses. A
+//! Discord build can renumber them, so they are read at startup, on Android
+//! from the `"<name> <number>"` strings in the installed APK's dex and on iOS
+//! from the host's Swift name table.
 
+#[cfg(target_os = "android")]
 use std::{
    fs::File,
    os::fd::AsRawFd,
+};
+use std::{
    sync::{
       Mutex,
       OnceLock,
@@ -16,6 +19,7 @@ use std::{
       },
       mpsc::{
          self,
+         Receiver,
          Sender,
       },
    },
@@ -46,10 +50,11 @@ pub enum Method {
    MediaPickerPick,
    MediaPickerRead,
    MediaPickerRelease,
+   TimingSet,
 }
 
 impl Method {
-   const ALL: [Self; 7] = [
+   const ALL: [Self; 8] = [
       Self::NetworkingRequest,
       Self::LinkingOpenUrl,
       Self::SystemOverlayToast,
@@ -57,6 +62,7 @@ impl Method {
       Self::MediaPickerPick,
       Self::MediaPickerRead,
       Self::MediaPickerRelease,
+      Self::TimingSet,
    ];
 
    const fn name(self) -> &'static str {
@@ -68,6 +74,7 @@ impl Method {
          Self::MediaPickerPick => "MediaPicker.pick",
          Self::MediaPickerRead => "MediaPicker.read",
          Self::MediaPickerRelease => "MediaPicker.release",
+         Self::TimingSet => "Timing.set",
       }
    }
 
@@ -83,17 +90,19 @@ pub enum Event {
    Http,
    Picked,
    Read,
+   Timer,
    Ws,
 }
 
 impl Event {
-   const ALL: [Self; 4] = [Self::Http, Self::Picked, Self::Read, Self::Ws];
+   const ALL: [Self; 5] = [Self::Http, Self::Picked, Self::Read, Self::Timer, Self::Ws];
 
    const fn name(self) -> &'static str {
       match self {
          Self::Http => "@http",
          Self::Picked => "@picked",
          Self::Read => "@read",
+         Self::Timer => "@timer",
          Self::Ws => "@ws",
       }
    }
@@ -117,10 +126,11 @@ pub enum Field {
    Handles,
    Name,
    Denied,
+   Delay,
 }
 
 impl Field {
-   const ALL: [Self; 15] = [
+   const ALL: [Self; 16] = [
       Self::Id,
       Self::Error,
       Self::Method,
@@ -136,6 +146,7 @@ impl Field {
       Self::Handles,
       Self::Name,
       Self::Denied,
+      Self::Delay,
    ];
 
    const fn name(self) -> &'static str {
@@ -155,6 +166,7 @@ impl Field {
          Self::Handles => "handles",
          Self::Name => "name",
          Self::Denied => "denied",
+         Self::Delay => "delay",
       }
    }
 }
@@ -181,15 +193,21 @@ impl Table {
 
 #[derive(Debug, flub::Error)]
 pub enum LoadError {
+   #[cfg(target_os = "android")]
    #[error("no base.apk is mapped")]
    NoApk,
+   #[cfg(target_os = "android")]
    #[error("{path}: {source}")]
    Io {
       path:   String,
       source: std::io::Error,
    },
+   #[cfg(target_os = "android")]
    #[error(transparent)]
    Names(patcher::Error),
+   #[cfg(target_os = "ios")]
+   #[error("phoenix has not started")]
+   NotStarted,
 }
 
 static TABLE: OnceLock<Table> = OnceLock::new();
@@ -201,27 +219,47 @@ pub fn table() -> Option<&'static Table> {
 
 /// Reads the numbers from the APK the app runs from. Takes about 100 ms, so
 /// it runs off the threads that wait on it.
+#[cfg(target_os = "android")]
 pub fn load() -> Result<(), LoadError> {
    let path = base_apk()?;
    let map = Map::open(&path).map_err(|source| LoadError::Io { path, source })?;
+   let names = names();
+   let numbers = patcher::host_names(map.bytes(), &names).map_err(LoadError::Names)?;
+   keep(&names, numbers);
+   Ok(())
+}
 
+/// Reads the numbers from the host's name table in `PhoenixFatClient`.
+#[cfg(target_os = "ios")]
+pub fn load() -> Result<(), LoadError> {
+   let state = phoenix_runtime::state().ok_or(LoadError::NotStarted)?;
+   let names = names();
+   keep(&names, phoenix_sigs::ios::host_names(&state.image, &names));
+   Ok(())
+}
+
+/// The names [`Table`] holds, in its order.
+fn names() -> Vec<&'static str> {
    let mut names = Vec::new();
    for method in Method::ALL {
       names.extend([method.module(), method.name()]);
    }
    names.extend(Event::ALL.map(Event::name));
    names.extend(Field::ALL.map(Field::name));
-   let numbers = patcher::host_names(map.bytes(), &names).map_err(LoadError::Names)?;
+   names
+}
+
+fn keep(names: &[&str], numbers: Vec<Option<u16>>) {
    for (name, number) in names.iter().zip(&numbers) {
       if number.is_none() {
          log::warn!("host names: this build has no {name}");
       }
    }
    let _ = TABLE.set(Table(numbers));
-   Ok(())
 }
 
 /// The path of the APK the app runs from, which ART keeps mapped.
+#[cfg(target_os = "android")]
 pub fn base_apk() -> Result<String, LoadError> {
    std::fs::read_to_string("/proc/self/maps")
       .map_err(|source| {
@@ -303,6 +341,24 @@ pub fn ask(
    event: Event,
    timeout: Duration,
 ) -> Result<Reply, CallError> {
+   let (id, receiver) = call_with_id(method, args, event)?;
+   let reply = receiver.recv_timeout(timeout);
+   forget(id);
+   reply.map_err(|_| CallError::NoAnswer(method.name()))
+}
+
+/// Calls `method` like [`ask`] without waiting. The answering `event` still
+/// never reaches the guest.
+#[cfg(target_os = "ios")]
+pub fn poke(method: Method, args: &[(Field, Value)], event: Event) -> Result<(), CallError> {
+   call_with_id(method, args, event).map(|_| ())
+}
+
+fn call_with_id(
+   method: Method,
+   args: &[(Field, Value)],
+   event: Event,
+) -> Result<(i32, Receiver<Reply>), CallError> {
    let number = table()
       .ok_or(CallError::NotLoaded)?
       .event(event)
@@ -313,24 +369,23 @@ pub fn ask(
       .lock()
       .unwrap_or_else(PoisonError::into_inner)
       .push((number, id, sender));
-   let forget = || {
-      WAITING
-         .lock()
-         .unwrap_or_else(PoisonError::into_inner)
-         .retain(|(_, waiting, _)| *waiting != id);
-   };
    let mut with_id = vec![(Field::Id, Value::I32(id))];
    with_id.extend_from_slice(args);
    if let Err(err) = send(method, &with_id, Vec::new()) {
-      forget();
+      forget(id);
       return Err(err);
    }
-   let reply = receiver.recv_timeout(timeout);
-   forget();
-   reply.map_err(|_| CallError::NoAnswer(method.name()))
+   Ok((id, receiver))
 }
 
-/// Takes the events answering [`ask`] out of a `nativeDispatch` call, since
+fn forget(id: i32) {
+   WAITING
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .retain(|(_, waiting, _)| *waiting != id);
+}
+
+/// Takes the events answering [`ask`] out of a dispatch, since
 /// Phoenix's guest knows nothing of their ids.
 pub fn filter(bytes: &[u8]) -> Action {
    if WAITING
@@ -378,11 +433,13 @@ pub fn filter(bytes: &[u8]) -> Action {
 }
 
 /// A read-only mapping of a whole file.
+#[cfg(target_os = "android")]
 pub struct Map {
    at:  *mut libc::c_void,
    len: usize,
 }
 
+#[cfg(target_os = "android")]
 impl Map {
    pub fn open(path: &str) -> std::io::Result<Self> {
       let file = File::open(path)?;
@@ -412,6 +469,7 @@ impl Map {
    }
 }
 
+#[cfg(target_os = "android")]
 impl Drop for Map {
    fn drop(&mut self) {
       // SAFETY: `at` and `len` came from the `mmap` in `new`.

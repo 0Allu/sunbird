@@ -1,4 +1,4 @@
-//! Phoenix's guest/host bridge, observed without inline hooks.
+//! The Android side of the bridge.
 //!
 //! - Rust to Java goes through ART's process-wide JNI function table.
 //!   `CallVoidMethodA` and `CallObjectMethodA` are swapped for filters that
@@ -14,16 +14,11 @@
 use std::{
    ffi::c_void,
    mem::offset_of,
-   panic::{
-      AssertUnwindSafe,
-      catch_unwind,
-   },
    ptr,
    sync::{
       Mutex,
       OnceLock,
       PoisonError,
-      RwLock,
       atomic::{
          AtomicBool,
          AtomicPtr,
@@ -53,7 +48,10 @@ use jni_sys::{
 use phoenix_hook::image::swap_words;
 
 use crate::{
-   discord,
+   bridge::{
+      self,
+      Action,
+   },
    jvm::{
       CLASS,
       CLASS_LOADER,
@@ -77,23 +75,6 @@ use crate::{
 const FUNCTION0: Class = class!(kotlin::jvm::functions::Function0);
 const WASM_RUNTIME: Class = class!(com::discord::nativeapp::bridge::WasmRuntime);
 
-/// What to do with an observed frame.
-pub enum Action {
-   Pass,
-   Drop,
-   Replace(Vec<u8>),
-}
-
-/// Receives every UI-op batch Rust sends and every view event Java dispatches.
-/// Sinks run in install order, each on what the one before it left.
-pub trait Sink: Send + Sync {
-   /// `batch` is a version byte followed by ops.
-   fn ops(&self, batch: &[u8]) -> Action;
-
-   /// [`Action::Drop`] reports the frame as handled to Java.
-   fn dispatch(&self, frame: &[u8]) -> Action;
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Method {
    Other,
@@ -103,11 +84,8 @@ enum Method {
 
 type DispatchFn = unsafe extern "system" fn(*mut JNIEnv, jclass, jlong, jbyteArray) -> jboolean;
 
-static SINKS: RwLock<Vec<Box<dyn Sink>>> = RwLock::new(Vec::new());
-static WATCHING: AtomicBool = AtomicBool::new(false);
 static PATCH_LOCK: Mutex<()> = Mutex::new(());
 static METHODS: Mutex<Vec<(usize, Method)>> = Mutex::new(Vec::new());
-static UI_LOCK: Mutex<()> = Mutex::new(());
 static GUEST_HOST: AtomicPtr<_jobject> = AtomicPtr::new(ptr::null_mut());
 static INVOKE_METHOD: AtomicPtr<_jmethodID> = AtomicPtr::new(ptr::null_mut());
 static NATIVES_BOUND: AtomicBool = AtomicBool::new(false);
@@ -115,43 +93,10 @@ static ORIGINAL_DISPATCH: OnceLock<DispatchFn> = OnceLock::new();
 /// `GuestHost.d([B, Function0)`, which queues a view frame for the
 /// `wasm-guest` thread. Rust drops a `nativeDispatch` from any other thread.
 static ENQUEUE_METHOD: AtomicPtr<_jmethodID> = AtomicPtr::new(ptr::null_mut());
-/// Raw `nativeDispatch` frames queued from background threads (e.g. async
-/// `phoenix.discord.onResponse` replies) to be delivered on `wasm-guest`.
-static DEFERRED_DISPATCHES: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 /// Sentinel passed through `GuestHost.d` to wake `wasm-guest` and drain
-/// [`DEFERRED_DISPATCHES`]. Never matches a real view frame (`00 00 00 00 01
+/// the deferred frames. Never matches a real view frame (`00 00 00 00 01
 /// 01`).
 const WAKE_SENTINEL: &[u8] = b"\0\0\0\0PHXW";
-
-pub fn install(sink: Box<dyn Sink>) {
-   SINKS
-      .write()
-      .unwrap_or_else(PoisonError::into_inner)
-      .push(sink);
-   WATCHING.store(true, Ordering::Release);
-}
-
-/// Runs `bytes` through every sink. A sink that panics leaves the bytes as the
-/// sink before it left them.
-fn consult(bytes: &[u8], ask: impl Fn(&dyn Sink, &[u8]) -> Action) -> Action {
-   let sinks = SINKS.read().unwrap_or_else(PoisonError::into_inner);
-   let mut replaced: Option<Vec<u8>> = None;
-   for sink in sinks.iter() {
-      let current = replaced.as_deref().unwrap_or(bytes);
-      let action =
-         catch_unwind(AssertUnwindSafe(|| ask(sink.as_ref(), current))).unwrap_or_else(|_| {
-            log::warn!("bridge: a sink panicked, the frame went on unmodified");
-            Action::Pass
-         });
-      match action {
-         Action::Pass => {},
-         Action::Drop => return Action::Drop,
-         Action::Replace(bytes) => replaced = Some(bytes),
-      }
-   }
-   drop(sinks);
-   replaced.map_or(Action::Pass, Action::Replace)
-}
 
 /// Patches ART's shared JNI table once. Cheap after the first call, and does
 /// nothing on threads the VM has not attached.
@@ -204,20 +149,7 @@ pub fn attach() {
    }
 }
 
-/// Sends a UI-op batch (version byte and ops) to Java's `UIManager`.
-///
-/// Returns false until Rust has sent its first batch, since that carries the
-/// `GuestHost`. Never call it on the main thread, Rust may hold the UI lock
-/// while it waits on that thread.
-pub fn apply_ops(batch: &[u8]) -> bool {
-   let mut frame = vec![0; 4];
-   frame.extend_from_slice(batch);
-   let _guard = UI_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-   invoke(&frame)
-}
-
-/// Passes `frame` to `GuestHost.invoke` as if the guest had sent it, and
-/// drops whatever it returns. Same conditions as [`apply_ops`].
+/// Passes `frame` to `GuestHost.invoke`.
 pub fn invoke(frame: &[u8]) -> bool {
    let guest_host = GUEST_HOST.load(Ordering::Acquire);
    if guest_host.is_null() {
@@ -253,18 +185,12 @@ pub fn invoke(frame: &[u8]) -> bool {
    true
 }
 
-/// Queues a raw `nativeDispatch` frame (such as a rewritten `@http` reply) to
-/// be delivered to Phoenix on the `wasm-guest` thread.
-pub fn dispatch_deferred(frame: Vec<u8>) {
-   DEFERRED_DISPATCHES
-      .lock()
-      .unwrap_or_else(PoisonError::into_inner)
-      .push(frame);
+/// Wakes `wasm-guest` to deliver the deferred frames.
+pub fn wake() {
    let _ = inject(WAKE_SENTINEL);
 }
 
-/// Queues view `frame` for Rust as if Java had dispatched it. The frame
-/// still passes the sinks. Same conditions as [`apply_ops`].
+/// Queues view `frame` through `GuestHost.d`.
 pub fn inject(frame: &[u8]) -> bool {
    let guest_host = GUEST_HOST.load(Ordering::Acquire);
    let (Some(body), false) = (frame.strip_prefix(&[0; 4]), guest_host.is_null()) else {
@@ -387,7 +313,7 @@ unsafe extern "system" fn call_void_method_a(
    method: jmethodID,
    args: *const jvalue,
 ) {
-   let watch = WATCHING.load(Ordering::Acquire);
+   let watch = bridge::watching();
    // SAFETY: ART calls this with the current thread's env and the caller's
    // arguments. `applyOps([BI)V` gets a byte array and an int, forwarded
    // unchanged or swapped for a replacement of the same shape.
@@ -406,8 +332,8 @@ unsafe extern "system" fn call_void_method_a(
       }
 
       let batch = read_bytes(env, (*args).l, Some((*args.add(1)).i));
-      let _guard = UI_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-      match consult(&batch, |sink, batch| sink.ops(batch)) {
+      let (action, _guard) = bridge::ops(&batch);
+      match action {
          Action::Drop => {},
          Action::Pass => original(env, obj, method, args),
          Action::Replace(replaced) => {
@@ -422,17 +348,14 @@ unsafe extern "system" fn call_void_method_a(
    }
 }
 
-/// `invoke` returns null for UI-op batches, and `UIManager` parses them on the
-/// caller's thread, so Rust's batches and [`apply_ops`] share `UI_LOCK`. It is
-/// held while the sinks run, so a follow-up batch a sink queues lands after
-/// the batch that made its parents.
+/// `invoke` returns null for UI-op batches.
 unsafe extern "system" fn call_object_method_a(
    env: *mut JNIEnv,
    obj: jobject,
    method: jmethodID,
    args: *const jvalue,
 ) -> jobject {
-   let watch = WATCHING.load(Ordering::Acquire);
+   let watch = bridge::watching();
    // SAFETY: ART calls this with the current thread's env and the caller's
    // arguments. `invoke([B)[B` gets one byte array, forwarded unchanged or
    // swapped for a replacement.
@@ -454,33 +377,21 @@ unsafe extern "system" fn call_object_method_a(
       let request = (*args).l;
       let head = read_bytes(env, request, Some(6));
       if !head.starts_with(&[0; 4]) {
-         if phoenix_runtime::remote::enabled()
-            && let Some((module_id, method_id)) = phoenix_wire::HostCall::target(&head)
-         {
-            phoenix_runtime::remote::record(&crate::debug::Trace::HostCall {
-               module: module_id,
-               method: method_id,
-            });
-         }
-         if discord::wants(&head) {
-            let frame = read_bytes(env, request, None);
-            match discord::intercept_call(&frame) {
-               Action::Pass => {},
-               Action::Drop => return ptr::null_mut(),
-               Action::Replace(replaced) => {
-                  if let Some((array, _)) = new_bytes(env, &replaced) {
-                     let result = original(env, obj, method, [jvalue { l: array }].as_ptr());
-                     jni!(env, DeleteLocalRef, array);
-                     return result;
-                  }
-               },
-            }
+         match bridge::host_call(&head, || read_bytes(env, request, None)) {
+            Action::Pass => {},
+            Action::Drop => return ptr::null_mut(),
+            Action::Replace(replaced) => {
+               if let Some((array, _)) = new_bytes(env, &replaced) {
+                  let result = original(env, obj, method, [jvalue { l: array }].as_ptr());
+                  jni!(env, DeleteLocalRef, array);
+                  return result;
+               }
+            },
          }
          return original(env, obj, method, args);
       }
       let frame = read_bytes(env, request, None);
-      let _guard = UI_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-      let action = consult(&frame[4..], |sink, batch| sink.ops(batch));
+      let (action, _guard) = bridge::ops(&frame[4..]);
       match action {
          Action::Drop => ptr::null_mut(),
          Action::Pass => original(env, obj, method, args),
@@ -502,6 +413,10 @@ unsafe extern "system" fn call_object_method_a(
 /// batch.
 pub fn guest_host() -> jobject {
    GUEST_HOST.load(Ordering::Acquire)
+}
+
+pub fn ready() -> bool {
+   !guest_host().is_null()
 }
 
 /// # Safety
@@ -535,13 +450,7 @@ unsafe extern "system" fn native_dispatch(
    unsafe {
       // Deliver any deferred frames (e.g. async HTTP response hooks) on the
       // `wasm-guest` thread before processing the current frame.
-      let deferred = {
-         let mut queue = DEFERRED_DISPATCHES
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-         std::mem::take(&mut *queue)
-      };
-      for pending in deferred {
+      for pending in bridge::take_deferred() {
          if let Some((array, _)) = new_bytes(env, &pending) {
             let _ = original(env, class, handle, array);
             jni!(env, DeleteLocalRef, array);
@@ -569,25 +478,11 @@ unsafe extern "system" fn native_dispatch(
             stripped_wake = true;
          }
       }
-      let mut replaced = match discord::filter(&payload) {
+      let replaced = match bridge::dispatched(&payload) {
          Action::Drop => return JNI_TRUE,
-         Action::Pass => stripped_wake.then_some(payload.clone()),
+         Action::Pass => stripped_wake.then_some(payload),
          Action::Replace(rest) => Some(rest),
       };
-      match crate::host::filter(replaced.as_deref().unwrap_or(&payload)) {
-         Action::Drop => return JNI_TRUE,
-         Action::Pass => {},
-         Action::Replace(rest) => replaced = Some(rest),
-      }
-      if WATCHING.load(Ordering::Acquire) {
-         match consult(replaced.as_deref().unwrap_or(&payload), |sink, frame| {
-            sink.dispatch(frame)
-         }) {
-            Action::Drop => return JNI_TRUE,
-            Action::Pass => {},
-            Action::Replace(rest) => replaced = Some(rest),
-         }
-      }
       let Some(replaced) = replaced else {
          return original(env, class, handle, frame);
       };

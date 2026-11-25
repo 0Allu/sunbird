@@ -122,8 +122,8 @@ unsafe fn content_uri(env: *mut JNIEnv, app: jobject, apk: &CString) -> Result<j
          "could not make a File",
       )?;
 
-      let provider =
-         bridge::app_class(env, FILE_PROVIDER).ok_or("Discord has no androidx FileProvider")?;
+      let provider = bridge::jni::app_class(env, FILE_PROVIDER)
+         .ok_or("Discord has no androidx FileProvider")?;
       let uri_for_file = method_by_types(env, provider, &[CONTEXT, STRING, FILE], URI)?;
       checked(
          env,

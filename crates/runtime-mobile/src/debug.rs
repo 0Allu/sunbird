@@ -53,7 +53,10 @@ pub fn record_ops(ops: &[Op]) {
    }
 }
 
+#[cfg(target_os = "android")]
 pub const ROUTES: &str = ", GET /ops[?match=&limit=], GET /tree[/<id>][?depth=], POST /update/self";
+#[cfg(target_os = "ios")]
+pub const ROUTES: &str = ", GET /ops[?match=&limit=], GET /tree[/<id>][?depth=]";
 
 pub fn route(request: &Request) -> Option<Reply> {
    let depth = || {
@@ -75,6 +78,7 @@ pub fn route(request: &Request) -> Option<Reply> {
          };
          tree(Some(id), depth())
       },
+      #[cfg(target_os = "android")]
       ("POST", "/update/self") => {
          crate::loader::self_update_from_site();
          remote::ok_json(&Done::Started)

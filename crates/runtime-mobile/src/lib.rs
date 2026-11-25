@@ -1,23 +1,25 @@
-//! phoenix on Phoenix's Android client: the UI-op bridge, the settings pages,
-//! the UI patches, and JNI for HTTP, SQL and the installer.
+//! phoenix on Phoenix's mobile clients: the UI-op bridge, the settings pages
+//! and the UI patches. Android adds JNI for HTTP, SQL and the installer, iOS
+//! uses Foundation and a bundled SQLite.
 
-#![cfg(target_os = "android")]
+#![cfg(any(target_os = "android", target_os = "ios"))]
 
 mod bridge;
 mod debug;
 mod discord;
-mod fetch;
+#[cfg(target_os = "android")] mod fetch;
+#[cfg(target_os = "ios")] mod foundation;
 mod host;
-mod install;
+#[cfg(target_os = "android")] mod install;
 mod js;
-mod jvm;
-mod loader;
+#[cfg(target_os = "android")] mod jvm;
+#[cfg(target_os = "android")] mod loader;
 mod patches;
 mod picker;
 mod settings;
 mod socket;
-mod staff;
-mod store;
+#[cfg(target_os = "android")] mod staff;
+#[cfg(target_os = "android")] mod store;
 
 pub(crate) use phoenix_runtime::highlight;
 
@@ -30,6 +32,8 @@ use std::{
 };
 
 use phoenix_hook::image::Image;
+#[cfg(target_os = "android")]
+use phoenix_runtime::update::Update;
 use phoenix_runtime::{
    Error,
    Notice,
@@ -50,7 +54,6 @@ use phoenix_runtime::{
       Rows,
       StoreError,
    },
-   update::Update,
 };
 use rquickjs::{
    Ctx,
@@ -62,23 +65,29 @@ use crate::patches::banners::{
    BannerAction,
 };
 
-struct Android;
+struct Mobile;
 
-/// Starts phoenix inside Phoenix's Android client.
+/// Starts phoenix inside Phoenix's mobile client.
 pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
-   phoenix_runtime::start(&Android, home, bundled)
+   phoenix_runtime::start(&Mobile, home, bundled)
 }
 
 /// Phoenix Unlock's green, for update banners.
 const ACCENT: i64 = 0xFF23_A55A;
 
-impl Platform for Android {
+impl Platform for Mobile {
    fn send(&self, request: &Request) -> Result<Response, FetchError> {
-      fetch::send(request)
+      #[cfg(target_os = "android")]
+      return fetch::send(request);
+      #[cfg(target_os = "ios")]
+      return foundation::send(request);
    }
 
    fn query(&self, database: &Path, sql: &str, args: &[String]) -> Result<Rows, StoreError> {
-      store::query(database, sql, args)
+      #[cfg(target_os = "android")]
+      return store::query(database, sql, args);
+      #[cfg(target_os = "ios")]
+      return phoenix_runtime::store::sqlite(database, sql, args);
    }
 
    fn discord(
@@ -116,26 +125,44 @@ impl Platform for Android {
       js::unload(ctx, plugin);
    }
 
+   #[cfg(target_os = "android")]
    fn staff(&self, image: &'static Image<'static>) {
       staff::start(image);
    }
 
+   // The site's iOS patcher unlocks staff in the IPA's bytes.
+   #[cfg(target_os = "ios")]
+   fn staff(&self, _image: &'static Image<'static>) {}
+
+   #[cfg(target_os = "android")]
    fn gateway(&self, store: *mut c_void) {
-      bridge::attach();
+      bridge::jni::attach();
       // SAFETY: every registry handler takes the store state first, and this
       // runs inside one.
       unsafe { staff::apply(store) };
    }
 
+   #[cfg(target_os = "ios")]
+   fn gateway(&self, _store: *mut c_void) {}
+
    fn rewritten(&self, original: String, shown: String) {
       patches::remember_original(shown, original);
    }
 
+   #[cfg(target_os = "android")]
    fn before_plugins(&self, home: &Path) {
       loader::adopt_staged(home, &home.join("plugins"));
    }
 
+   #[cfg(target_os = "ios")]
+   fn before_plugins(&self, _home: &Path) {
+      if let Some(state) = phoenix_runtime::state() {
+         bridge::ios::start(&state.image);
+      }
+   }
+
    fn started(&self, _first_run: bool, _plugins: &[String]) {
+      #[cfg(target_os = "android")]
       if let Some(state) = phoenix_runtime::state() {
          loader::forget_update(&state.files_dir());
       }
@@ -198,10 +225,12 @@ impl Platform for Android {
       }
    }
 
+   #[cfg(target_os = "android")]
    fn updates_loader(&self) -> bool {
       true
    }
 
+   #[cfg(target_os = "android")]
    fn update_loader(&self, version: &str, update: &Update) {
       loader::install(version, update);
    }

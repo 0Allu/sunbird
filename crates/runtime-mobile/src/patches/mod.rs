@@ -480,7 +480,8 @@ pub fn start() {
    bridge::install(Box::new(PatchSink));
    // The chat header and message box are built once, before the first
    // gateway event would attach the bridge.
-   bridge::attach();
+   #[cfg(target_os = "android")]
+   bridge::jni::attach();
    thread::spawn(move || {
       for job in receiver {
          let ops = run(job);

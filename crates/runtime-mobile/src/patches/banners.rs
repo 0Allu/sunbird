@@ -117,7 +117,7 @@ impl Patches {
 
    pub fn show_banner(&mut self, spec: BannerSpec) -> Vec<Op> {
       let ready = self.mirror.root().is_some()
-         && !bridge::guest_host().is_null()
+         && bridge::ready()
          && self
             .root_ready_at
             .is_some_and(|at| at.elapsed() >= BANNER_STARTUP_DELAY);
@@ -133,7 +133,7 @@ impl Patches {
 
    pub fn flush_banners(&mut self) -> Vec<Op> {
       self.banner_flush_scheduled = false;
-      if self.mirror.root().is_none() || bridge::guest_host().is_null() {
+      if self.mirror.root().is_none() || !bridge::ready() {
          return Vec::new();
       }
       if self

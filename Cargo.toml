@@ -7,7 +7,6 @@ members  = [
   "crates/patcher-web",
   "crates/runtime",
   "crates/runtime-desktop",
-  "crates/runtime-ios",
   "crates/runtime-mobile",
   "crates/sigs",
   "crates/sigscan",
@@ -46,7 +45,6 @@ patcher                 = { path = "crates/patcher" }
 phoenix-hook            = { path = "crates/hook" }
 phoenix-runtime         = { path = "crates/runtime" }
 phoenix-runtime-desktop = { path = "crates/runtime-desktop" }
-phoenix-runtime-ios     = { path = "crates/runtime-ios" }
 phoenix-runtime-mobile  = { path = "crates/runtime-mobile" }
 phoenix-sigs            = { path = "crates/sigs" }
 phoenix-ui-desktop      = { path = "crates/ui-desktop" }
