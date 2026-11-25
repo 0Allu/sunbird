@@ -65,14 +65,6 @@ const APP_BROWSERS: [&str; 6] = [
    "microsoft-edge",
 ];
 
-/// A helper process without Sunbird's `LD_PRELOAD`, so it is not injected
-/// into the browser, file manager or dialogs it starts.
-fn helper(program: impl Into<PathBuf>) -> Command {
-   let mut command = Command::new(program.into());
-   command.env_remove("LD_PRELOAD");
-   command
-}
-
 fn on_path(name: &str) -> Option<PathBuf> {
    env::split_paths(&env::var_os("PATH")?)
       .map(|dir| dir.join(name))
@@ -102,11 +94,11 @@ impl DesktopHost for Host {
       let wayland = env::var_os("WAYLAND_DISPLAY").is_some();
       let mut tools = Vec::with_capacity(3);
       if wayland {
-         tools.push(helper("wl-copy"));
+         tools.push(Command::new("wl-copy"));
       }
-      let mut xclip = helper("xclip");
+      let mut xclip = Command::new("xclip");
       xclip.args(["-selection", "clipboard"]);
-      let mut xsel = helper("xsel");
+      let mut xsel = Command::new("xsel");
       xsel.args(["--clipboard", "--input"]);
       tools.extend([xclip, xsel]);
       if tools.into_iter().any(|tool| pipe_to(tool, text)) {
@@ -118,22 +110,33 @@ impl DesktopHost for Host {
    }
 
    fn open(target: &str) -> Result<(), Error> {
-      spawn_reaped(helper("xdg-open").arg(target))
+      spawn_reaped(Command::new("xdg-open").arg(target))
    }
 
    fn app_browser() -> Option<Command> {
-      APP_BROWSERS.into_iter().find_map(on_path).map(helper)
+      // A snap browser can't use a profile in a hidden directory of $HOME,
+      // and fails after spawning, so the plain URL fallback never runs.
+      APP_BROWSERS
+         .into_iter()
+         .filter_map(on_path)
+         .find(|path| {
+            !path.starts_with("/snap/")
+               && path
+                  .canonicalize()
+                  .is_ok_and(|real| real.file_name().is_none_or(|name| name != "snap"))
+         })
+         .map(Command::new)
    }
 
    fn pick_js_path() -> Option<PathBuf> {
-      let mut zenity = helper("zenity");
+      let mut zenity = Command::new("zenity");
       zenity.args([
          "--file-selection",
          "--title=Install Sunbird Plugin (.js)",
          "--file-filter=JavaScript Plugins | *.js",
          "--file-filter=All Files | *",
       ]);
-      let mut kdialog = helper("kdialog");
+      let mut kdialog = Command::new("kdialog");
       kdialog.args([
          "--title",
          "Install Sunbird Plugin (.js)",
@@ -151,7 +154,7 @@ impl DesktopHost for Host {
    }
 
    fn notify(title: &str, body: &str) {
-      let mut send = helper("notify-send");
+      let mut send = Command::new("notify-send");
       send.args(["--app-name=Sunbird", "--", title, body]);
       if let Err(err) = spawn_reaped(&mut send) {
          log::debug!("notify: {err}");
@@ -191,7 +194,7 @@ fn icon() -> String {
 }
 
 fn start_indicator() -> Result<(), Error> {
-   let mut python = helper("python3");
+   let mut python = Command::new("python3");
    python
       .args(["-I", "-c", TRAY_PY])
       .arg(icon())
@@ -225,7 +228,8 @@ fn start_indicator() -> Result<(), Error> {
          drop(stdin);
          if child.wait().is_ok_and(|status| !status.success()) {
             log::info!(
-               "tray: needs python3 with GTK 3 and AppIndicator bindings, Sunbird Settings is at                 {}",
+               "tray: needs python3 with GTK 3 and AppIndicator bindings; Sunbird Settings is at \
+                {}",
                config().map_or("", |config| &config.dashboard_url)
             );
          }
