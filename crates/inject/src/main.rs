@@ -102,6 +102,19 @@ mod windows {
       fn ResumeThread(thread: Handle) -> u32;
       fn TerminateProcess(process: Handle, code: u32) -> i32;
       fn CloseHandle(handle: Handle) -> i32;
+      fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> Handle;
+      fn Process32FirstW(snapshot: Handle, entry: *mut c_void) -> i32;
+      fn Process32NextW(snapshot: Handle, entry: *mut c_void) -> i32;
+      fn Module32FirstW(snapshot: Handle, entry: *mut c_void) -> i32;
+      fn Module32NextW(snapshot: Handle, entry: *mut c_void) -> i32;
+      fn OpenProcess(access: u32, inherit: i32, process_id: u32) -> Handle;
+      fn QueryFullProcessImageNameW(
+         process: Handle,
+         flags: u32,
+         name: *mut u16,
+         size: *mut u32,
+      ) -> i32;
+      fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
    }
 
    #[link(name = "user32")]
@@ -156,6 +169,110 @@ mod windows {
       };
    }
 
+   /// Asks a yes or no question, true for yes.
+   fn ask(text: &str) -> bool {
+      // `MB_YESNO | MB_ICONQUESTION`, and `IDYES`.
+      // SAFETY: both strings are NUL-terminated and outlive the call.
+      unsafe {
+         MessageBoxW(
+            ptr::null_mut(),
+            wide(text).as_ptr(),
+            wide("Sunbird").as_ptr(),
+            0x24,
+         ) == 6
+      }
+   }
+
+   const SNAPSHOT_PROCESSES: u32 = 0x2;
+   const SNAPSHOT_MODULES: u32 = 0x8 | 0x10;
+   /// `TERMINATE | QUERY_LIMITED_INFORMATION | SYNCHRONIZE`.
+   const PROCESS_ACCESS: u32 = 0x0010_1001;
+
+   /// The UTF-16 text in `entry` from byte `at`, up to its NUL.
+   fn entry_text(entry: &[u8], at: usize) -> OsString {
+      use std::os::windows::ffi::OsStringExt;
+      let units: Vec<u16> = entry[at..]
+         .chunks_exact(2)
+         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+         .take_while(|&unit| unit != 0)
+         .collect();
+      OsString::from_wide(&units)
+   }
+
+   /// Every running process of `exe`, opened to end it: Discord's main
+   /// process and its helpers.
+   fn running(exe: &Path) -> Vec<(Handle, u32)> {
+      let name = exe.file_name().unwrap_or_default();
+      let want = exe.as_os_str().to_string_lossy().to_lowercase();
+      // SAFETY: a process snapshot of the whole system.
+      let snapshot = unsafe { CreateToolhelp32Snapshot(SNAPSHOT_PROCESSES, 0) };
+      if snapshot as isize == -1 {
+         return Vec::new();
+      }
+      // `PROCESSENTRY32W`: its size first, the pid at 8, the file name at 44.
+      let mut entry = [0u64; 71];
+      entry[0] = 568;
+      let mut found = Vec::new();
+      // SAFETY: `entry` is a 568-byte `PROCESSENTRY32W` with its size set.
+      let mut more = unsafe { Process32FirstW(snapshot, entry.as_mut_ptr().cast()) } != 0;
+      while more {
+         let bytes: &[u8] = as_bytes(&entry);
+         let pid = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+         if entry_text(bytes, 44).eq_ignore_ascii_case(name) {
+            // SAFETY: opens by pid, checked for null below.
+            let process = unsafe { OpenProcess(PROCESS_ACCESS, 0, pid) };
+            if !process.is_null() {
+               let mut path = [0u16; 1024];
+               let mut len = path.len() as u32;
+               // SAFETY: `path` holds `len` units.
+               let named = unsafe {
+                  QueryFullProcessImageNameW(process, 0, path.as_mut_ptr(), &raw mut len)
+               } != 0;
+               let path = String::from_utf16_lossy(&path[..len as usize]).to_lowercase();
+               if named && path == want {
+                  found.push((process, pid));
+               } else {
+                  // SAFETY: opened above, closed once.
+                  unsafe { CloseHandle(process) };
+               }
+            }
+         }
+         // SAFETY: as above.
+         more = unsafe { Process32NextW(snapshot, entry.as_mut_ptr().cast()) } != 0;
+      }
+      // SAFETY: the snapshot is closed once.
+      unsafe { CloseHandle(snapshot) };
+      found
+   }
+
+   /// Whether process `pid` has a module named `dll` loaded.
+   fn has_module(pid: u32, dll: &OsStr) -> bool {
+      // SAFETY: a module snapshot of one process.
+      let snapshot = unsafe { CreateToolhelp32Snapshot(SNAPSHOT_MODULES, pid) };
+      if snapshot as isize == -1 {
+         return false;
+      }
+      // `MODULEENTRY32W`: its size first, the module name at 48.
+      let mut entry = [0u64; 135];
+      entry[0] = 1080;
+      let mut found = false;
+      // SAFETY: `entry` is a 1080-byte `MODULEENTRY32W` with its size set.
+      let mut more = unsafe { Module32FirstW(snapshot, entry.as_mut_ptr().cast()) } != 0;
+      while more && !found {
+         found = entry_text(as_bytes(&entry), 48).eq_ignore_ascii_case(dll);
+         // SAFETY: as above.
+         more = unsafe { Module32NextW(snapshot, entry.as_mut_ptr().cast()) } != 0;
+      }
+      // SAFETY: the snapshot is closed once.
+      unsafe { CloseHandle(snapshot) };
+      found
+   }
+
+   fn as_bytes(words: &[u64]) -> &[u8] {
+      // SAFETY: any `u64`s are valid bytes, and the length covers them.
+      unsafe { std::slice::from_raw_parts(words.as_ptr().cast(), size_of_val(words)) }
+   }
+
    fn wide(text: impl AsRef<OsStr>) -> Vec<u16> {
       text.as_ref().encode_wide().chain([0]).collect()
    }
@@ -194,8 +311,45 @@ mod windows {
          None => install(&local, &home)?,
       };
       let dll = dll.canonicalize()?;
+      let args: Vec<OsString> = args.skip_while(|arg| arg == "--").collect();
+
+      // A second Discord hands off to the running one and exits, so Sunbird
+      // would never run in the Discord the user sees.
+      let open = running(&exe);
+      if !open.is_empty() {
+         let dll_name = dll.file_name().unwrap_or_default();
+         let with_sunbird = open.iter().any(|&(_, pid)| has_module(pid, dll_name));
+         let restart = !with_sunbird
+            && ask(
+               "Discord is already running without Sunbird.
+
+Restart it with Sunbird? A call                 you are in will end.",
+            );
+         for &(process, _) in &open {
+            if restart {
+               // SAFETY: opened with TERMINATE by `running`.
+               unsafe { TerminateProcess(process, 0) };
+            }
+         }
+         for (process, _) in open {
+            if restart {
+               // SAFETY: opened with SYNCHRONIZE by `running`.
+               unsafe { WaitForSingleObject(process, 5000) };
+            }
+            // SAFETY: opened by `running`, closed once.
+            unsafe { CloseHandle(process) };
+         }
+         if !restart {
+            // Brings the running Discord forward, or leaves it as the user chose.
+            if with_sunbird {
+               Command::new(&exe).args(&args).current_dir(&app).spawn()?;
+            }
+            return Ok(());
+         }
+      }
+
       let mut command = OsString::from(format!("\"{}\"", exe.display()));
-      for arg in args.skip_while(|arg| arg == "--") {
+      for arg in &args {
          command.push(" ");
          command.push(arg);
       }

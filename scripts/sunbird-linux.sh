@@ -95,9 +95,29 @@ if [ -n "\$version" ] && [ "\$version" != "\$(cat "\$home/version" 2>/dev/null)"
    fi
 fi
 [ "\${1:-}" = --update ] && exit 0
+# A second Discord hands off to the running one and exits, so one running
+# without Sunbird is restarted with it.
+discord=$(q "$discord")
+pids= sunbird=
+for p in /proc/[0-9]*; do
+   if [ "\$(readlink "\$p/exe" 2>/dev/null)" = "\$discord" ] ||
+      tr '\\0' '\\n' <"\$p/environ" 2>/dev/null | grep -qxF "APPIMAGE=\$discord"; then
+      pids="\$pids \${p#/proc/}"
+      grep -q libphoenix "\$p/maps" 2>/dev/null && sunbird=1
+   fi
+done
+if [ -n "\$pids" ] && [ -z "\$sunbird" ]; then
+   kill \$pids 2>/dev/null
+   for _ in 1 2 3 4 5 6 7 8 9 10; do
+      alive=
+      for pid in \$pids; do kill -0 "\$pid" 2>/dev/null && alive=1; done
+      [ -z "\$alive" ] && break
+      sleep 0.5
+   done
+fi
 [ -f "\$home/libphoenix.so" ] &&
    export LD_PRELOAD="\$home/libphoenix.so\${LD_PRELOAD:+:\$LD_PRELOAD}"
-exec $(q "$discord") "\$@"
+exec "\$discord" "\$@"
 EOF
 chmod +x "$home/sunbird"
 
