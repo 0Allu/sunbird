@@ -6,7 +6,7 @@
 #   sh sunbird-linux.sh [Discord AppImage or discord-phoenix binary]
 #   sh sunbird-linux.sh --uninstall
 #
-# SUNBIRD_SITE points it at another server for testing.
+# SUNBIRD_SITE points it at a local server for testing.
 set -eu
 
 site=${SUNBIRD_SITE:-https://assets.sunbird.tools}
@@ -20,13 +20,36 @@ if [ "${1:-}" = --uninstall ]; then
    exit 0
 fi
 
+# What the site serves is loaded into Discord, so only https, or plain http to
+# this machine for testing.
+case $site in
+   https://*) proto==https ;;
+   http://127.0.0.1 | http://127.0.0.1[:/]* | http://localhost | http://localhost[:/]*) proto==http ;;
+   *)
+      echo "SUNBIRD_SITE must be https:// or a localhost server, not $site" >&2
+      exit 1
+      ;;
+esac
+
+# LD_PRELOAD splits on spaces and colons, and the desktop entry's Exec= would
+# need escaping for the rest.
+case $home in
+   *[[:space:]:\"\$\`\\\']*)
+      echo "Sunbird can't be installed under $home: set XDG_DATA_HOME to a path without spaces, colons or quotes." >&2
+      exit 1
+      ;;
+esac
+
 discord=${1:-}
 if [ -z "$discord" ]; then
    for found in \
       "$(command -v discord-phoenix 2>/dev/null || true)" \
       "$HOME"/Applications/discord-desktop*.AppImage \
       "$HOME"/Downloads/discord-desktop*.AppImage; do
-      [ -f "$found" ] && discord=$found
+      if [ -f "$found" ]; then
+         discord=$found
+         break
+      fi
    done
 fi
 if [ -z "$discord" ] || [ ! -f "$discord" ]; then
@@ -34,27 +57,35 @@ if [ -z "$discord" ] || [ ! -f "$discord" ]; then
    exit 1
 fi
 discord=$(realpath "$discord")
-chmod +x "$discord"
+[ -x "$discord" ] || chmod +x "$discord"
+
+# Single-quotes a value for the generated launcher.
+q() { printf "'%s'" "$(printf %s "$1" | sed "s/'/'\\\\''/g")"; }
 
 mkdir -p "$home" "$data/applications"
 # The launcher brings the loader up to the site's version before each start,
-# and keeps the one it has when offline.
+# and keeps the one it has when offline. Each run downloads to its own file, so
+# two starts at once never load a half-written one.
 cat >"$home/sunbird" <<EOF
 #!/bin/sh
-home='$home'
-site='$site'
-version=\$(curl -fsS --max-time 5 "\$site/version.json" 2>/dev/null |
+home=$(q "$home")
+site=$(q "$site")
+fetch() { curl -fsSL --proto $proto --proto-redir =https "\$@" 2>/dev/null; }
+version=\$(fetch --max-time 5 "\$site/version.json" |
    sed -n 's/.*"loader": *"\([^"]*\)".*/\1/p')
-if [ -n "\$version" ] && [ "\$version" != "\$(cat "\$home/version" 2>/dev/null)" ] &&
-   curl -fsSL --max-time 60 -o "\$home/libphoenix.so.new" \\
-      "\$site/plugins/libphoenix-linux-x86_64.so" 2>/dev/null; then
-   mv "\$home/libphoenix.so.new" "\$home/libphoenix.so"
-   echo "\$version" >"\$home/version"
+if [ -n "\$version" ] && [ "\$version" != "\$(cat "\$home/version" 2>/dev/null)" ]; then
+   tmp=\$(mktemp "\$home/libphoenix.so.XXXXXX")
+   if fetch --max-time 60 -o "\$tmp" "\$site/plugins/libphoenix-linux-x86_64.so"; then
+      mv "\$tmp" "\$home/libphoenix.so"
+      echo "\$version" >"\$home/version"
+   else
+      rm -f "\$tmp"
+   fi
 fi
 [ "\${1:-}" = --update ] && exit 0
 [ -f "\$home/libphoenix.so" ] &&
    export LD_PRELOAD="\$home/libphoenix.so\${LD_PRELOAD:+:\$LD_PRELOAD}"
-exec '$discord' "\$@"
+exec $(q "$discord") "\$@"
 EOF
 chmod +x "$home/sunbird"
 
