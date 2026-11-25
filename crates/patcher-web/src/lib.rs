@@ -131,11 +131,39 @@ impl Build {
    }
 }
 
-/// Patches a decrypted IPA: opens the iOS access gate and forces `isStaffEnv`
-/// true, returning the repacked archive. The page turns the bytes into a `Blob`
-/// for download.
-#[wasm_bindgen(js_name = patchIpa)]
-pub fn patch_ipa(ipa: &[u8]) -> Result<Uint8Array, JsError> {
-   let out = patcher::ios::build_patched_ipa(ipa)?;
-   Ok(Uint8Array::from(&out[..]))
+/// A decrypted IPA to patch, with the iOS loader and the plugins to bundle.
+#[wasm_bindgen]
+#[derive(Default)]
+pub struct IpaBuild {
+   loader:  Vec<u8>,
+   plugins: BTreeMap<String, String>,
+}
+
+#[wasm_bindgen]
+impl IpaBuild {
+   #[wasm_bindgen(constructor)]
+   #[must_use]
+   pub fn new() -> Self {
+      Self::default()
+   }
+
+   #[wasm_bindgen(js_name = setLoader)]
+   pub fn set_loader(&mut self, bytes: Vec<u8>) {
+      self.loader = bytes;
+   }
+
+   #[wasm_bindgen(js_name = addPlugin)]
+   pub fn add_plugin(&mut self, name: String, source: String) {
+      self.plugins.insert(name, source);
+   }
+
+   /// Opens the access gate, forces `isStaffEnv` true and adds the loader and
+   /// plugins, returning the repacked archive for the page to download.
+   pub fn patch(&self, ipa: &[u8]) -> Result<Uint8Array, JsError> {
+      if self.loader.is_empty() {
+         return Err(JsError::new("no iOS loader set"));
+      }
+      let out = patcher::ios::build_patched_ipa(ipa, &self.loader, &self.plugins)?;
+      Ok(Uint8Array::from(&out[..]))
+   }
 }
