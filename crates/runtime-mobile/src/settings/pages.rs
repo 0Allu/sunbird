@@ -208,7 +208,7 @@ fn debug_section() -> Tree {
 
 pub fn install_sections(status: Option<&(String, i64)>, plugins: &[PluginInfo]) -> Vec<Tree> {
    let mut sections = vec![
-      section("From Phoenix Unlock", listed_rows(plugins)),
+      section("From Sunbird", listed_rows(plugins)),
       section("From a URL", vec![text_field(
          Field::Install,
          Some(ICON_PLUGIN),
