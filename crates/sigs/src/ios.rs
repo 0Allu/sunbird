@@ -74,6 +74,19 @@ const ACCESS_GATE: Pattern = Pattern::new(
     36",
 );
 
+/// The first bytes of a Hermes bytecode bundle like `main.jsbundle`.
+pub const HERMES_MAGIC: [u8; 8] = 0x1F19_03C1_03BC_1FC6_u64.to_le_bytes();
+
+/// The `isStaffEnv` getter's prologue in the Hermes bytecode, up to its
+/// `LoadConstFalse; Ret` body. Read on Discord 357.0 (1.12.2).
+const STAFF_ENV: Pattern =
+   Pattern::new("89 01 02 93 00 D5 06 01 00 93 01 34 02 00 3B 02 02 03 45 05 02 00 22 13");
+
+/// The `isStaffEnv` getter in `main.jsbundle`, as a file offset.
+pub fn staff_env(bundle: &[u8]) -> Found<usize> {
+   one("isStaffEnv", &STAFF_ENV.find_in(bundle))
+}
+
 /// The two access-gate evaluators' entry points, which open the gate when both
 /// return `Some(true)`.
 pub fn access_gate(image: &Image<'_>) -> Found<[usize; 2]> {

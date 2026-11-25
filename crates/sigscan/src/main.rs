@@ -43,14 +43,19 @@ use phoenix_sigs::{
    registry::GatewayRegistry,
 };
 
-const USAGE: &str = "usage: sigscan <library.so | Discord.exe> [check | strings <text> | refs \
-                     <addr> | dis <addr> [count]]";
+const USAGE: &str = "usage: sigscan <library.so | Discord.exe | PhoenixFatClient | main.jsbundle> \
+                     [check | strings <text> | refs <addr> | dis <addr> [count]]";
 
 fn main() -> misstep::Result<()> {
    misstep::install_panic_hook();
    let args = env::args().skip(1).collect::<Vec<String>>();
    let path = args.first().context(USAGE)?;
    let data = fs::read(path).with_context(|| format!("reading {path}"))?;
+   if data.starts_with(&ios::HERMES_MAGIC) {
+      let at = ios::staff_env(&data).map_err(misstep::Report::msg)?;
+      println!("ok    {:<20} {at:#x}", "staff env");
+      return Ok(());
+   }
    let parsed = BinaryFile::parse(path, &data)?;
    let image = parsed.image();
    let base = image.pdata.map_or(0, |(base, ..)| base);

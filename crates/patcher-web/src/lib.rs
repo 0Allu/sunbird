@@ -130,3 +130,12 @@ impl Build {
          .collect())
    }
 }
+
+/// Patches a decrypted IPA: opens the iOS access gate and forces `isStaffEnv`
+/// true, returning the repacked archive. The page turns the bytes into a `Blob`
+/// for download.
+#[wasm_bindgen(js_name = patchIpa)]
+pub fn patch_ipa(ipa: &[u8]) -> Result<Uint8Array, JsError> {
+   let out = patcher::ios::build_patched_ipa(ipa)?;
+   Ok(Uint8Array::from(&out[..]))
+}
