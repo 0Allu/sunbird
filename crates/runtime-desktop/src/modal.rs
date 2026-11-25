@@ -1648,9 +1648,11 @@ fn build_overlay(window: *mut c_void, app: *mut c_void) -> Option<RawDiv> {
                if let Some(mut wrap) = gpui::v_stack(4.0) {
                   gpui::style_div(&mut wrap, |s| {
                      s.length(s.at.size[0], W_FULL);
-                     s.length(s.at.min_size[1], gpui_px(380.0));
+                     // Size 3 is the widest modal Discord has, so give the
+                     // code the height instead.
+                     s.length(s.at.min_size[1], gpui_px(560.0));
                      s.shared_string(s.at.font_family, SharedString::from_static(MONO_FONT));
-                     s.length(s.at.font_size, gpui_px(13.0));
+                     s.length(s.at.font_size, gpui_px(12.5));
                   });
                   if gpui::push_any(&mut wrap, &mut ta_any) {
                      *b = gpui::push_div(std::mem::replace(b, RawDiv::zeroed()), wrap);
@@ -1694,7 +1696,7 @@ fn build_overlay(window: *mut c_void, app: *mut c_void) -> Option<RawDiv> {
          }
          (
             format!("Edit Plugin · {}", ed.plugin),
-            Some("Changes are saved to disk and reloaded immediately.".to_owned()),
+            None,
             3,
             body,
             footer,
