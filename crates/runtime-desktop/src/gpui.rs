@@ -37,6 +37,11 @@ use phoenix_sigs::desktop::{
    layout,
 };
 
+use crate::modal::{
+   FieldKind,
+   SettingField,
+};
+
 /// `gpui::SharedString` (24 bytes): tag `0x18` is `Static(&'static str)` and
 /// `0x19` is `Arc<str>`, the `ArcInner` at `ptr` with the bytes at `+0x10`.
 /// Not `Copy`: a heap one must reach Discord exactly once, which drops it.
@@ -324,6 +329,7 @@ enum Action {
    TogglePlugin(String),
    ReloadPlugin(String),
    EditPluginCode(String),
+   EditSetting(SettingField),
    OpenInstallUrl,
    InstallFromFile,
    UninstallPlugin(String),
@@ -459,6 +465,9 @@ unsafe extern "C" fn button_callback(
          },
          Action::OpenInstallUrl => {
             crate::modal::open_install_url();
+         },
+         Action::EditSetting(field) => {
+            crate::modal::open_setting_editor(field);
          },
          Action::InstallFromFile => {
             std::thread::spawn(|| {
@@ -1475,6 +1484,29 @@ fn render_plugins_tab(
          for setting in &plugin.settings {
             let sid = format!("sunbird-set-{}-{}", plugin.name, setting.key);
             let sdesc = setting.description.as_deref().unwrap_or("");
+            // A text, number or secret setting: its value, and Edit for an input.
+            let edit_row = |shown: &str, initial: String, kind: FieldKind| {
+               let sub = if sdesc.is_empty() {
+                  shown.to_owned()
+               } else {
+                  format!("{sdesc} · {shown}")
+               };
+               b.action_row(
+                  &sid,
+                  &setting.title,
+                  &sub,
+                  "Edit",
+                  BtnVariant::Secondary,
+                  BtnSize::Small,
+                  Action::EditSetting(SettingField {
+                     plugin: plugin.name.clone(),
+                     key: setting.key.clone(),
+                     title: setting.title.clone(),
+                     initial,
+                     kind,
+                  }),
+               )
+            };
             match &setting.control {
                Control::Switch(val) => {
                   drawer = b.push_div(
@@ -1569,33 +1601,16 @@ fn render_plugins_tab(
                   );
                },
                Control::Text(val) => {
-                  let sub = if sdesc.is_empty() {
-                     format!("Value: {val}")
-                  } else {
-                     format!("{sdesc} · Value: {val}")
-                  };
-                  drawer = b.push_div(drawer, b.text_block(&setting.title, &sub));
+                  let shown = if val.is_empty() { "empty" } else { val.as_str() };
+                  drawer = b.push_div(drawer, edit_row(shown, val.clone(), FieldKind::Text));
                },
                Control::Secret(val) => {
-                  let state = if val.is_empty() {
-                     "not set"
-                  } else {
-                     "configured"
-                  };
-                  let sub = if sdesc.is_empty() {
-                     format!("Secret ({state})")
-                  } else {
-                     format!("{sdesc} ({state})")
-                  };
-                  drawer = b.push_div(drawer, b.text_block(&setting.title, &sub));
+                  let shown = if val.is_empty() { "not set" } else { "set" };
+                  drawer = b.push_div(drawer, edit_row(shown, String::new(), FieldKind::Secret));
                },
                Control::Number(val) => {
-                  let sub = if sdesc.is_empty() {
-                     format!("Value: {val}")
-                  } else {
-                     format!("{sdesc} · Value: {val}")
-                  };
-                  drawer = b.push_div(drawer, b.text_block(&setting.title, &sub));
+                  let shown = val.to_string();
+                  drawer = b.push_div(drawer, edit_row(&shown, shown.clone(), FieldKind::Number));
                },
             }
          }

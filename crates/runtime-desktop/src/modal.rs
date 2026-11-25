@@ -171,8 +171,29 @@ struct CodeEditorModal {
    status:       Option<(String, bool)>,
 }
 
+/// What a plugin's text, number or secret setting holds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FieldKind {
+   Text,
+   Number,
+   /// Starts empty rather than showing the stored value.
+   Secret,
+}
+
+/// A plugin setting edited in the one-line field.
+#[derive(Clone)]
+pub struct SettingField {
+   pub plugin:  String,
+   pub key:     String,
+   pub title:   String,
+   pub initial: String,
+   pub kind:    FieldKind,
+}
+
+/// The one-line field modal: a plugin URL to install, or a setting.
 #[derive(Clone)]
 struct InstallUrlModal {
+   setting:      Option<SettingField>,
    pending_init: Option<String>,
    status:       Option<(String, bool)>,
    busy:         bool,
@@ -655,6 +676,18 @@ unsafe extern "C" fn modal_button_callback(
             }
          },
          ModalAction::SubmitInstallUrl => {
+            let setting = match ACTIVE_MODAL
+               .lock()
+               .unwrap_or_else(PoisonError::into_inner)
+               .as_ref()
+            {
+               Some(ActiveModal::InstallUrl(inst)) => inst.setting.clone(),
+               _ => return,
+            };
+            if let Some(field) = setting {
+               save_setting(app, &field);
+               return;
+            }
             let Some(raw) = read_url_field(app) else {
                set_install_status("Could not read URL field", true, false);
                return;
@@ -820,10 +853,45 @@ pub fn open_code_editor(plugin: String, initial_source: String) {
 pub fn open_install_url() {
    resolve_pending_choice();
    set_active(Some(ActiveModal::InstallUrl(InstallUrlModal {
+      setting:      None,
       pending_init: Some(String::new()),
       status:       None,
       busy:         false,
    })));
+}
+
+/// Opens the one-line field on a plugin's text, number or secret setting.
+pub fn open_setting_editor(field: SettingField) {
+   resolve_pending_choice();
+   set_active(Some(ActiveModal::InstallUrl(InstallUrlModal {
+      pending_init: Some(field.initial.clone()),
+      setting:      Some(field),
+      status:       None,
+      busy:         false,
+   })));
+}
+
+/// Stores the field's text as `field`'s value and closes the modal, or says
+/// why it can't.
+fn save_setting(app: *mut c_void, field: &SettingField) {
+   let Some(raw) = read_url_field(app) else {
+      set_install_status("Could not read the text field", true, false);
+      return;
+   };
+   let text = raw.trim();
+   let value = if field.kind == FieldKind::Number {
+      match text.parse::<f64>() {
+         Ok(number) if number.is_finite() => phoenix_runtime::Chosen::Number(number),
+         _ => {
+            set_install_status("Enter a number", true, false);
+            return;
+         },
+      }
+   } else {
+      phoenix_runtime::Chosen::Text(text.to_owned())
+   };
+   phoenix_runtime::set_setting(&field.plugin, &field.key, value);
+   close_active();
 }
 
 fn close_active() {
@@ -1583,6 +1651,7 @@ fn build_overlay(window: *mut c_void, app: *mut c_void) -> Option<RawDiv> {
          },
          ActiveModal::InstallUrl(inst) => {
             Snapshot::InstallUrl(InstallUrlModal {
+               setting:      inst.setting.clone(),
                pending_init: inst.pending_init.take(),
                status:       inst.status.clone(),
                busy:         inst.busy,
@@ -1708,7 +1777,16 @@ fn build_overlay(window: *mut c_void, app: *mut c_void) -> Option<RawDiv> {
             gpui::style_div(b, |s| s.length(s.at.size[0], W_FULL));
             if let Some(tf) = FIELD_SYM.get()
                && let Some(ent) = unsafe {
-                  ensure_field_entity(app, window, false, "https://example.com/plugin.js")
+                  ensure_field_entity(
+                     app,
+                     window,
+                     false,
+                     match &inst.setting {
+                        None => "https://example.com/plugin.js",
+                        Some(field) if field.kind == FieldKind::Secret => "Leave empty to clear",
+                        Some(_) => "",
+                     },
+                  )
                }
             {
                if let Some(init) = &inst.pending_init {
@@ -1755,7 +1833,11 @@ fn build_overlay(window: *mut c_void, app: *mut c_void) -> Option<RawDiv> {
          if !inst.busy
             && let Some(btn) = make_modal_button(
                "sunbird-url-install",
-               "Install Plugin",
+               if inst.setting.is_some() {
+                  "Save"
+               } else {
+                  "Install Plugin"
+               },
                BtnVariant::Primary,
                BtnSize::Medium,
                ModalAction::SubmitInstallUrl,
@@ -1763,13 +1845,16 @@ fn build_overlay(window: *mut c_void, app: *mut c_void) -> Option<RawDiv> {
          {
             footer.push(btn);
          }
-         (
-            "Install Plugin from URL".to_owned(),
-            Some("Paste an https:// URL pointing to a Sunbird .js plugin bundle.".to_owned()),
-            2,
-            body,
-            footer,
-         )
+         let (title, subtitle) = match &inst.setting {
+            Some(field) => (field.title.clone(), Some(field.plugin.clone())),
+            None => {
+               (
+                  "Install Plugin from URL".to_owned(),
+                  Some("Paste an https:// URL pointing to a Sunbird .js plugin bundle.".to_owned()),
+               )
+            },
+         };
+         (title, subtitle, 2, body, footer)
       },
    };
 
