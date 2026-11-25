@@ -736,16 +736,7 @@ fn choose_dialog<'js>(
    }
    let body = message.map(|text| ModalSection::Text { title: None, text });
    let title = title.unwrap_or_else(|| "Sunbird".to_owned());
-   in_background(ctx, move || {
-      let choice = modal::open_choice(title, body, items);
-      match choice.wait(Duration::from_secs(600)) {
-         Some(index) => Settlement::Int(Ok(index)),
-         None => {
-            modal::dismiss_choice(&choice);
-            Settlement::Int(Ok(-1))
-         },
-      }
-   })
+   in_background(ctx, move || answer(title, body, items))
 }
 
 /// `phoenix.ui.showSheet` as a native Mana modal with the code viewer.
@@ -769,16 +760,22 @@ fn sheet_dialog<'js>(
       highlight,
    };
    let title = title.unwrap_or_else(|| "Sunbird".to_owned());
-   in_background(ctx, move || {
-      let choice = modal::open_choice(title, Some(body), items);
-      match choice.wait(Duration::from_secs(600)) {
-         Some(index) => Settlement::Int(Ok(index)),
-         None => {
-            modal::dismiss_choice(&choice);
-            Settlement::Int(Ok(-1))
-         },
-      }
-   })
+   in_background(ctx, move || answer(title, Some(body), items))
+}
+
+/// Opens a choose dialog and waits for the picked index, -1 when it is
+/// dismissed or left open for ten minutes.
+fn answer(
+   title: String,
+   body: Option<ModalSection>,
+   items: Vec<modal::ChoiceOption>,
+) -> Settlement {
+   let choice = modal::open_choice(title, body, items);
+   let index = choice.wait(Duration::from_secs(600)).unwrap_or_else(|| {
+      modal::dismiss_choice(&choice);
+      -1
+   });
+   Settlement::Int(Ok(index))
 }
 
 fn parse_choice_options<'js>(options: &Object<'js>) -> rquickjs::Result<Vec<modal::ChoiceOption>> {
