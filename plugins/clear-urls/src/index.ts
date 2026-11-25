@@ -1,5 +1,5 @@
 // @description Removes tracking parameters from links you send and receive
-// @version 0.1.0
+// @version 0.1.1
 // @author amaanq
 
 const { gateway } = phoenix;
@@ -32,7 +32,7 @@ const clean = (url: string) => {
   return url.slice(0, query) + (kept.length ? `?${kept.join("&")}` : "") + url.slice(end);
 };
 
-const cleanLinks = (text: string) => text.replace(/https?:\/\/[^\s<>()]+/g, clean);
+const cleanLinks = (text: string) => text.replace(/https?:\/\/[^\s<>()]+/gi, clean);
 
 const rewrite = (message: { content?: string }) => {
   if (typeof message.content !== "string" || !message.content.includes("?")) return;

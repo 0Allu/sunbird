@@ -1,5 +1,5 @@
 // @description Rewrites X/Twitter, Instagram, TikTok, and custom links for working embeds
-// @version 1.2.0
+// @version 1.2.1
 // @author cmdr-chara
 
 const settings = phoenix.settings.define({
@@ -138,7 +138,7 @@ const rewriteHost = (host: string, customRules: [string, string][]): string | nu
 
 const fix = (text: string) => {
   const customRules = parseCustomRules();
-  return text.replace(/https?:\/\/[^\s<>()]+/g, (url) => {
+  return text.replace(/https?:\/\/[^\s<>()]+/gi, (url) => {
     const match = /^https?:\/\/([^/?#:]+)/i.exec(url);
     if (!match) return url;
     const next = rewriteHost(match[1], customRules);
@@ -146,4 +146,4 @@ const fix = (text: string) => {
   });
 };
 
-phoenix.messages.onSend((text) => (text.includes("http") ? fix(text) : undefined));
+phoenix.messages.onSend((text) => (/http/i.test(text) ? fix(text) : undefined));
