@@ -175,6 +175,10 @@ pub fn set_enabled(on: bool) {
 
 /// A random token every request must carry, once a platform asks for one.
 static TOKEN: OnceLock<String> = OnceLock::new();
+static TOKEN_FILE: OnceLock<std::path::PathBuf> = OnceLock::new();
+/// The port `dev.ps1` and the token file are for. Another instance that starts
+/// while this one runs binds the next port and hands off to this one.
+const SHELL_PORT: u16 = 4242;
 const TOKEN_COOKIE: &str = "sunbird_token";
 
 /// Makes every request carry a random per-start token, and writes it to
@@ -184,8 +188,28 @@ const TOKEN_COOKIE: &str = "sunbird_token";
 /// `/ui?token=` sets. Platforms whose shell is always on call this: any local
 /// process or app could otherwise reach `/eval` and run JS with the session.
 pub fn require_token(token_file: &Path) {
+   TOKEN.get_or_init(random_token);
+   let _ = TOKEN_FILE.set(token_file.to_owned());
+   // The runtime may have started the shell before the platform asked for a
+   // token.
+   write_token_file();
+}
+
+/// Writes the token where `dev.ps1` reads it, once this process owns the
+/// shell's port: a second launch that only hands off to the running client
+/// would otherwise replace the token the running shell checks.
+fn write_token_file() {
    use std::io::Write as _;
-   let token = TOKEN.get_or_init(random_token);
+   let (Some(token), Some(token_file)) = (TOKEN.get(), TOKEN_FILE.get()) else {
+      return;
+   };
+   let owns_port = BOUND_ADDR
+      .get()
+      .and_then(|addr| addr.parse::<SocketAddr>().ok())
+      .is_some_and(|addr| addr.port() == SHELL_PORT);
+   if !owns_port {
+      return;
+   }
    let mut options = std::fs::OpenOptions::new();
    options.write(true).create(true).truncate(true);
    // Other users on the machine must not read it out of a shared home; the
@@ -269,7 +293,7 @@ pub fn bound_addr() -> &'static str {
 }
 
 fn bind_localhost() -> std::io::Result<(TcpListener, SocketAddr)> {
-   for port in 4242u16..=4252 {
+   for port in SHELL_PORT..=SHELL_PORT + 10 {
       if let Ok(listener) = TcpListener::bind(("127.0.0.1", port))
          && let Ok(addr) = listener.local_addr()
       {
@@ -298,6 +322,7 @@ pub fn ensure_started() {
    };
    let addr_str = addr.to_string();
    let _ = BOUND_ADDR.set(addr_str.clone());
+   write_token_file();
    let _ = listener.set_nonblocking(true);
    log::info!("debug shell listening on http://{addr_str}");
 
