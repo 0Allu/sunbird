@@ -135,14 +135,36 @@ pub fn query(database: &Path, sql: &str, args: &[String]) -> Result<Rows, StoreE
       .query(database, sql, args)
 }
 
+/// Opens Phoenix's database read-only beside Phoenix's own connection.
+///
+/// Off Windows, file locks belong to the process, so this second SQLite inside
+/// Phoenix's process would take Phoenix's WAL locks as free, reset the shared
+/// `-shm` index Phoenix has mapped (a `SIGBUS` in Phoenix's database thread on
+/// Linux), and drop Phoenix's locks on close. `immutable` takes no locks and
+/// never opens the WAL or `-shm`, at the cost of not seeing writes Phoenix has
+/// not checkpointed yet.
+#[cfg(feature = "sqlite")]
+fn open(database: &Path) -> rusqlite::Result<Connection> {
+   let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+   if cfg!(windows) {
+      return Connection::open_with_flags(database, flags);
+   }
+   let path = database
+      .to_string_lossy()
+      .replace('%', "%25")
+      .replace('?', "%3f")
+      .replace('#', "%23");
+   Connection::open_with_flags(
+      format!("file:{path}?immutable=1"),
+      flags | OpenFlags::SQLITE_OPEN_URI,
+   )
+}
+
 /// [`query`] over a bundled SQLite, for platforms that have no SQLite of their
 /// own to reach.
 #[cfg(feature = "sqlite")]
 pub fn sqlite(database: &Path, sql: &str, args: &[String]) -> Result<Rows, StoreError> {
-   let conn = Connection::open_with_flags(
-      database,
-      OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-   )?;
+   let conn = open(database)?;
    let _ = conn.busy_timeout(Duration::from_secs(3));
    let mut stmt = conn.prepare(sql)?;
    let columns = stmt
