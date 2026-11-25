@@ -330,11 +330,28 @@ type SettingsLayerFn = unsafe extern "C" fn(
    *mut c_void,
 ) -> *mut RawAnyElement;
 static ORIG_SETTINGS_LAYER: OnceLock<SettingsLayerFn> = OnceLock::new();
-/// Set by each Settings render, taken by the next `Workspace` render. A frame
-/// renders `Workspace` first and then the Settings layer over it.
-static SETTINGS_SHOWN: AtomicBool = AtomicBool::new(false);
-/// Whether this frame's `Workspace` render drew the modal.
-static WORKSPACE_DREW: AtomicBool = AtomicBool::new(false);
+/// Whether the open modal is drawn inside the Settings layer, from Settings'
+/// first render while it is open until it closes. GPUI renders `Workspace` and
+/// Settings independently (each re-renders only when notified, and replays its
+/// last frame otherwise), so deciding this per frame made the modal flash
+/// between the two.
+static IN_SETTINGS: AtomicBool = AtomicBool::new(false);
+/// When Settings last rendered, in ms since [`epoch_ms`]'s start.
+static SETTINGS_AT: AtomicU64 = AtomicU64::new(0);
+/// Settings this recently rendered is still open: the press that opens a modal
+/// from it re-renders it first.
+const SETTINGS_RECENT_MS: u64 = 2000;
+
+fn epoch_ms() -> u64 {
+   static EPOCH: OnceLock<std::time::Instant> = OnceLock::new();
+   u64::try_from(
+      EPOCH
+         .get_or_init(std::time::Instant::now)
+         .elapsed()
+         .as_millis(),
+   )
+   .unwrap_or(u64::MAX)
+}
 static MODAL_SYM: OnceLock<ModalSymbols> = OnceLock::new();
 static FIELD_SYM: OnceLock<TextFieldSymbols> = OnceLock::new();
 static DISMISS_SYM: OnceLock<DismissSymbols> = OnceLock::new();
@@ -1158,12 +1175,20 @@ unsafe extern "C" fn overlay_render_detour(
    };
    // SAFETY: always render Discord's own overlay stack first.
    let out = unsafe { orig(sret, workspace, arg3, window, cx) };
-   // Settings drew last frame: the modal goes inside it, above it.
-   // ponytail: the frame Settings closes in draws no modal; the next redraw
-   // (any input) brings it back under `Workspace`.
-   let settings = SETTINGS_SHOWN.swap(false, Ordering::AcqRel);
-   WORKSPACE_DREW.store(false, Ordering::Release);
-   if settings || !MODAL_OPEN.load(Ordering::Acquire) || sret.is_null() || cx.is_null() {
+   if !MODAL_OPEN.load(Ordering::Acquire) {
+      IN_SETTINGS.store(false, Ordering::Release);
+      return out;
+   }
+   // ponytail: closing Settings under an open modal hides the modal until
+   // Settings opens again or the modal is replaced; nothing tells this render
+   // apart from one where Settings only replays its last frame.
+   // Settings may render after this in the same frame; deciding here keeps the
+   // modal from being built twice.
+   let at = SETTINGS_AT.load(Ordering::Acquire);
+   if at != 0 && epoch_ms().saturating_sub(at) < SETTINGS_RECENT_MS {
+      IN_SETTINGS.store(true, Ordering::Release);
+   }
+   if IN_SETTINGS.load(Ordering::Acquire) || sret.is_null() || cx.is_null() {
       return out;
    }
 
@@ -1184,7 +1209,6 @@ unsafe extern "C" fn overlay_render_detour(
          let mut scrim_any = scrim_any.assume_init();
          (msym.vec_push_any)(sret, &raw mut scrim_any);
       }
-      WORKSPACE_DREW.store(true, Ordering::Release);
    });
    out
 }
@@ -1200,16 +1224,15 @@ unsafe extern "C" fn settings_layer_detour(
    };
    // SAFETY: Discord's own render first, with its own arguments.
    let out = unsafe { orig(sret, layer, window, cx) };
-   SETTINGS_SHOWN.store(true, Ordering::Release);
-   if !MODAL_OPEN.load(Ordering::Acquire) || sret.is_null() || cx.is_null() {
+   SETTINGS_AT.store(epoch_ms().max(1), Ordering::Release);
+   if !MODAL_OPEN.load(Ordering::Acquire) {
+      IN_SETTINGS.store(false, Ordering::Release);
       return out;
    }
-   if WORKSPACE_DREW.swap(false, Ordering::AcqRel) {
-      // Settings opened this frame over the modal `Workspace` drew; the next
-      // frame draws it in here.
-      force_redraw();
+   if sret.is_null() || cx.is_null() {
       return out;
    }
+   IN_SETTINGS.store(true, Ordering::Release);
    let _ = std::panic::catch_unwind(|| {
       // SAFETY: `[cx]` is `*mut App` inside the layer's `Context`.
       let app = unsafe { *(cx.cast::<*mut c_void>()) };
