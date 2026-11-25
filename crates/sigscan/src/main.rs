@@ -266,12 +266,20 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
             "guest bridge",
             ios::bridge(image).map(|bridge| {
                format!(
-                  "{:#x}, vtable {:#x}, dispatch at +{:#x}",
-                  bridge.call, bridge.vtable, bridge.dispatch
+                  "{:#x}, vtable {:#x}, dispatch at +{:#x}, host vtable {:#x}",
+                  bridge.call, bridge.vtable, bridge.dispatch, bridge.host_vtable
                )
             }),
          );
-         report("host table", ios::host_table(image).map(at));
+         let names = ["Networking.request", "@http", "headers"];
+         report("host names", match ios::host_names(image, &names)[..] {
+            [Some(request), Some(http), Some(headers)] => {
+               Ok(format!(
+                  "request {request}, @http {http}, headers {headers}"
+               ))
+            },
+            ref numbers => Err(format!("{names:?} read as {numbers:?}")),
+         });
          report(
             "access gate",
             ios::access_gate(image).map(|[a, b]| format!("{a:#x}, {b:#x}")),

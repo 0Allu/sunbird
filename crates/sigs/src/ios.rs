@@ -1,6 +1,8 @@
 //! Locators for iOS Phoenix, `PhoenixFatClient.framework`, where the Swift host
 //! and the Rust guest share one image.
 
+use std::borrow::Cow;
+
 use phoenix_hook::{
    image::Image,
    pattern::Pattern,
@@ -26,14 +28,26 @@ const GUEST_BOX: Pattern = Pattern::new(
     ?? ?? ?? ?? 91 E0 A3 00 A9 E0 23 00 91 E1 03 13 AA",
 );
 
-/// The guest's trait vtable, which the host calls every view and host event
-/// through.
+/// The guest wrapping the host's callbacks before it boxes itself: `adrp x1,
+/// VTABLE; add x1, x1, VTABLE; add x8, sp, #8; bl new`, then [`GUEST_BOX`].
+const HOST_BOX: Pattern = Pattern::new(
+   "?? ?? ?? ?? 21 ?? ?? 91 E8 23 00 91 ?? ?? ?? 97 00 03 80 52 ?? ?? ?? 94 E0 01 00 B4",
+);
+
+/// `call(data, bytes, len)` in the host callbacks' vtable, its first method
+/// after drop, size and align. The answer comes back through `x8`.
+pub const HOST_CALL: usize = 0x18;
+
+/// The two vtables between the Swift host and the Rust guest.
 pub struct Bridge {
-   pub call:     usize,
-   pub vtable:   usize,
-   /// Offset of `dispatch` in the vtable, 0x20 on 357.0, after drop, size,
+   pub call:        usize,
+   /// The guest's, which the host calls every view and host event through.
+   pub vtable:      usize,
+   /// Offset of `dispatch` in `vtable`, 0x20 on 357.0, after drop, size,
    /// align and one method.
-   pub dispatch: usize,
+   pub dispatch:    usize,
+   /// The host callbacks', which the guest makes every host call through.
+   pub host_vtable: usize,
 }
 
 pub fn bridge(image: &Image<'_>) -> Found<Bridge> {
@@ -71,10 +85,22 @@ pub fn bridge(image: &Image<'_>) -> Found<Bridge> {
          "guest vtable at {vtable:#x}: dispatch {entry:#x} is not code"
       ));
    }
+
+   let host_box = one("host callbacks", &image.scan(HOST_BOX))?;
+   let host_vtable = adrp_add(image, host_box, 1)?;
+   let host_call = image
+      .read_usize(host_vtable + HOST_CALL)
+      .ok_or("host callbacks: the call slot is unmapped")?;
+   if !image.is_code(host_call) {
+      return Err(format!(
+         "host vtable at {host_vtable:#x}: call {host_call:#x} is not code"
+      ));
+   }
    Ok(Bridge {
       call,
       vtable,
       dispatch,
+      host_vtable,
    })
 }
 
@@ -97,20 +123,85 @@ fn adrp_add(image: &Image<'_>, at: usize, register: u32) -> Found<usize> {
    Ok((at & !0xFFF).wrapping_add_signed(offset) + low)
 }
 
-/// The guest's call into the host: `mov x2, x1; mov x1, x0; mov x19, x8;
-/// adrp x0, TLV; add x0, x0, TLV; ldr x8, [x0]; blr x8` gets this thread's
-/// host table, then `ldr x8, [x0]; cbz x8; ldr x0, [x0, #0x10]` calls its
-/// first entry with its third.
-const HOST_CALL: Pattern = Pattern::new(
-   "E2 03 01 AA E1 03 00 AA ?? 03 08 AA ?? ?? ?? ?? ?? ?? ?? ?? 08 00 40 F9 00 01 3F D6 08 00 40 \
-    F9 ?? ?? ?? B4 00 08 40 F9",
-);
+/// Phoenix's numbers for host modules, methods, events and fields, by name.
+///
+/// The host keeps them in Swift `[String: Int]` literals in its writable
+/// data, runs of 24-byte entries of a `String` then an `Int`. A name the
+/// entries give two numbers comes back `None`, like one they lack.
+#[must_use]
+pub fn host_names(image: &Image<'_>, names: &[&str]) -> Vec<Option<u16>> {
+   #[derive(Clone, Copy)]
+   enum Seen {
+      Not,
+      Once(u16),
+      Conflict,
+   }
 
-/// The thread-local descriptor `{thunk, key, offset}` of the guest's host
-/// table `{call, log, context}`, which the host fills on each guest thread.
-pub fn host_table(image: &Image<'_>) -> Found<usize> {
-   let at = one("host call", &image.scan(HOST_CALL))? + 12;
-   adrp_add(image, at, 0).map_err(|err| format!("host call: {err}"))
+   let mut seen = vec![Seen::Not; names.len()];
+   for segment in image.segments.iter().filter(|segment| segment.writable) {
+      let words = segment.bytes.as_chunks::<8>().0;
+      let entry = |at: usize| {
+         let [low, high, number] = words.get(at..at + 3)? else {
+            return None;
+         };
+         let number = u16::try_from(i64::from_le_bytes(*number)).ok()?;
+         Some((swift_string(image, *low, *high)?, number))
+      };
+      for at in 0..words.len() {
+         let Some((text, number)) = entry(at) else {
+            continue;
+         };
+         // A lone `{String, Int}` that Swift wrote at runtime is no table.
+         if entry(at + 3).is_none() && at.checked_sub(3).and_then(entry).is_none() {
+            continue;
+         }
+         for (name, slot) in names.iter().zip(&mut seen) {
+            if name.as_bytes() != &*text {
+               continue;
+            }
+            *slot = match *slot {
+               Seen::Not => Seen::Once(number),
+               Seen::Once(first) if first == number => Seen::Once(first),
+               _ => Seen::Conflict,
+            };
+         }
+      }
+   }
+   seen
+      .into_iter()
+      .map(|seen| {
+         match seen {
+            Seen::Once(number) => Some(number),
+            Seen::Not | Seen::Conflict => None,
+         }
+      })
+      .collect()
+}
+
+/// The bytes of a Swift `String` held as two words: up to 15 ASCII bytes
+/// inline, or an immortal literal's count and the address 32 bytes before its
+/// bytes.
+fn swift_string<'a>(image: &'a Image<'_>, low: [u8; 8], high: [u8; 8]) -> Option<Cow<'a, [u8]>> {
+   if high[7] & 0xF0 == 0xE0 {
+      let count = usize::from(high[7] & 0x0F);
+      let mut inline = [0; 15];
+      inline[..8].copy_from_slice(&low);
+      inline[8..].copy_from_slice(&high[..7]);
+      let (text, rest) = inline.split_at(count);
+      return (rest.iter().all(|&byte| byte == 0) && text.iter().all(u8::is_ascii_graphic))
+         .then(|| Cow::Owned(text.to_vec()));
+   }
+   let flags = u64::from_le_bytes(low);
+   let object = u64::from_le_bytes(high);
+   if flags >> 56 != 0xD0 || object >> 63 == 0 {
+      return None;
+   }
+   let count = usize::try_from(flags & 0xFFFF_FFFF_FFFF).ok()?;
+   let address = usize::try_from(object & 0x00FF_FFFF_FFFF_FFFF).ok()? + 32;
+   (count <= 64)
+      .then(|| image.read(address, count))
+      .flatten()
+      .map(Cow::Borrowed)
 }
 
 /// The two `ClientAccessGate` evaluators the launch gate reads before running
