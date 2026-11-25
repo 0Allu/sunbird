@@ -243,7 +243,7 @@ impl Platform for Desktop {
          dashboard_url:    remote::dashboard_url(),
          plugins_dir:      state.plugins_dir(),
          on_reload_all:    Some(Arc::new(phoenix_runtime::reload_all)),
-         on_check_updates: Some(Arc::new(phoenix_runtime::update::check)),
+         on_check_updates: Some(Arc::new(phoenix_runtime::update::check_now)),
       });
       phoenix_ui_desktop::notify(
          "Sunbird ready",
@@ -252,7 +252,9 @@ impl Platform for Desktop {
       phoenix_runtime::update::check();
    }
 
-   fn refresh(&self) {}
+   fn refresh(&self) {
+      modal::force_redraw();
+   }
 
    fn toast(&self, message: &str) {
       phoenix_ui_desktop::toast(message);
@@ -261,10 +263,18 @@ impl Platform for Desktop {
    fn notify(&self, notice: Notice<'_>) {
       match notice {
          Notice::UpdateAvailable(update) => {
-            let body = format!(
-               "Updated plugins: {}, click to open Settings",
-               update.plugins.join(", ")
-            );
+            let mut parts = Vec::new();
+            if let Some(version) = &update.loader {
+               parts.push(format!("Sunbird {version} (restart to update)"));
+            }
+            if !update.plugins.is_empty() {
+               parts.push(format!("plugins: {}", update.plugins.join(", ")));
+            }
+            let body = if parts.is_empty() {
+               "Open Settings -> Sunbird".to_owned()
+            } else {
+               parts.join(" · ")
+            };
             phoenix_ui_desktop::notify("Sunbird update available", Some(&body));
          },
          Notice::PluginsUpdated(names) if !names.is_empty() => {
