@@ -117,10 +117,10 @@ fn home() -> PathBuf {
    }
    #[cfg(target_os = "ios")]
    {
-      // The app's sandbox, where Files and backups see `Documents`.
+      // Beside Phoenix's `store`, which `files_dir` expects to be the parent.
       env::var_os("HOME")
          .map_or_else(env::temp_dir, PathBuf::from)
-         .join("Documents/phoenix")
+         .join("Library/Application Support/phoenix")
    }
    #[cfg(all(unix, not(target_os = "ios")))]
    {
