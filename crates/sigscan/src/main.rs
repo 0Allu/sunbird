@@ -6,6 +6,7 @@
 //!
 //! - `strings <text>`: where `text` sits, the code that loads it, and the
 //!   function around each load.
+//! - `scan <pattern>`: where a byte pattern like `48 8D ?? 05` matches in code.
 //! - `refs <addr>`: the code and pointers that reference `addr`.
 //! - `check`: runs every locator the runtime uses on this file's platform and
 //!   exits 1 if any misses, so a new Discord build can be vetted before
@@ -28,6 +29,7 @@ use misstep::{
 };
 use phoenix_hook::{
    image::Image,
+   pattern::Pattern,
    x86,
 };
 use phoenix_sigs::{
@@ -79,6 +81,7 @@ fn main() -> misstep::Result<()> {
          )
       },
       Some("strings") => tools.strings(args.get(2).context(USAGE)?),
+      Some("scan") => tools.scan(&args[2..].join(" ")),
       Some("refs") => {
          tools.refs(addr(2)?);
          Ok(())
@@ -119,25 +122,67 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
    );
    match machine {
       Machine::X86_64 => {
+         let abi = x86::Abi::of(image);
+         let prologues = desktop::Prologues::of(abi);
+         let http = DesktopHttpTransport::locate(image);
          report(
             "http transport",
-            DesktopHttpTransport::locate(image)
+            http
+               .as_ref()
                .ok_or_else(|| "not found".to_owned())
                .and_then(|http| {
-                  let head = image
-                     .read(http.send_fn, desktop::FRAME_PROLOGUE_LEN)
-                     .unwrap_or_default();
-                  (desktop::FRAME_PROLOGUE.find_in(head).first() == Some(&0))
+                  prologues
+                     .frame
+                     .at(image, http.send_fn)
                      .then(|| at(http.send_fn))
                      .ok_or_else(|| "send prologue changed".to_owned())
                }),
          );
-         report("access gate", desktop::access_gate(image).map(at));
          report(
-            "staff flag",
-            desktop::staff(image).map(|field| format!("{field:x?}")),
+            "host allocator",
+            match http
+               .as_ref()
+               .map(|http| (http.host_alloc, http.host_dealloc))
+            {
+               Some((Some(alloc), Some(dealloc))) => {
+                  Ok(format!("alloc {}, dealloc {}", at(alloc), at(dealloc)))
+               },
+               Some((alloc, dealloc)) => {
+                  Err(format!(
+                     "alloc {}, dealloc {}",
+                     alloc.map_or_else(|| "missing".to_owned(), at),
+                     dealloc.map_or_else(|| "missing".to_owned(), at)
+                  ))
+               },
+               None => Err("no http transport".to_owned()),
+            },
          );
-         report("settings label", desktop::settings_label(image).map(at));
+         report("access gate", desktop::access_gate(image).map(at));
+         if abi == x86::Abi::SysV {
+            report(
+               "wayland frame",
+               desktop::wayland_frame(image).map(|found| {
+                  format!(
+                     "{} (force_render +{:#x}, ping {})",
+                     at(found.frame),
+                     found.force_render,
+                     at(found.ping)
+                  )
+               }),
+            );
+         }
+         // The staff overrides are only patched on Windows.
+         if abi == x86::Abi::Win64 {
+            report(
+               "staff flag",
+               desktop::staff(image).map(|field| format!("{field:x?}")),
+            );
+         }
+         report(
+            "settings label",
+            desktop::settings_label_parts(image)
+               .map(|label| format!("{} (id {})", at(label.name), at(label.id))),
+         );
          report(
             "settings visibility",
             desktop::settings_visibility(image).map(at),
@@ -148,12 +193,23 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
                .map(|section| format!("{} (page +{:#x})", at(section.func), section.page_offset)),
          );
          let gpui = desktop::gpui(image);
+         // The runtime skips message accessories without the text and push
+         // primitives, so a miss here is a miss of the builders.
          report(
             "gpui builders",
-            gpui
-               .as_ref()
-               .map(|gpui| at(gpui.div_new))
-               .map_err(Clone::clone),
+            gpui.as_ref().map_err(Clone::clone).and_then(|gpui| {
+               match (gpui.div_push_any, gpui.str_into_any) {
+                  (Some(push), Some(text)) => {
+                     Ok(format!(
+                        "{} (push_any {}, str_into_any {})",
+                        at(gpui.div_new),
+                        at(push),
+                        at(text)
+                     ))
+                  },
+                  (push, text) => Err(format!("push_any {push:x?}, str_into_any {text:x?}")),
+               }
+            }),
          );
          let layouts = gpui
             .as_ref()
@@ -263,6 +319,16 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
             }),
          );
          report("media fetch", desktop::media_fetch(image).map(at));
+         report(
+            "message json",
+            desktop::message_json(image).map(|found| {
+               format!(
+                  "to_value {}, drop {}",
+                  at(found.to_value),
+                  at(found.drop_value)
+               )
+            }),
+         );
       },
       Machine::Aarch64 if macho => {
          report(
@@ -384,6 +450,20 @@ impl Tools<'_> {
          for load in loads.iter().take(32) {
             self.print_site(load);
          }
+      }
+      Ok(())
+   }
+
+   fn scan(&self, pattern: &str) -> misstep::Result<()> {
+      let pattern = Pattern::leak(pattern.to_owned()).context(USAGE)?;
+      let found = self.image.scan(pattern);
+      println!("{} matches", found.len());
+      for at in found.into_iter().take(64) {
+         let function = self
+            .image
+            .function_bounds(at)
+            .map(|(start, _)| format!("  in fn {} +{:#x}", self.at(start), at - start));
+         println!("   {}{}", self.at(at), function.unwrap_or_default());
       }
       Ok(())
    }

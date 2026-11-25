@@ -36,6 +36,10 @@ pub fn start(image: &'static Image<'static>) {
 }
 
 fn locate(image: &Image<'_>) -> Option<Field> {
+   // The override stays Windows-only.
+   if cfg!(not(windows)) {
+      return None;
+   }
    let field = phoenix_sigs::desktop::staff(image)
       .inspect_err(|err| log::warn!("staff: {err}, leaving flag_override as is"))
       .ok()?;

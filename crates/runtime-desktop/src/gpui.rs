@@ -41,15 +41,15 @@ use phoenix_sigs::desktop::{
 /// requiring no allocator or `Arc::drop`.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub(crate) struct SharedString {
-   pub(crate) tag: u8,
-   _pad:           [u8; 7],
-   pub(crate) ptr: *const u8,
-   pub(crate) len: usize,
+pub struct SharedString {
+   pub tag: u8,
+   _pad:    [u8; 7],
+   pub ptr: *const u8,
+   pub len: usize,
 }
 
 impl SharedString {
-   pub(crate) const fn from_static(s: &'static str) -> Self {
+   pub const fn from_static(s: &'static str) -> Self {
       Self {
          tag:  0x18,
          _pad: [0; 7],
@@ -58,7 +58,7 @@ impl SharedString {
       }
    }
 
-   pub(crate) fn from_str(s: &str) -> Self {
+   pub fn from_str(s: &str) -> Self {
       Self::from_static(intern(s))
    }
 }
@@ -69,7 +69,7 @@ impl SharedString {
 static INTERNED: LazyLock<Mutex<HashSet<&'static str>>> =
    LazyLock::new(|| Mutex::new(HashSet::new()));
 
-pub(crate) fn intern_str(s: &str) -> &'static str {
+pub fn intern_str(s: &str) -> &'static str {
    intern(s)
 }
 
@@ -121,14 +121,14 @@ pub type RawButton = Scratch<{ layout::SCRATCH_CAP }>;
 pub struct RawAnyElement([u8; layout::ANY_ELEMENT]);
 
 #[repr(C)]
-pub(crate) struct RcInner {
+pub struct RcInner {
    strong:    usize,
    weak:      usize,
    action_id: u64,
 }
 
 #[repr(C)]
-pub(crate) struct RcFnVtbl {
+pub struct RcFnVtbl {
    pub drop_in_place: *const c_void,
    pub size:          usize,
    pub align:         usize,
@@ -163,7 +163,7 @@ static BUTTON_FN_VTBL: RcFnVtbl = RcFnVtbl {
 
 #[derive(Clone, Copy)]
 #[repr(u8)]
-pub(crate) enum BtnVariant {
+pub enum BtnVariant {
    Primary   = 0,
    Secondary = 1,
    Critical  = 3,
@@ -171,17 +171,17 @@ pub(crate) enum BtnVariant {
 
 #[derive(Clone, Copy)]
 #[repr(u8)]
-pub(crate) enum BtnSize {
+pub enum BtnSize {
    Small  = 1,
    Medium = 2,
 }
 
 /// Encodes `Some(Length::Definite(DefiniteLength::Fraction(1.0)))` (`w_full` /
 /// `h_full`) in GPUI's `StyleRefinement`.
-pub(crate) const W_FULL: u64 = 0x3F80_0000_0000_0002;
+pub const W_FULL: u64 = 0x3F80_0000_0000_0002;
 
 /// Encodes `Some(AbsoluteLength::Pixels(px))` in GPUI's `StyleRefinement`.
-pub(crate) fn gpui_px(px: f32) -> u64 {
+pub fn gpui_px(px: f32) -> u64 {
    u64::from(px.to_bits()) << 32
 }
 
@@ -334,7 +334,9 @@ fn lookup_action(id: u64) -> Option<Action> {
       .and_then(|idx| list.get(idx).cloned())
 }
 
-unsafe extern "C" fn switch_callback(
+/// Rust ABI like the `Fn::call` slot it fills: on Linux `extern "C"` would
+/// assume the caller widened `checked`, which Rust callers do not.
+unsafe fn switch_callback(
    self_ptr: *const u64,
    checked: u8,
    _window: *mut c_void,
@@ -362,6 +364,7 @@ unsafe extern "C" fn switch_callback(
    });
 }
 
+#[expect(clippy::too_many_lines, reason = "one arm per callback kind")]
 unsafe extern "C" fn button_callback(
    self_ptr: *const u64,
    _event: *const c_void,
@@ -888,46 +891,46 @@ impl Builder {
 
 /// Returns the resolved address of `Div::into_any_element` for sibling desktop
 /// locators (`crate::modal`).
-pub(crate) fn div_into_any_addr() -> Option<usize> {
+pub fn div_into_any_addr() -> Option<usize> {
    SYMBOLS.get().map(|s| s.div_into_any as usize)
 }
 
-pub(crate) fn raw_div() -> Option<RawDiv> {
+pub fn raw_div() -> Option<RawDiv> {
    let sym = SYMBOLS.get()?;
    Some(Builder { sym }.raw_div())
 }
 
-pub(crate) fn style_div(div: &mut RawDiv, f: impl FnOnce(&Style)) {
+pub fn style_div(div: &mut RawDiv, f: impl FnOnce(&Style)) {
    if let Some(sym) = SYMBOLS.get() {
       Builder { sym }.style_div(div, f);
    }
 }
 
-pub(crate) fn v_stack(gap_px: f32) -> Option<RawDiv> {
+pub fn v_stack(gap_px: f32) -> Option<RawDiv> {
    let sym = SYMBOLS.get()?;
    Some(Builder { sym }.v_stack(gap_px))
 }
 
-pub(crate) fn h_row(gap_px: f32, space_between: bool) -> Option<RawDiv> {
+pub fn h_row(gap_px: f32, space_between: bool) -> Option<RawDiv> {
    let sym = SYMBOLS.get()?;
    Some(Builder { sym }.h_row(gap_px, space_between))
 }
 
-pub(crate) fn push_div(parent: RawDiv, child: RawDiv) -> RawDiv {
+pub fn push_div(parent: RawDiv, child: RawDiv) -> RawDiv {
    let Some(sym) = SYMBOLS.get() else {
       return parent;
    };
    Builder { sym }.push_div(parent, child)
 }
 
-pub(crate) fn push_any(parent: &mut RawDiv, child: &mut RawAnyElement) -> bool {
+pub fn push_any(parent: &mut RawDiv, child: &mut RawAnyElement) -> bool {
    let Some(sym) = SYMBOLS.get() else {
       return false;
    };
    Builder { sym }.push_any(parent, child)
 }
 
-pub(crate) fn str_to_any(text: &str) -> Option<RawAnyElement> {
+pub fn str_to_any(text: &str) -> Option<RawAnyElement> {
    let str_into_any = SYMBOLS.get()?.str_into_any?;
    let mut ss = SharedString::from_str(text);
    // SAFETY: converts static `SharedString` into a 32-byte `AnyElement`.
@@ -938,7 +941,7 @@ pub(crate) fn str_to_any(text: &str) -> Option<RawAnyElement> {
    }
 }
 
-pub(crate) fn build_raw_button(
+pub fn build_raw_button(
    id: &str,
    label: &str,
    variant: BtnVariant,
@@ -982,7 +985,7 @@ fn new_button(
    btn
 }
 
-pub(crate) fn push_raw_button(mut parent: RawDiv, mut btn: RawButton) -> RawDiv {
+pub fn push_raw_button(mut parent: RawDiv, mut btn: RawButton) -> RawDiv {
    let Some(sym) = SYMBOLS.get() else {
       return parent;
    };
@@ -992,7 +995,7 @@ pub(crate) fn push_raw_button(mut parent: RawDiv, mut btn: RawButton) -> RawDiv 
    out
 }
 
-pub(crate) fn write_any(div: RawDiv, sret: *mut RawAnyElement) {
+pub fn write_any(div: RawDiv, sret: *mut RawAnyElement) {
    if let Some(sym) = SYMBOLS.get() {
       Builder { sym }.write_any(div, sret);
    }
@@ -1001,7 +1004,7 @@ pub(crate) fn write_any(div: RawDiv, sret: *mut RawAnyElement) {
 /// Converts 32-bit ARGB (`0xAARRGGBB`) into GPUI's `[h, s, l, a]`
 /// (`0.0..=1.0`).
 #[expect(clippy::many_single_char_names, reason = "the HSL formula's own names")]
-pub(crate) fn argb_to_hsla(argb: u32) -> [f32; 4] {
+pub fn argb_to_hsla(argb: u32) -> [f32; 4] {
    let [alpha, r, g, b] = argb.to_be_bytes().map(|byte| f32::from(byte) / 255.0);
    let a = if alpha == 0.0 && argb != 0 {
       1.0
@@ -1036,11 +1039,15 @@ pub(crate) fn argb_to_hsla(argb: u32) -> [f32; 4] {
 
 /// Allocates an `RcInner { strong: 1, weak: 1, action_id: value }` on
 /// `Discord.exe`'s own heap so Discord's `Rc::drop` frees it cleanly.
-pub(crate) fn alloc_rc_u64(value: u64) -> Option<*mut RcInner> {
+pub fn alloc_rc_u64(value: u64) -> Option<*mut RcInner> {
    let sym = SYMBOLS.get()?;
    // SAFETY: uses Discord's resolved `alloc_or_oom(align, size)` for a 24-byte
    // `RcInner` layout matching `std::rc::RcBox<u64>`.
    unsafe {
+      #[expect(
+         clippy::cast_ptr_alignment,
+         reason = "allocated with `RcInner`'s alignment"
+      )]
       let ptr = (sym.alloc_or_oom)(align_of::<RcInner>(), size_of::<RcInner>()).cast::<RcInner>();
       if ptr.is_null() {
          return None;

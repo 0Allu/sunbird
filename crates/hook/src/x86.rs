@@ -1,9 +1,11 @@
 //! x86-64 disassembly, and on Windows live entry hooks that report a call's
 //! argument registers, for the debug tools.
 
-#[cfg(windows)] use std::ffi::c_void;
+#[cfg(any(windows, target_os = "linux"))]
+use std::ffi::c_void;
 use std::ops::Range;
 
+pub use iced_x86::Register;
 #[cfg(windows)]
 use iced_x86::{
    BlockEncoder,
@@ -26,6 +28,7 @@ use crate::{
    image::{
       ABSOLUTE_JUMP_LEN,
       absolute_jump,
+      alloc_exec,
       win32,
    },
 };
@@ -79,8 +82,158 @@ pub fn disasm(code: &[u8], ip: usize, count: usize) -> Vec<Line> {
    lines
 }
 
+/// The calling convention code in an image follows: Win64 in PE images,
+/// System V in ELF ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Abi {
+   Win64,
+   SysV,
+}
+
+/// Where an integer argument sits at the `call`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slot {
+   Reg(Register),
+   /// `[rsp + offset]`.
+   Stack(u64),
+}
+
+impl Abi {
+   #[must_use]
+   pub const fn of(image: &Image<'_>) -> Self {
+      if image.pdata.is_some() {
+         Self::Win64
+      } else {
+         Self::SysV
+      }
+   }
+
+   /// The integer argument registers, in order. The hidden return pointer is
+   /// the first.
+   #[must_use]
+   pub const fn arg_regs(self) -> &'static [Register] {
+      match self {
+         Self::Win64 => &[Register::RCX, Register::RDX, Register::R8, Register::R9],
+         Self::SysV => {
+            &[
+               Register::RDI,
+               Register::RSI,
+               Register::RDX,
+               Register::RCX,
+               Register::R8,
+               Register::R9,
+            ]
+         },
+      }
+   }
+
+   /// The `index`th integer argument register.
+   ///
+   /// # Panics
+   ///
+   /// When `index` is 4 or more, past what Win64 passes in registers.
+   #[must_use]
+   pub const fn arg(self, index: usize) -> Register {
+      assert!(
+         index < 4,
+         "Win64 passes four integer arguments in registers"
+      );
+      self.arg_regs()[index]
+   }
+
+   /// Where the `index`th integer argument sits at the `call`. Win64 keeps a
+   /// 32-byte shadow space below the stacked ones.
+   #[must_use]
+   pub const fn arg_slot(self, index: usize) -> Slot {
+      let regs = self.arg_regs();
+      if index < regs.len() {
+         return Slot::Reg(regs[index]);
+      }
+      let shadow = match self {
+         Self::Win64 => 0x20,
+         Self::SysV => 0,
+      };
+      Slot::Stack(shadow + 8 * (index - regs.len()) as u64)
+   }
+
+   /// The registers a call may clobber.
+   #[must_use]
+   pub const fn volatile(self) -> &'static [Register] {
+      match self {
+         Self::Win64 => {
+            &[
+               Register::RAX,
+               Register::RCX,
+               Register::RDX,
+               Register::R8,
+               Register::R9,
+               Register::R10,
+               Register::R11,
+            ]
+         },
+         Self::SysV => {
+            &[
+               Register::RAX,
+               Register::RCX,
+               Register::RDX,
+               Register::RSI,
+               Register::RDI,
+               Register::R8,
+               Register::R9,
+               Register::R10,
+               Register::R11,
+            ]
+         },
+      }
+   }
+}
+
+/// Tracks the constant an instruction loads: `mov reg, imm`, or `push imm;
+/// pop reg`, the form size-optimized builds pick for small constants.
+#[derive(Default)]
+struct Constants {
+   pushed: Option<u64>,
+}
+
+impl Constants {
+   /// The constant `instruction` writes to its first operand.
+   fn loaded(&mut self, instruction: &Instruction) -> Option<u64> {
+      use iced_x86::{
+         Mnemonic,
+         OpKind,
+      };
+      let immediate = |operand: u32| {
+         matches!(
+            instruction.op_kind(operand),
+            OpKind::Immediate8
+               | OpKind::Immediate8to32
+               | OpKind::Immediate8to64
+               | OpKind::Immediate32
+               | OpKind::Immediate32to64
+               | OpKind::Immediate64
+         )
+         .then(|| instruction.immediate(operand))
+      };
+      match instruction.mnemonic() {
+         Mnemonic::Push => {
+            self.pushed = immediate(0);
+            None
+         },
+         Mnemonic::Pop => self.pushed.take(),
+         Mnemonic::Mov => {
+            self.pushed = None;
+            immediate(1)
+         },
+         _ => {
+            self.pushed = None;
+            None
+         },
+      }
+   }
+}
+
 /// The `(offset, size)` stores a function makes through its hidden return
-/// pointer, `rcx` on entry.
+/// pointer, the first argument register on entry.
 ///
 /// Decoding stops at the first `ret`, and a `memcpy` into the pointer counts
 /// as one store of the copied length. It shows how large the returned
@@ -88,36 +241,28 @@ pub fn disasm(code: &[u8], ip: usize, count: usize) -> Vec<Line> {
 /// caller can be checked against a new build. Control flow is followed
 /// linearly, which suits the straight-line constructors it is for.
 #[must_use]
-pub fn sret_stores(code: &[u8], ip: usize) -> Vec<(usize, usize)> {
+pub fn sret_stores(abi: Abi, code: &[u8], ip: usize) -> Vec<(usize, usize)> {
    use iced_x86::{
       Code,
       InstructionInfoFactory,
       Mnemonic,
       OpAccess,
       OpKind,
-      Register,
    };
 
-   const VOLATILE: [Register; 7] = [
-      Register::RAX,
-      Register::RCX,
-      Register::RDX,
-      Register::R8,
-      Register::R9,
-      Register::R10,
-      Register::R11,
-   ];
    let writes = |access: OpAccess| {
       matches!(
          access,
          OpAccess::Write | OpAccess::CondWrite | OpAccess::ReadWrite | OpAccess::ReadCondWrite
       )
    };
+   let (dest, len) = (abi.arg(0), abi.arg(2));
 
    let mut decoder = Decoder::with_ip(64, code, ip as u64, DecoderOptions::NONE);
    let mut factory = InstructionInfoFactory::new();
-   let mut holders = vec![Register::RCX];
-   let mut r8_imm = None;
+   let mut constants = Constants::default();
+   let mut holders = vec![dest];
+   let mut len_imm = None;
    let mut stores = Vec::new();
    while decoder.can_decode() {
       let instruction = decoder.decode();
@@ -125,15 +270,16 @@ pub fn sret_stores(code: &[u8], ip: usize) -> Vec<(usize, usize)> {
          break;
       }
       if instruction.mnemonic() == Mnemonic::Call {
-         if holders.contains(&Register::RCX)
-            && let Some(len) = r8_imm
+         if holders.contains(&dest)
+            && let Some(len) = len_imm
          {
             stores.push((0, len));
          }
-         holders.retain(|register| !VOLATILE.contains(register));
-         r8_imm = None;
+         holders.retain(|register| !abi.volatile().contains(register));
+         len_imm = None;
          continue;
       }
+      let constant = constants.loaded(&instruction);
       let info = factory.info(&instruction);
       for memory in info.used_memory() {
          if writes(memory.access())
@@ -158,13 +304,8 @@ pub fn sret_stores(code: &[u8], ip: usize) -> Vec<(usize, usize)> {
          if copied && register == instruction.op0_register() {
             holders.push(register);
          }
-         if register == Register::R8 {
-            r8_imm = (instruction.mnemonic() == Mnemonic::Mov
-               && matches!(
-                  instruction.op1_kind(),
-                  OpKind::Immediate32 | OpKind::Immediate32to64
-               ))
-            .then(|| instruction.immediate32() as usize);
+         if register == len {
+            len_imm = constant.and_then(|value| usize::try_from(value).ok());
          }
       }
    }
@@ -185,20 +326,20 @@ pub struct DebugField {
 
 /// The fields a derived `Debug::fmt` prints, in code order.
 ///
-/// Each field is `lea rdx, [name]; mov r8d, len; lea r9, [self + off]` (or
-/// `mov r9, self` after `add self, off`) with the vtable stored to `[rsp +
-/// 0x20]`, then a call. `self` is the register `rcx` is first copied into.
+/// Each field is a call `field(builder, name, len, &self.field, vtable)` with
+/// its arguments in `abi`'s slots: a `lea` of the name, a constant length,
+/// `lea [self + off]` (or `self` after `add self, off`) and a `lea` of the
+/// vtable. `self` is the register the first argument is first copied into.
 /// Cold blocks are decoded linearly too, so fields printed out of line count.
 #[must_use]
 #[expect(clippy::too_many_lines, reason = "one match arm per instruction shape")]
-pub fn debug_fields(code: &[u8], ip: usize) -> Vec<DebugField> {
+pub fn debug_fields(abi: Abi, code: &[u8], ip: usize) -> Vec<DebugField> {
    use std::collections::HashMap;
 
    use iced_x86::{
       Code,
       Mnemonic,
       OpKind,
-      Register,
    };
 
    #[derive(Clone, Copy)]
@@ -209,16 +350,18 @@ pub fn debug_fields(code: &[u8], ip: usize) -> Vec<DebugField> {
    }
 
    let mut decoder = Decoder::with_ip(64, code, ip as u64, DecoderOptions::NONE);
+   let mut constants = Constants::default();
    let mut this = None;
    let mut added = 0usize;
    let mut regs: HashMap<Register, Value> = HashMap::new();
-   let mut vtable = None;
+   let mut stack: HashMap<u64, Value> = HashMap::new();
    let mut fields = Vec::new();
    while decoder.can_decode() {
       let ins = decoder.decode();
       if ins.is_invalid() {
          continue;
       }
+      let constant = constants.loaded(&ins);
       let dst = (ins.op_count() > 0 && ins.op0_kind() == OpKind::Register)
          .then(|| ins.op0_register().full_register());
       let to_this = dst.is_some() && dst == this;
@@ -227,7 +370,7 @@ pub fn debug_fields(code: &[u8], ip: usize) -> Vec<DebugField> {
             if this.is_none()
                && matches!(ins.code(), Code::Mov_r64_rm64 | Code::Mov_rm64_r64)
                && ins.op1_kind() == OpKind::Register
-               && ins.op1_register() == Register::RCX =>
+               && ins.op1_register() == abi.arg(0) =>
          {
             this = dst;
          },
@@ -248,16 +391,14 @@ pub fn debug_fields(code: &[u8], ip: usize) -> Vec<DebugField> {
             added = addr(ins.immediate(1));
          },
          (Mnemonic::Inc, Some(_)) if to_this => added = 1,
-         (Mnemonic::Mov, Some(dst)) => {
-            let value = match ins.op1_kind() {
-               OpKind::Immediate32 | OpKind::Immediate32to64 | OpKind::Immediate64 => {
-                  Some(Value::Imm(ins.immediate(1)))
-               },
-               OpKind::Register if Some(ins.op1_register().full_register()) == this => {
+         (Mnemonic::Mov | Mnemonic::Pop, Some(dst)) => {
+            let value = match constant {
+               Some(value) => Some(Value::Imm(value)),
+               None if ins.op_count() < 2 || ins.op1_kind() != OpKind::Register => None,
+               None if Some(ins.op1_register().full_register()) == this => {
                   Some(Value::Field(added))
                },
-               OpKind::Register => regs.get(&ins.op1_register().full_register()).copied(),
-               _ => None,
+               None => regs.get(&ins.op1_register().full_register()).copied(),
             };
             match value {
                Some(value) => regs.insert(dst, value),
@@ -267,35 +408,42 @@ pub fn debug_fields(code: &[u8], ip: usize) -> Vec<DebugField> {
          (Mnemonic::Mov, None)
             if ins.op0_kind() == OpKind::Memory
                && ins.memory_base() == Register::RSP
-               && ins.memory_displacement64() == 0x20
+               && ins.memory_index() == Register::None
                && ins.op1_kind() == OpKind::Register =>
          {
-            vtable = match regs.get(&ins.op1_register().full_register()) {
-               Some(Value::Rip(at)) => Some(*at),
-               _ => None,
+            match regs.get(&ins.op1_register().full_register()) {
+               Some(&value) => stack.insert(ins.memory_displacement64(), value),
+               None => stack.remove(&ins.memory_displacement64()),
             };
          },
          (Mnemonic::Call, _) => {
-            if let (Some(Value::Rip(name)), Some(Value::Imm(len)), Some(Value::Field(offset))) = (
-               regs.get(&Register::RDX),
-               regs.get(&Register::R8),
-               regs.get(&Register::R9),
-            ) && (1..64).contains(len)
+            let arg = |index: usize| {
+               match abi.arg_slot(index) {
+                  Slot::Reg(register) => regs.get(&register),
+                  Slot::Stack(offset) => stack.get(&offset),
+               }
+            };
+            if let (Some(Value::Rip(name)), Some(Value::Imm(len)), Some(Value::Field(offset))) =
+               (arg(1), arg(2), arg(3))
+               && (1..64).contains(len)
             {
                fields.push(DebugField {
-                  name: *name,
+                  name:     *name,
                   name_len: addr(*len),
-                  offset: *offset,
-                  vtable,
+                  offset:   *offset,
+                  vtable:   match arg(4) {
+                     Some(Value::Rip(at)) => Some(*at),
+                     _ => None,
+                  },
                });
             }
             regs.clear();
-            vtable = None;
+            stack.clear();
             added = 0;
          },
          (Mnemonic::Jmp | Mnemonic::Ret, _) => {
             regs.clear();
-            vtable = None;
+            stack.clear();
             added = 0;
          },
          _ => {},
@@ -305,13 +453,14 @@ pub fn debug_fields(code: &[u8], ip: usize) -> Vec<DebugField> {
 }
 
 /// `(offset, value)` of each `mov byte [..], imm8` into the struct a call
-/// just returned through `rcx`.
+/// just returned through its hidden return pointer.
 ///
-/// `before` ends at the call and holds its `lea rcx, [base + disp]`; `after`
-/// starts right behind it and is read up to the next branch or call, through
-/// registers loaded with `lea reg, [base + disp]`.
+/// `before` ends at the call and holds that pointer's `lea arg0, [base +
+/// disp]`; `after` starts right behind it and is read up to the next branch
+/// or call, through registers loaded with `lea reg, [base + disp]`.
 #[must_use]
 pub fn sret_byte_stores(
+   abi: Abi,
    before: &[u8],
    before_ip: usize,
    after: &[u8],
@@ -323,7 +472,6 @@ pub fn sret_byte_stores(
       FlowControl,
       Mnemonic,
       OpKind,
-      Register,
    };
 
    let mut out = None;
@@ -333,10 +481,10 @@ pub fn sret_byte_stores(
       if ins.is_invalid() {
          continue;
       }
-      let writes_rcx = ins.op_count() > 0
+      let writes_sret = ins.op_count() > 0
          && ins.op0_kind() == OpKind::Register
-         && ins.op0_register().full_register() == Register::RCX;
-      if writes_rcx {
+         && ins.op0_register().full_register() == abi.arg(0);
+      if writes_sret {
          out = (ins.mnemonic() == Mnemonic::Lea
             && !ins.is_ip_rel_memory_operand()
             && ins.memory_index() == Register::None)
@@ -383,6 +531,43 @@ pub fn sret_byte_stores(
       }
    }
    stores
+}
+
+/// The length and callee of the call starting `code`, which sits at `ip`:
+/// `call rel32`, or `call [rip + slot]` through a pointer to code, the form
+/// ELF builds without a PLT take for most calls.
+#[must_use]
+pub fn call_target(image: &Image<'_>, code: &[u8], ip: usize) -> Option<(usize, usize)> {
+   let rel = |at: usize| {
+      let bytes = code.get(at..at + 4)?;
+      Some(i32::from_le_bytes(bytes.try_into().ok()?) as isize)
+   };
+   match code {
+      [0xE8, ..] => Some((5, (ip + 5).checked_add_signed(rel(1)?)?)),
+      [0xFF, 0x15, ..] => {
+         let slot = (ip + 6).checked_add_signed(rel(2)?)?;
+         let callee = image
+            .read_usize(slot)
+            .filter(|&callee| image.is_code(callee))?;
+         Some((6, callee))
+      },
+      _ => None,
+   }
+}
+
+/// The target of the `jmp rel32` or `jmp [rip + slot]` starting `code`,
+/// which sits at `ip`.
+#[must_use]
+pub fn jump_target(image: &Image<'_>, code: &[u8], ip: usize) -> Option<usize> {
+   let rel = |at: usize| {
+      let bytes = code.get(at..at + 4)?;
+      Some(i32::from_le_bytes(bytes.try_into().ok()?) as isize)
+   };
+   match code {
+      [0xE9, ..] => (ip + 5).checked_add_signed(rel(1)?),
+      [0xFF, 0x25, ..] => image.read_usize((ip + 6).checked_add_signed(rel(2)?)?),
+      _ => None,
+   }
 }
 
 /// An instruction that points at an address, and the function holding it.
@@ -447,6 +632,30 @@ pub fn read_memory(addr: usize, len: usize) -> Option<Vec<u8>> {
       buffer.truncate(read);
       buffer
    })
+}
+
+/// Copies `len` bytes of this process's memory at `addr`, or the readable
+/// start of them. Unmapped memory gives `None` instead of a fault.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn read_memory(addr: usize, len: usize) -> Option<Vec<u8>> {
+   let mut buffer = vec![0u8; len];
+   let local = libc::iovec {
+      iov_base: buffer.as_mut_ptr().cast(),
+      iov_len:  len,
+   };
+   let remote = libc::iovec {
+      iov_base: addr as *mut c_void,
+      iov_len:  len,
+   };
+   // SAFETY: `buffer` holds `len` writable bytes, and process_vm_readv checks
+   // the source range instead of faulting.
+   let read = unsafe {
+      libc::process_vm_readv(libc::getpid(), &raw const local, 1, &raw const remote, 1, 0)
+   };
+   let read = usize::try_from(read).ok().filter(|&read| read > 0)?;
+   buffer.truncate(read);
+   Some(buffer)
 }
 
 /// The registers at a hooked function's entry, as the stub saved them.
@@ -625,18 +834,7 @@ fn alloc_near(addr: usize) -> Option<usize> {
          ]
       })
       .flatten()
-      .find_map(|candidate| {
-         // SAFETY: asks for a fresh mapping at a free address, or fails.
-         let page = unsafe {
-            win32::VirtualAlloc(
-               candidate as *const c_void,
-               STUB_PAGE,
-               win32::MEM_COMMIT_RESERVE,
-               win32::PAGE_EXECUTE_READWRITE,
-            )
-         };
-         (!page.is_null()).then_some(page as usize)
-      })
+      .find_map(|candidate| alloc_exec(candidate, STUB_PAGE))
 }
 
 /// Saves the argument registers, calls `observer(ctx, &regs)` on a 16-byte
@@ -688,12 +886,34 @@ mod tests {
          0xC3, // ret
          0x48, 0x89, 0x01, // mov [rcx], rax: past the ret
       ];
-      assert_eq!(sret_stores(&code, 0x1000), [
+      assert_eq!(sret_stores(Abi::Win64, &code, 0x1000), [
          (0x323, 1),
          (0x80, 8),
          (8, 8),
          (0, 0x40)
       ]);
+   }
+
+   #[test]
+   fn debug_fields_follow_sysv_argument_registers() {
+      // The head of `<StyleRefinement as Debug>::fmt` in the Linux build: the
+      // name in `rsi`, its length in `edx`, the field in `rcx` and the vtable
+      // in `r8`.
+      let code = [
+         0x55, 0x53, 0x48, 0x83, 0xEC, 0x18, 0x48, 0x89, 0xFB, 0x48, 0x8D, 0x15, 0x84, 0x1C, 0x56,
+         0xF0, 0x48, 0x8D, 0x7C, 0x24, 0x08, 0xB9, 0x0F, 0x00, 0x00, 0x00, 0xFF, 0x15, 0xA8, 0x02,
+         0x95, 0x04, 0x80, 0xBB, 0x77, 0x02, 0x00, 0x00, 0xFF, 0x40, 0x0F, 0x95, 0xC5, 0x74, 0x25,
+         0x48, 0x8D, 0x8B, 0x77, 0x02, 0x00, 0x00, 0x48, 0x8D, 0x35, 0x8D, 0x0C, 0x3F, 0xEF, 0x4C,
+         0x8D, 0x05, 0x06, 0x51, 0x5C, 0x04, 0x48, 0x8D, 0x7C, 0x24, 0x08, 0xBA, 0x07, 0x00, 0x00,
+         0x00, 0xFF, 0x15, 0x6E, 0xAD, 0x9E, 0x04,
+      ];
+      assert_eq!(debug_fields(Abi::SysV, &code, 0x1546_E250), [DebugField {
+         name:     0x485_EF18,
+         name_len: 7,
+         offset:   0x277,
+         vtable:   Some(0x19A3_3398),
+      }]);
+      assert_eq!(debug_fields(Abi::Win64, &code, 0x1546_E250), []);
    }
 
    #[cfg(windows)]

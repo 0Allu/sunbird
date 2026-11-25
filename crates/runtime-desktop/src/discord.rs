@@ -51,7 +51,10 @@ use phoenix_runtime::{
       Response,
    },
 };
-use phoenix_sigs::http::DesktopHttpTransport;
+use phoenix_sigs::{
+   desktop,
+   http::DesktopHttpTransport,
+};
 
 /// Standard HTTP/1.x `http::header::StandardHeader` names in discriminant
 /// order (`0..=80`), matching `Discord.exe`'s compiled `http` crate.
@@ -145,7 +148,8 @@ const STANDARD_METHODS: [&str; 10] = [
 
 // ---------------------------------------------------------------------------
 // ABI mirror of Desktop Phoenix's `libdiscord/crates/http` transport types
-// (verified against Windows x86_64 `Discord.exe`).
+// (verified against Windows x86_64 `Discord.exe`). These are Rust layouts, so
+// the same rustc and crates lay them out alike on Linux x86_64.
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
@@ -247,9 +251,10 @@ impl RawPollResult {
    }
 }
 
-// `send` and `poll` are Rust-ABI trait methods. `send` returns a pointer pair
-// (`Pin<Box<dyn Future>>`) in RAX:RDX with `self` in RCX and the request in
-// RDX; `poll` returns the 128-byte `RawPollResult` via indirect sret in RCX.
+// `send` and `poll` are Rust-ABI trait methods, declared Rust ABI here so the
+// same lowering applies on Win64 and SysV: `send` returns its pointer pair
+// (`Pin<Box<dyn Future>>`) in RAX:RDX, and `poll` returns the 128-byte
+// `RawPollResult` through a hidden sret pointer in the first argument register.
 type SendFn = unsafe fn(*const c_void, *mut RawTransportRequest) -> RawPinnedFuture;
 type PollFn = unsafe fn(*mut c_void, *mut c_void) -> RawPollResult;
 type HostAllocFn = unsafe extern "C" fn(usize, usize) -> *mut u8;
@@ -368,12 +373,6 @@ unsafe extern "C" fn owned_bytes_drop(data: *mut (), _ptr: *const u8, _len: usiz
 // Vtable installation & detours
 // ---------------------------------------------------------------------------
 
-/// `ReqwestTransport::send` opens with eight pushes and `sub rsp, imm32`, none
-/// RIP-relative, so they run unchanged from a trampoline.
-const SEND_PROLOGUE: phoenix_hook::pattern::Pattern =
-   phoenix_hook::pattern::Pattern::new("55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC ?? ?? ?? ??");
-const SEND_PROLOGUE_LEN: usize = 19;
-
 /// Locates Desktop Phoenix's `ReqwestTransport` and `SendFuture` vtable slots
 /// and installs request/response interception.
 pub fn install(image: &Image<'static>) {
@@ -383,13 +382,15 @@ pub fn install(image: &Image<'static>) {
    };
    // Discord's API client calls `send` directly rather than through the
    // vtable, so `send` is hooked in place and the detour calls the trampoline.
-   // SAFETY: runs from `DllMain` before Discord's own code, and `send_detour`
+   // It opens with the same register saves and `sub rsp` as a render frame.
+   // SAFETY: runs from `prepare` before Discord's own code, and `send_detour`
    // matches `send`'s Rust ABI.
+   let pro = desktop::Prologues::of(phoenix_hook::x86::Abi::of(image)).frame;
    let trampoline = match unsafe {
       image.hook_entry(
          found.send_fn,
-         SEND_PROLOGUE,
-         SEND_PROLOGUE_LEN,
+         pro.pattern,
+         pro.len,
          send_detour as *const () as usize,
       )
    } {
@@ -421,7 +422,7 @@ pub fn install(image: &Image<'static>) {
       .map(|&slot| (slot, poll_detour as *const () as usize))
       .collect::<Vec<_>>();
    // SAFETY: every poll slot is an aligned `.rdata` vtable entry pointing to
-   // `poll_fn`, and `poll_detour` matches its exact Windows x64 ABI.
+   // `poll_fn`, and `poll_detour` matches its Rust ABI.
    match unsafe { image.swap_words(&polls) } {
       Ok(_) => {
          log::info!(

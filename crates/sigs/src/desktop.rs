@@ -1,8 +1,14 @@
-//! Where Desktop Phoenix (`Discord.exe`) keeps what the runtime patches.
+//! Where Desktop Phoenix (`Discord.exe` on Windows, `discord-phoenix` on
+//! Linux) keeps what the runtime patches.
 //!
 //! Found from strings, call graphs and instruction shapes, never fixed
 //! addresses. The runtime installs from these, and `sigscan check` runs them on
 //! a new build before anyone ships against it.
+//!
+//! Both builds compile the same Rust, so every locator runs on both. What
+//! differs is isolated here: argument registers and prologues come from the
+//! image's [`Abi`], [`call_target`] follows the GOT calls ELF builds make, and
+//! [`literal`] finds strings ELF packs without a trailing NUL.
 
 use std::{
    collections::{
@@ -19,6 +25,12 @@ use std::{
 use phoenix_hook::{
    image::Image,
    pattern::Pattern,
+   x86::{
+      Abi,
+      Register,
+      call_target,
+      jump_target,
+   },
 };
 
 use crate::{
@@ -27,20 +39,223 @@ use crate::{
    one,
 };
 
-/// `MessageRow::render` and `build_message_body` prologue: 8 pushes and
+/// Win64 `MessageRow::render` and `build_message_body` prologue: 8 pushes and
 /// `mov eax, imm32`, before `call __chkstk`.
 pub const ROW_PROLOGUE: Pattern =
    Pattern::new("55 41 57 41 56 41 55 41 54 56 57 53 B8 ?? ?? ?? ??");
 pub const ROW_PROLOGUE_LEN: usize = 17;
-/// `host::section`, `WindowRoot::render`, and `Store::delete_message` prologue:
-/// 8 pushes and `sub rsp, imm32`.
+/// Win64 `host::section`, `WindowRoot::render`, and `Store::delete_message`
+/// prologue: 8 pushes and `sub rsp, imm32`.
 pub const FRAME_PROLOGUE: Pattern =
    Pattern::new("55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC ?? ?? ?? ??");
 pub const FRAME_PROLOGUE_LEN: usize = 19;
-/// `libdiscord_media::fetch` prologue: 6 pushes and `sub rsp, imm32`.
+/// Win64 `libdiscord_media::fetch` prologue: 6 pushes and `sub rsp, imm32`.
 pub const MEDIA_FETCH_PROLOGUE: Pattern =
    Pattern::new("55 41 57 41 56 56 57 53 48 81 EC ?? ?? ?? ??");
 pub const MEDIA_FETCH_PROLOGUE_LEN: usize = 15;
+
+/// A function entry [`Image::hook_entry`] can displace: whole instructions
+/// with no RIP-relative operand, at least 14 bytes.
+#[derive(Clone, Copy)]
+pub struct Prologue {
+   pub pattern: Pattern,
+   pub len:     usize,
+}
+
+impl Prologue {
+   #[must_use]
+   pub fn at(self, image: &Image<'_>, func: usize) -> bool {
+      image
+         .read(func, self.len)
+         .is_some_and(|head| self.pattern.find_in(head).first() == Some(&0))
+   }
+}
+
+/// The prologues of the functions the runtime hooks.
+#[derive(Clone, Copy)]
+pub struct Prologues {
+   /// `MessageRow::render`, `build_message_body` and `MessageContextMenu`.
+   pub row:         Prologue,
+   /// `host::section`, `Workspace::render_overlays`, `Store::delete_message`
+   /// and `ReqwestTransport::send`.
+   pub frame:       Prologue,
+   pub media_fetch: Prologue,
+}
+
+impl Prologues {
+   /// Win64 saves `rsi` and `rdi` too, and probes frames over a page with
+   /// `__chkstk`. System V probes them inline after the same `sub rsp`.
+   #[must_use]
+   pub const fn of(abi: Abi) -> Self {
+      const SYSV_FRAME: Prologue = Prologue {
+         pattern: Pattern::new("55 41 57 41 56 41 55 41 54 53 48 81 EC ?? ?? ?? ??"),
+         len:     17,
+      };
+      match abi {
+         Abi::Win64 => {
+            Self {
+               row:         Prologue {
+                  pattern: ROW_PROLOGUE,
+                  len:     ROW_PROLOGUE_LEN,
+               },
+               frame:       Prologue {
+                  pattern: FRAME_PROLOGUE,
+                  len:     FRAME_PROLOGUE_LEN,
+               },
+               media_fetch: Prologue {
+                  pattern: MEDIA_FETCH_PROLOGUE,
+                  len:     MEDIA_FETCH_PROLOGUE_LEN,
+               },
+            }
+         },
+         Abi::SysV => {
+            Self {
+               row:         SYSV_FRAME,
+               frame:       SYSV_FRAME,
+               media_fetch: SYSV_FRAME,
+            }
+         },
+      }
+   }
+}
+
+const fn prologues(image: &Image<'_>) -> Prologues {
+   Prologues::of(Abi::of(image))
+}
+
+/// The 3-bit register number and its REX extension bit.
+fn reg(register: Register) -> (u8, u8) {
+   let number = u8::try_from(register.number()).unwrap_or(0);
+   (number & 7, number >> 3 & 1)
+}
+
+/// `mov r32, imm32`, up to the immediate.
+fn mov_imm32(register: Register) -> Vec<u8> {
+   match reg(register) {
+      (number, 0) => vec![0xB8 | number],
+      (number, _) => vec![0x41, 0xB8 | number],
+   }
+}
+
+/// The two ways a register gets a small constant: `mov r32, imm32`, and
+/// `push imm8; pop r64`, which size-optimized builds prefer.
+pub(crate) fn imm_loads(register: Register, value: u8) -> [Vec<u8>; 2] {
+   let mut mov = mov_imm32(register);
+   mov.extend([value, 0, 0, 0]);
+   let pop = match reg(register) {
+      (number, 0) => vec![0x6A, value, 0x58 | number],
+      (number, _) => vec![0x6A, value, 0x41, 0x58 | number],
+   };
+   [mov, pop]
+}
+
+/// `test r8, r8` on a register's low byte, and `test r32, r32`.
+fn test_self(register: Register) -> [Vec<u8>; 2] {
+   let (number, ext) = reg(register);
+   let modrm = 0xC0 | number << 3 | number;
+   match ext {
+      1 => [vec![0x45, 0x84, modrm], vec![0x45, 0x85, modrm]],
+      _ if number >= 4 => [vec![0x40, 0x84, modrm], vec![0x85, modrm]],
+      _ => [vec![0x84, modrm], vec![0x85, modrm]],
+   }
+}
+
+/// `cmp r8, imm8` on a register's low byte.
+fn cmp_byte(register: Register, value: u8) -> Vec<u8> {
+   match reg(register) {
+      (number, 1) => vec![0x41, 0x80, 0xF8 | number, value],
+      (number, _) if number >= 4 => vec![0x40, 0x80, 0xF8 | number, value],
+      (number, _) => vec![0x80, 0xF8 | number, value],
+   }
+}
+
+/// The `disp8` of `lea register, [base + disp8]` at the start of `code`,
+/// whatever the base.
+fn lea_disp8(code: &[u8], register: Register) -> Option<u8> {
+   let (number, ext) = reg(register);
+   let [rex, 0x8D, modrm, disp, ..] = *code else {
+      return None;
+   };
+   // `rsp` and `rbp` bases address the stack, not a struct.
+   (rex & 0xFC == 0x48 | ext << 2
+      && modrm & 0xF8 == 0x40 | number << 3
+      && !matches!(modrm & 7, 4 | 5))
+   .then_some(disp)
+}
+
+/// The source register number of `mov register, src` at the start of
+/// `code`, in either encoding.
+fn mov_from(code: &[u8], register: Register) -> Option<u8> {
+   let (number, ext) = reg(register);
+   match *code {
+      [rex, 0x89, modrm, ..] if rex & 0xF9 == 0x48 | ext && modrm & 0xC7 == 0xC0 | number => {
+         Some((rex >> 2 & 1) << 3 | modrm >> 3 & 7)
+      },
+      [rex, 0x8B, modrm, ..]
+         if rex & 0xFC == 0x48 | ext << 2 && modrm & 0xF8 == 0xC0 | number << 3 =>
+      {
+         Some((rex & 1) << 3 | modrm & 7)
+      },
+      _ => None,
+   }
+}
+
+/// The `disp8` of `mov [base + disp8], src` (`REX.W 89 /r`) at the start of
+/// `code`, for a source register number.
+fn store_disp8(code: &[u8], src: u8) -> Option<u8> {
+   let [rex, 0x89, modrm, disp, ..] = *code else {
+      return None;
+   };
+   (rex & 0xFC == 0x48 | (src >> 3) << 2 && modrm & 0xF8 == 0x40 | (src & 7) << 3 && modrm & 7 != 4)
+      .then_some(disp)
+}
+
+/// The size of the first `alloc(size, 8)` in `code`: `mov arg0, size` and
+/// then the alignment into `arg1`.
+fn alloc_size(abi: Abi, code: &[u8]) -> Option<usize> {
+   let size = mov_imm32(abi.arg(0));
+   let aligns = imm_loads(abi.arg(1), 8);
+   (0..code.len()).find_map(|at| {
+      let rest = code.get(at..)?;
+      let imm = rest.strip_prefix(size.as_slice())?.get(..4)?;
+      aligns
+         .iter()
+         .any(|align| rest[size.len() + 4..].starts_with(align))
+         .then(|| u32::from_le_bytes(imm.try_into().unwrap_or_default()) as usize)
+   })
+}
+
+/// `lea r64, [rip + disp32]`, up to the displacement.
+fn lea_rip(register: Register) -> [u8; 3] {
+   let (number, ext) = reg(register);
+   [0x48 | ext << 2, 0x8D, 0x05 | number << 3]
+}
+
+/// `op r64, [base + disp8]` with `REX.W`, up to the displacement. `base` is
+/// never `rsp` or `r12`, which need a SIB byte.
+fn rm_disp8(op: u8, register: Register, base: Register) -> [u8; 3] {
+   let ((number, ext), (base, base_ext)) = (reg(register), reg(base));
+   [0x48 | ext << 2 | base_ext, op, 0x40 | number << 3 | base]
+}
+
+/// `mov dst, src` in its two encodings.
+fn mov_rr(dst: Register, src: Register) -> [[u8; 3]; 2] {
+   let ((dst, dst_ext), (src, src_ext)) = (reg(dst), reg(src));
+   [
+      [0x48 | src_ext << 2 | dst_ext, 0x89, 0xC0 | src << 3 | dst],
+      [0x48 | dst_ext << 2 | src_ext, 0x8B, 0xC0 | dst << 3 | src],
+   ]
+}
+
+/// Copies of the string literal `text`. COFF builds end each literal with a
+/// NUL, which tells `text` from a longer literal starting with it. LLD packs
+/// ELF literals back to back, so there every copy counts.
+fn literal(image: &Image<'_>, text: &[u8]) -> Vec<usize> {
+   match Abi::of(image) {
+      Abi::Win64 => image.find_bytes(&[text, b"\0"].concat()),
+      Abi::SysV => image.find_bytes(text),
+   }
+}
 
 /// The 22-byte `.rdata` string naming settings page 24, relabeled in place.
 pub const SETTINGS_LABEL: &[u8] = b"PhoenixDESKTOP_PHOENIX";
@@ -62,8 +277,8 @@ pub mod layout {
    pub const MENU_ITEM_SEPARATOR_TAG: u64 = 4;
 }
 
-/// Every direct `call rel32` into code, as `callee << 32 | site` RVAs sorted
-/// by callee. One pass replaces a `.text` scan per caller lookup.
+/// Every [`call_target`] into code, as `callee << 32 | site` RVAs sorted by
+/// callee. One pass replaces a `.text` scan per caller lookup.
 struct CallIndex {
    key:   (usize, usize),
    base:  usize,
@@ -99,13 +314,9 @@ fn call_index(image: &Image<'_>) -> Arc<CallIndex> {
    let rva = |addr: usize| u32::try_from(addr - base).ok().map(u64::from);
    let mut calls = Vec::new();
    for segment in image.segments.iter().filter(|segment| segment.executable) {
-      for (offset, window) in segment.bytes.windows(5).enumerate() {
-         if window[0] != 0xE8 {
-            continue;
-         }
-         let rel = i32::from_le_bytes([window[1], window[2], window[3], window[4]]);
+      for offset in memchr::memchr2_iter(0xE8, 0xFF, &segment.bytes) {
          let site = segment.addr + offset;
-         if let Some(callee) = (site + 5).checked_add_signed(rel as isize)
+         if let Some((_, callee)) = call_target(image, &segment.bytes[offset..], site)
             && in_code(callee)
             && let (Some(callee), Some(site)) = (rva(callee), rva(site))
          {
@@ -158,32 +369,46 @@ impl CallIndex {
    }
 }
 
-/// `mov [reg + d], rax; lea rax, [rip + vtable]; mov [reg + d + 8], rax`,
+/// `mov [base + d], ptr; lea vt, [rip + vtable]; mov [base + d + 8], vt`,
 /// storing an `Rc<dyn Fn>`, and the `mov ecx, size` of the return copy that
 /// may follow within 16 bytes.
 fn rc_store(code: &[u8]) -> Option<(usize, Option<usize>)> {
-   let mem = |at: usize| -> Option<(u8, usize, usize)> {
+   // `mov [base + disp], src` as `(base, src, disp, len)`.
+   let mem = |at: usize| -> Option<(u8, u8, usize, usize)> {
       let (rex, op, modrm) = (*code.get(at)?, *code.get(at + 1)?, *code.get(at + 2)?);
-      if rex != 0x48 || op != 0x89 || modrm & 0x38 != 0 || modrm & 7 == 4 {
+      if rex & 0xFA != 0x48 || op != 0x89 || modrm & 7 == 4 {
          return None;
       }
+      let (base, src) = (
+         (rex & 1) << 3 | modrm & 7,
+         (rex >> 2 & 1) << 3 | modrm >> 3 & 7,
+      );
       match modrm >> 6 {
-         1 => Some((modrm, usize::from(*code.get(at + 3)?), 4)),
+         1 => Some((base, src, usize::from(*code.get(at + 3)?), 4)),
          2 => {
             let disp = code.get(at + 3..at + 7)?;
-            Some((modrm, u32::from_le_bytes(disp.try_into().ok()?) as usize, 7))
+            Some((
+               base,
+               src,
+               u32::from_le_bytes(disp.try_into().ok()?) as usize,
+               7,
+            ))
          },
          _ => None,
       }
    };
    (0..code.len()).find_map(|at| {
-      let (modrm, field, len) = mem(at)?;
+      let (base, _, field, len) = mem(at)?;
       let lea = at + len;
-      if code.get(lea..lea + 3)? != [0x48, 0x8D, 0x05] {
+      let [rex, 0x8D, modrm] = *code.get(lea..lea + 3)? else {
+         return None;
+      };
+      if rex & 0xFB != 0x48 || modrm & 0xC7 != 0x05 {
          return None;
       }
-      let (modrm2, next, len2) = mem(lea + 7)?;
-      if modrm2 != modrm || next != field + 8 {
+      let vtable = (rex >> 2 & 1) << 3 | modrm >> 3 & 7;
+      let (base2, src2, next, len2) = mem(lea + 7)?;
+      if base2 != base || src2 != vtable || next != field + 8 {
          return None;
       }
       let tail = code.get(lea + 7 + len2..).unwrap_or_default();
@@ -199,7 +424,6 @@ fn rc_store(code: &[u8]) -> Option<(usize, Option<usize>)> {
 
 /// The field a `SharedString` setter replaces: `movzx eax, byte [reg + d];
 /// cmp al, 0xff; ...; cmp al, 0x19`, the drop of the old value.
-#[cfg(target_arch = "x86_64")]
 fn shared_string_setter(code: &[u8]) -> Option<usize> {
    (0..code.len()).find_map(|at| {
       let w = code.get(at..at + 9)?;
@@ -216,7 +440,6 @@ fn shared_string_setter(code: &[u8]) -> Option<usize> {
 
 /// Offsets of `mov byte [reg + d8], 0xff` stores, a `None` written into an
 /// `Option<SharedString>`.
-#[cfg(target_arch = "x86_64")]
 fn none_stores(code: &[u8]) -> Vec<usize> {
    code
       .windows(4)
@@ -235,7 +458,7 @@ fn imm_after(code: &[u8], prefix: &[u8]) -> Option<usize> {
 fn function_code<'a>(image: &'a Image<'_>, func: usize, name: &str) -> Found<&'a [u8]> {
    let (start, end) = image
       .function_bounds(func)
-      .ok_or_else(|| format!("{name} has no .pdata entry"))?;
+      .ok_or_else(|| format!("{name} has no unwind entry"))?;
    image
       .read(start, end - start)
       .ok_or_else(|| format!("{name} is unmapped"))
@@ -308,109 +531,206 @@ fn callers(image: &Image<'_>, callee: usize) -> HashSet<usize> {
       .collect()
 }
 
-/// Direct calls in `[start, start + len)` to what looks like a function
-/// entry, in order.
+/// Calls in `[start, start + len)` to what looks like a function entry, in
+/// order.
 fn calls_in(image: &Image<'_>, start: usize, len: usize) -> Vec<(usize, usize)> {
    let Some(bytes) = image.read(start, len) else {
       return Vec::new();
    };
+   // A `call rel32` decoded at the wrong offset lands anywhere in `.text`, so
+   // its target must also open like a function.
+   let entry = |target: usize| {
+      image.is_function(target)
+         || image.read(target, 1).is_some_and(|first| {
+            matches!(
+               first[0],
+               0xE9
+                  | 0x48
+                  | 0x4C
+                  | 0x40
+                  | 0x41
+                  | 0x55
+                  | 0x53
+                  | 0x56
+                  | 0x57
+                  | 0x89
+                  | 0x8B
+                  | 0xB8
+                  | 0x31
+                  | 0x33
+            )
+         })
+   };
    let mut out = Vec::new();
    let mut idx = 0;
-   while idx + 5 <= bytes.len() {
-      if bytes[idx] == 0xE8 {
-         let site = start + idx;
-         let rel = i32::from_le_bytes([
-            bytes[idx + 1],
-            bytes[idx + 2],
-            bytes[idx + 3],
-            bytes[idx + 4],
-         ]);
-         let target = (site + 5).wrapping_add_signed(rel as isize);
-         let entry = image.is_function(target)
-            || image.is_code(target)
-               && image.read(target, 1).is_some_and(|first| {
-                  matches!(
-                     first[0],
-                     0xE9
-                        | 0x48
-                        | 0x4C
-                        | 0x40
-                        | 0x41
-                        | 0x55
-                        | 0x53
-                        | 0x56
-                        | 0x57
-                        | 0x89
-                        | 0x8B
-                        | 0xB8
-                        | 0x31
-                        | 0x33
-                  )
-               });
-         if entry {
-            out.push((site, target));
-            idx += 5;
-            continue;
-         }
+   while idx < bytes.len() {
+      if let Some((size, target)) = call_target(image, &bytes[idx..], start + idx)
+         && image.is_code(target)
+         && (bytes[idx] == 0xFF || entry(target))
+      {
+         out.push((start + idx, target));
+         idx += size;
+         continue;
       }
       idx += 1;
    }
    out
 }
 
-/// The distinct code targets of direct calls in `[start, end)`.
+/// The calls `func` makes before its first `ret`, a tail jump to another
+/// function counting as the last. ELF builds place their unwind landing pads
+/// after the `ret`, where Win64 keeps them out of line.
+fn straight_calls(image: &Image<'_>, func: usize) -> Vec<(usize, usize)> {
+   let Ok(code) = function_code(image, func, "") else {
+      return Vec::new();
+   };
+   let lines = phoenix_hook::x86::disasm(code, func, usize::MAX);
+   let end = lines
+      .iter()
+      .position(|line| line.text == "ret" || line.text.starts_with("jmp "))
+      .unwrap_or(lines.len());
+   let mut calls = calls_in(
+      image,
+      func,
+      lines.get(end).map_or(code.len(), |line| line.addr - func),
+   );
+   if let Some(line) = lines.get(end)
+      && let Some(target) = jump_target(image, &code[line.addr - func..], line.addr)
+      && image.is_function(target)
+   {
+      calls.push((line.addr, target));
+   }
+   calls
+}
+
+/// Whether `a` and `b` run the same instructions up to their first `ret`.
+/// ELF builds fold no identical functions, so a generic can exist twice.
+fn same_code(image: &Image<'_>, a: usize, b: usize) -> bool {
+   let body = |func: usize| -> Option<Vec<String>> {
+      let code = function_code(image, func, "").ok()?;
+      let lines = phoenix_hook::x86::disasm(code, func, 0x100);
+      let end = lines.iter().position(|line| line.text == "ret")?;
+      // Branches inside the function compare by their offset from its start.
+      let local = func..func + code.len();
+      Some(
+         lines
+            .into_iter()
+            .take(end)
+            .map(|line| {
+               match line.target.filter(|target| local.contains(target)) {
+                  Some(target) => format!("{} +{:x}", line.len, target - func),
+                  None => line.text,
+               }
+            })
+            .collect(),
+      )
+   };
+   body(a).is_some_and(|lines| Some(lines) == body(b))
+}
+
+/// The distinct code targets of calls in `[start, end)`.
 fn callees(image: &Image<'_>, start: usize, end: usize) -> Vec<usize> {
    let Some(bytes) = image.read(start, end.saturating_sub(start)) else {
       return Vec::new();
    };
    let mut out = Vec::new();
-   for (idx, window) in bytes.windows(5).enumerate() {
-      if window[0] != 0xE8 {
-         continue;
-      }
-      let rel = i32::from_le_bytes([window[1], window[2], window[3], window[4]]);
-      let target = (start + idx + 5).wrapping_add_signed(rel as isize);
-      if image.is_code(target) && !out.contains(&target) {
+   for idx in 0..bytes.len() {
+      if let Some((_, target)) = call_target(image, &bytes[idx..], start + idx)
+         && image.is_code(target)
+         && !out.contains(&target)
+      {
          out.push(target);
       }
    }
    out
 }
 
-fn prologue_at(image: &Image<'_>, func: usize, prologue: Pattern, len: usize) -> bool {
-   image
-      .read(func, len)
-      .is_some_and(|head| prologue.find_in(head).first() == Some(&0))
-}
-
 /// The function `ClientAccessGate` reads through, which the runtime makes
 /// answer "no gate". Its one small caller is `signed_in && access(..) != 2`.
 pub fn access_gate(image: &Image<'_>) -> Found<usize> {
-   const CALLER: Pattern =
-      Pattern::new("83 79 ?? 03 75 0C E8 ?? ?? ?? ?? 3C 02 0F 95 C0 EB 02 31 C0");
-   let caller = one("access gate caller", &image.scan(CALLER))?;
-   let access = rel32_target(image, caller + 7).ok_or("access gate call does not decode")?;
+   // The `call`'s offset in each: SysV aligns the stack with `push rax` first.
+   let (caller, call) = match Abi::of(image) {
+      Abi::Win64 => {
+         (
+            Pattern::new("83 79 ?? 03 75 0C E8 ?? ?? ?? ?? 3C 02 0F 95 C0 EB 02 31 C0"),
+            6,
+         )
+      },
+      Abi::SysV => {
+         (
+            Pattern::new("83 7F ?? 03 75 ?? 50 E8 ?? ?? ?? ?? 3C 02 0F 95 C0 48 83 C4 08 C3"),
+            7,
+         )
+      },
+   };
+   let caller = one("access gate caller", &image.scan(caller))?;
+   let access = rel32_target(image, caller + call + 1).ok_or("access gate call does not decode")?;
    if image.is_code(access) {
       Ok(access)
    } else {
       Err(format!(
          "access gate call at {:#x} leaves the code",
-         caller + 6
+         caller + call
       ))
    }
 }
 
-/// The settings page 24 label.
-pub fn settings_label(image: &Image<'_>) -> Found<usize> {
-   one("settings label", &image.find_bytes(SETTINGS_LABEL))
+/// Settings page 24's sidebar name, `Phoenix`, and its id,
+/// `DESKTOP_PHOENIX`, both relabeled in place.
+#[derive(Clone, Copy, Debug)]
+pub struct SettingsLabel {
+   pub name: usize,
+   pub id:   usize,
 }
 
-/// The `cmp r8d, 0xf` immediate in `is_page_visible`, which the runtime
+/// Page 24's label, from its one loader: `lea rax, [name]` with length 7,
+/// then a load of the id. COFF builds keep the two as one literal,
+/// [`SETTINGS_LABEL`]; ELF builds place them apart.
+pub fn settings_label_parts(image: &Image<'_>) -> Found<SettingsLabel> {
+   const NAME: &[u8] = b"Phoenix";
+   let ids = image.find_bytes(b"DESKTOP_PHOENIX");
+   let mut found: Vec<(usize, usize)> = lea_refs_many(image, &ids)
+      .into_iter()
+      .flat_map(|(id, loads)| loads.into_iter().map(move |lea| (id, lea)))
+      .filter_map(|(id, lea)| {
+         let start = lea.checked_sub(0x30)?;
+         let window = image.read(start, 0x30)?;
+         let at = window
+            .windows(3)
+            .rposition(|w| w == lea_rip(Register::RAX))?;
+         let name = rel32_target(image, start + at + 3)?;
+         (image.read(name, NAME.len())? == NAME).then_some((name, id))
+      })
+      .collect();
+   found.sort_unstable();
+   found.dedup();
+   let (name, id) = one("settings label loader", &found)?;
+   Ok(SettingsLabel { name, id })
+}
+
+/// The settings page 24 label, [`SETTINGS_LABEL`] as one literal.
+pub fn settings_label(image: &Image<'_>) -> Found<usize> {
+   let label = settings_label_parts(image)?;
+   if label.id != label.name + 7 {
+      return Err("settings label name and id are apart, use settings_label_parts".to_owned());
+   }
+   Ok(label.name)
+}
+
+/// The `cmp <arg2>, 0xf` immediate in `is_page_visible`, which the runtime
 /// lowers so page 24 is always shown.
 pub fn settings_visibility(image: &Image<'_>) -> Found<usize> {
-   /// `movzx ecx, cl; mov al, 1; lea r8d, [rcx-9]; cmp r8d, 0xf; ja ...`
-   const GUARD: Pattern = Pattern::new("0F B6 C9 B0 01 44 8D 41 F7 41 83 F8 0F 77");
-   Ok(one("settings visibility guard", &image.scan(GUARD))? + 12)
+   // `movzx ecx, <page>; mov al, 1; lea <arg2>, [rcx-9]; cmp <arg2>, 0xf; ja ...`
+   let (guard, imm) = match Abi::of(image) {
+      Abi::Win64 => {
+         (
+            Pattern::new("0F B6 C9 B0 01 44 8D 41 F7 41 83 F8 0F 77"),
+            12,
+         )
+      },
+      Abi::SysV => (Pattern::new("40 0F B6 CF B0 01 8D 51 F7 83 FA 0F 77"), 11),
+   };
+   Ok(one("settings visibility guard", &image.scan(guard))? + imm)
 }
 
 /// `host::section`, which renders a settings page, and where its state keeps
@@ -427,8 +747,8 @@ pub fn settings_section(image: &Image<'_>) -> Found<Section> {
    let lea = one("account-loading load", &lea_refs(image, anchor))?;
    let (func, _) = image
       .function_bounds(lea)
-      .ok_or("settings section has no .pdata entry")?;
-   if !prologue_at(image, func, FRAME_PROLOGUE, FRAME_PROLOGUE_LEN) {
+      .ok_or("settings section has no unwind entry")?;
+   if !prologues(image).frame.at(image, func) {
       return Err("settings section prologue changed".to_owned());
    }
    let head = image
@@ -472,7 +792,9 @@ pub struct Gpui {
 
 /// The builders, from the Developer Mode row of page 16 and the
 /// `TesterUpdates` sign-in button, which call them in a fixed order.
+#[expect(clippy::too_many_lines, reason = "one block per builder call site")]
 pub fn gpui(image: &Image<'_>) -> Found<Gpui> {
+   let abi = Abi::of(image);
    let dev = one(
       "set-devmode",
       &image.find_bytes(b"set-devmodeDeveloper Mode"),
@@ -488,7 +810,8 @@ pub fn gpui(image: &Image<'_>) -> Found<Gpui> {
       ));
    }
    let (div_new_call, div_new) = before_dev[0];
-   let caller_loc = rdx_lea_before(image, div_new_call).ok_or("div_new Location not found")?;
+   let caller_loc =
+      arg1_lea_before(image, abi, div_new_call).ok_or("div_new Location not found")?;
    let switch_on_change = after_dev[7].1;
    let alloc_or_oom = calls_in(image, switch_on_change, 0x50)
       .first()
@@ -497,7 +820,7 @@ pub fn gpui(image: &Image<'_>) -> Found<Gpui> {
 
    let btn = one(
       "tester-updates-sign-in",
-      &image.find_bytes(b"tester-updates-sign-in\0"),
+      &literal(image, b"tester-updates-sign-in"),
    )?;
    let lea_btn = one("tester-updates-sign-in load", &lea_refs(image, btn))?;
    let after_btn = calls_in(image, lea_btn, 0x1D0);
@@ -507,52 +830,114 @@ pub fn gpui(image: &Image<'_>) -> Found<Gpui> {
          after_btn.len()
       ));
    }
-   let action_row = after_btn[4].1;
-   let (ar_start, ar_end) = image
-      .function_bounds(action_row)
-      .ok_or("ActionRow has no .pdata entry")?;
-   let ar_calls = calls_in(image, ar_start, ar_end - ar_start);
-   if ar_calls.len() < 16 || ar_calls[0].1 != div_new || ar_calls[2].1 != before_dev[1].1 {
-      return Err("ActionRow no longer calls div_new and flex first".to_owned());
-   }
-   let div_style_mut = calls_in(image, ar_calls[1].1, 0x40)
-      .first()
-      .ok_or("div_style_mut not found in div_py")?
+   // `ActionRow` is the callee that opens with `div_new` and `flex`,
+   // `Button::on_click` the call before it and `Div::into_any_element` the one
+   // after. ELF builds drop a temporary in between, so the order is all that
+   // holds.
+   let div_flex = before_dev[1].1;
+   let (row_at, ar_calls) = after_btn
+      .iter()
+      .enumerate()
+      .skip(1)
+      .find_map(|(at, &(_, callee))| {
+         let (start, end) = image.function_bounds(callee)?;
+         let calls = calls_in(image, start, end - start);
+         (calls.first().map(|&(_, first)| first) == Some(div_new)
+            && calls.iter().take(4).any(|&(_, callee)| callee == div_flex))
+         .then_some((at, calls))
+      })
+      .ok_or("ActionRow no longer calls div_new and flex first")?;
+   let action_row = after_btn[row_at].1;
+   let div_into_any = after_btn
+      .get(row_at + 1)
+      .ok_or("Div::into_any_element not found after ActionRow")?
       .1;
-   let div_child_div = ar_calls[ar_calls.len() - 1].1;
+   // Two blocks, a `div_new` each, that end in `div_child_div`. The first
+   // builds its text column three calls before that; the second's child
+   // before it is the button.
+   let second = ar_calls[1..]
+      .iter()
+      .position(|&(_, callee)| callee == div_new)
+      .ok_or("ActionRow builds one Div")?
+      + 1;
+   let div_child_div = ar_calls[second - 1].1;
+   let last_child = ar_calls
+      .iter()
+      .rposition(|&(_, callee)| callee == div_child_div)
+      .filter(|&at| at > second + 1 && second >= 4)
+      .ok_or("ActionRow no longer adds its children with div_child_div")?;
+   let div_child_button = ar_calls[last_child - 1].1;
+   let text_block = ar_calls[second - 4].1;
+   // Every style setter fetches the style first, so `div_style_mut` is the
+   // first call most of the row's setters make.
+   let mut firsts: HashMap<usize, usize> = HashMap::new();
+   for &(_, callee) in &ar_calls[..second] {
+      if let Some(&(_, first)) = calls_in(image, callee, 0x40).first() {
+         *firsts.entry(first).or_default() += 1;
+      }
+   }
+   let div_style_mut = firsts
+      .into_iter()
+      .filter(|&(first, _)| first != div_new)
+      .max_by_key(|&(_, count)| count)
+      .filter(|&(_, count)| count >= 2)
+      .ok_or("div_style_mut not found in ActionRow's setters")?
+      .0;
 
-   // `SmallVec::<[AnyElement; 2]>::push`, after `lea rcx, [rax + 0x40]`.
+   // `SmallVec::<[AnyElement; 2]>::push`, after `lea arg0, [div + 0x40]`.
    let child_calls = calls_in(image, div_child_div, 0x60);
    let div_push_any = (child_calls.len() >= 2
-      && image
-         .read(div_child_div, 0x50)
-         .is_some_and(|code| code.windows(4).any(|w| w == [0x48, 0x8D, 0x48, 0x40])))
+      && image.read(div_child_div, 0x50).is_some_and(|code| {
+         (0..code.len()).any(|at| lea_disp8(&code[at..], abi.arg(0)) == Some(0x40))
+      }))
    .then(|| child_calls[1].1);
-   // `SharedString::into_any_element`, beside `div_child_div`, checks the
-   // `SharedString` tag with `cmp cl, 0xff; ...; cmp cl, 0x19`.
+   // `SharedString::into_any_element`, beside `div_child_div`, drops the
+   // `SharedString` it moved: `cmp r8, 0xff; je ..; cmp r8, 0x19`, on whichever
+   // register the compiler loaded the tag into.
+   let tag_checks: Vec<(Vec<u8>, Vec<u8>)> = [
+      Register::RAX,
+      Register::RCX,
+      Register::RDX,
+      Register::RBX,
+      Register::RSI,
+      Register::RDI,
+      Register::R8,
+      Register::R9,
+      Register::R10,
+      Register::R11,
+      Register::R12,
+      Register::R13,
+      Register::R14,
+      Register::R15,
+   ]
+   .into_iter()
+   .map(|register| (cmp_byte(register, 0xFF), cmp_byte(register, 0x19)))
+   .collect();
    let str_into_any = calls_in(image, div_child_div, 0x400)
       .into_iter()
       .map(|(_, target)| target)
       .find(|&target| {
          image.read(target, 0x100).is_some_and(|body| {
-            body
-               .windows(8)
-               .any(|w| w[0..3] == [0x80, 0xF9, 0xFF] && w[5..8] == [0x80, 0xF9, 0x19])
+            tag_checks.iter().any(|(none, arc)| {
+               body
+                  .windows(2 * none.len() + 2)
+                  .any(|w| w.starts_with(none) && w.ends_with(arc))
+            })
          })
       });
 
    Ok(Gpui {
       caller_loc,
       div_new,
-      div_flex: before_dev[1].1,
+      div_flex,
       div_flex_col: before_dev[2].1,
       div_style_mut,
       div_child_div,
-      div_child_button: ar_calls[14].1,
-      div_into_any: after_btn[5].1,
+      div_child_button,
+      div_into_any,
       div_push_any,
       str_into_any,
-      text_block: ar_calls[6].1,
+      text_block,
       switch_new: after_dev[0].1,
       switch_into_div: after_dev[8].1,
       button_new: after_btn[0].1,
@@ -561,18 +946,19 @@ pub fn gpui(image: &Image<'_>) -> Found<Gpui> {
       switch_label: after_dev[2].1,
       switch_desc: after_dev[5].1,
       switch_on_change,
-      button_on_click: after_btn[3].1,
+      button_on_click: after_btn[row_at - 1].1,
    })
 }
 
-/// The target of the last `lea rdx, [rip + disp32]` in the 32 bytes before
+/// The target of the last `lea arg1, [rip + disp32]` in the 32 bytes before
 /// `call`.
-fn rdx_lea_before(image: &Image<'_>, call: usize) -> Option<usize> {
+fn arg1_lea_before(image: &Image<'_>, abi: Abi, call: usize) -> Option<usize> {
    let start = call.checked_sub(0x20)?;
    let bytes = image.read(start, 0x20)?;
+   let lea = lea_rip(abi.arg(1));
    (0..=bytes.len() - 7)
       .rev()
-      .find(|&idx| bytes[idx..idx + 3] == [0x48, 0x8D, 0x15])
+      .find(|&idx| bytes[idx..idx + 3] == lea)
       .and_then(|idx| rel32_target(image, start + idx + 3))
 }
 
@@ -646,7 +1032,6 @@ pub struct GpuiLayout {
 
 /// Field name to offset in a derived `Debug::fmt`, with nested structs as
 /// `outer.inner`, following each field's `&dyn Debug` vtable `depth` deep.
-#[cfg(target_arch = "x86_64")]
 fn debug_offsets(image: &Image<'_>, func: usize, depth: usize) -> HashMap<String, usize> {
    let mut out = HashMap::new();
    let Some(code) = image
@@ -655,7 +1040,7 @@ fn debug_offsets(image: &Image<'_>, func: usize, depth: usize) -> HashMap<String
    else {
       return out;
    };
-   for field in phoenix_hook::x86::debug_fields(code, func) {
+   for field in phoenix_hook::x86::debug_fields(Abi::of(image), code, func) {
       let Some(name) = image
          .read(field.name, field.name_len)
          .and_then(|name| std::str::from_utf8(name).ok())
@@ -683,7 +1068,6 @@ fn debug_offsets(image: &Image<'_>, func: usize, depth: usize) -> HashMap<String
 
 /// `<StyleRefinement as Debug>::fmt`, the one loader of a `StyleRefinement`
 /// literal that prints `text`, `padding` and `gap`.
-#[cfg(target_arch = "x86_64")]
 #[expect(clippy::too_many_lines, reason = "one line per decoded field")]
 fn style_offsets(image: &Image<'_>, bytes: usize) -> Found<StyleOffsets> {
    let leas = string_leas(image, &[b"StyleRefinement"]);
@@ -802,45 +1186,41 @@ fn style_offsets(image: &Image<'_>, bytes: usize) -> Found<StyleOffsets> {
    Ok(style)
 }
 
-/// `Div::new` boxes `Interactivity` (`mov ecx, size; mov edx, 8; call`),
-/// copies it in (`mov r8d, size; mov rcx, reg; call memcpy`) and stores the box
-/// `reg` into the `Div` (`mov [sret + d8], reg`).
-#[cfg(target_arch = "x86_64")]
+/// `Div::new` boxes `Interactivity` (`alloc(size, 8)`), copies it in
+/// (`mov arg2, size; mov arg0, box; call memcpy`) and stores the box into the
+/// `Div` (`mov [sret + d8], box`).
 fn div_interactivity(image: &Image<'_>, div_new: usize) -> Found<(usize, usize)> {
+   let abi = Abi::of(image);
    let code = image.read(div_new, 0x180).ok_or("Div::new is unmapped")?;
-   let size = code
-      .windows(10)
-      .find(|w| w[0] == 0xB9 && w[5..10] == [0xBA, 0x08, 0x00, 0x00, 0x00])
-      .map(|w| u32::from_le_bytes([w[1], w[2], w[3], w[4]]) as usize)
+   let size = alloc_size(abi, code)
       .filter(|size| (0x100..0x2000).contains(size))
       .ok_or("Div::new Interactivity allocation not found")?;
    let size_le = u32::try_from(size)
       .map_err(|_| "Div::new Interactivity size overflows")?
       .to_le_bytes();
+   let len = [mov_imm32(abi.arg(2)), size_le.to_vec()].concat();
    let copy = code
-      .windows(6)
-      .position(|w| w[..2] == [0x41, 0xB8] && w[2..] == size_le)
-      .ok_or("Div::new Interactivity copy not found")?;
-   // `mov rcx, reg` (`48 89 /r`, ModRM `11 reg 001`) right before the call.
-   let call = copy
-      + 6
-      + code[copy + 6..]
-         .windows(4)
-         .take(0x20)
-         .position(|w| w[0] == 0x48 && w[1] == 0x89 && w[2] & 0xC7 == 0xC1 && w[3] == 0xE8)
-         .ok_or("Div::new memcpy destination not found")?;
-   let reg = code[call + 2] & 0x38;
-   let offset = code[call + 8..]
-      .windows(4)
-      .find(|w| w[0] == 0x48 && w[1] == 0x89 && w[2] & 0xF8 == 0x40 | reg && w[2] & 7 != 4)
-      .map(|w| usize::from(w[3]))
+      .windows(len.len())
+      .position(|w| w == len)
+      .ok_or("Div::new Interactivity copy not found")?
+      + len.len();
+   // `mov arg0, box` right before the call. ELF builds call libc's `memcpy`
+   // through a GOT slot only the loader fills.
+   let (call, boxed) = (copy..copy + 0x20)
+      .find_map(|at| {
+         let src = mov_from(code.get(at..)?, abi.arg(0))?;
+         matches!(code.get(at + 3..at + 5)?, [0xE8, _] | [0xFF, 0x15]).then_some((at + 3, src))
+      })
+      .ok_or("Div::new memcpy destination not found")?;
+   let offset = (call..code.len())
+      .find_map(|at| store_disp8(&code[at..], boxed))
+      .map(usize::from)
       .ok_or("Div::new Interactivity store not found")?;
    Ok((offset, size))
 }
 
 /// The two in-struct fields Discord most often sets right after
 /// `Button::new`, `variant` and then `size`, over every call site.
-#[cfg(target_arch = "x86_64")]
 fn button_style_fields(image: &Image<'_>, button_new: usize, size: usize) -> Found<(usize, usize)> {
    let ranked = post_ctor_byte_stores(image, button_new, size);
    // 189, 20 and 4 stores on 2026-11 builds.
@@ -864,9 +1244,9 @@ fn button_style_fields(image: &Image<'_>, button_new: usize, size: usize) -> Fou
 /// Each constructor must still set the fields the runtime overwrites and fit
 /// its buffer. A layout that does not decode turns the settings page and
 /// accessories off.
-#[cfg(target_arch = "x86_64")]
 #[expect(clippy::too_many_lines, reason = "one block per decoded struct")]
 pub fn gpui_layouts(image: &Image<'_>, gpui: &Gpui) -> Found<GpuiLayout> {
+   let abi = Abi::of(image);
    let check = |name: &str, func: usize, size: usize, fields: &[usize]| -> Found<()> {
       let end = image
          .function_bounds(func)
@@ -874,7 +1254,7 @@ pub fn gpui_layouts(image: &Image<'_>, gpui: &Gpui) -> Found<GpuiLayout> {
       let code = image
          .read(func, end - func)
          .ok_or_else(|| format!("{name} is unmapped"))?;
-      let stores = phoenix_hook::x86::sret_stores(code, func);
+      let stores = phoenix_hook::x86::sret_stores(Abi::of(image), code, func);
       let extent = stores.iter().map(|&(at, len)| at + len).max().unwrap_or(0);
       if extent == 0 || extent > size {
          return Err(format!("{name} fills {extent:#x} bytes of {size:#x}"));
@@ -892,14 +1272,13 @@ pub fn gpui_layouts(image: &Image<'_>, gpui: &Gpui) -> Found<GpuiLayout> {
    let child = image
       .read(gpui.div_child_div, 0x80)
       .ok_or("div_child_div is unmapped")?;
-   let children = child
-      .windows(4)
-      .find(|w| w[..3] == [0x48, 0x8D, 0x48])
-      .map(|w| usize::from(w[3]))
+   let children = (0..child.len())
+      .find_map(|at| lea_disp8(&child[at..], abi.arg(0)))
+      .map(usize::from)
       .ok_or("Div children SmallVec offset not found")?;
    let div_size = fits(
       "Div",
-      imm_after(child, &[0x41, 0xB8]).ok_or("Div size not found")?,
+      imm_after(child, &mov_imm32(abi.arg(2))).ok_or("Div size not found")?,
       layout::DIV_CAP,
    )?;
    let (interactivity, interactivity_size) = div_interactivity(image, gpui.div_new)?;
@@ -925,14 +1304,19 @@ pub fn gpui_layouts(image: &Image<'_>, gpui: &Gpui) -> Found<GpuiLayout> {
       switch_size.ok_or("Switch::on_change return copy not found")?,
       layout::SCRATCH_CAP,
    )?;
-   let label = shared_string_setter(function_code(image, gpui.switch_label, "Switch::label")?)
-      .ok_or("Switch label setter not found")?;
-   let description = shared_string_setter(function_code(
-      image,
-      gpui.switch_desc,
-      "Switch::description",
-   )?)
-   .ok_or("Switch description setter not found")?;
+   // ELF builds hand the `Switch`'s leading field struct, copied from offset
+   // 0, to a setter of its own, so the offset holds one call down too.
+   let setter_field = |func: usize, name: &str| -> Found<usize> {
+      let code = function_code(image, func, name)?;
+      shared_string_setter(code)
+         .or_else(|| {
+            let &(_, inner) = calls_in(image, func, code.len()).first()?;
+            shared_string_setter(function_code(image, inner, name).ok()?)
+         })
+         .ok_or_else(|| format!("{name} setter not found"))
+   };
+   let label = setter_field(gpui.switch_label, "Switch::label")?;
+   let description = setter_field(gpui.switch_desc, "Switch::description")?;
    if label.max(description) + 24 > switch_size || on_change + 16 > switch_size {
       return Err("Switch fields sit past the Switch".to_owned());
    }
@@ -971,16 +1355,10 @@ pub fn gpui_layouts(image: &Image<'_>, gpui: &Gpui) -> Found<GpuiLayout> {
 
    // `Interactivity::default` boxes `StyleRefinement` with `mov ecx, size; mov
    // edx, 8; call`.
-   let box_alloc = |func: usize, limit: usize| -> Option<usize> {
-      let code = image.read(func, limit)?;
-      code
-         .windows(10)
-         .find(|w| w[0] == 0xB9 && w[5..10] == [0xBA, 0x08, 0x00, 0x00, 0x00])
-         .map(|w| u32::from_le_bytes([w[1], w[2], w[3], w[4]]) as usize)
-   };
+   let box_alloc = |func: usize, limit: usize| alloc_size(abi, image.read(func, limit)?);
    let (_, div_end) = image
       .function_bounds(gpui.div_new)
-      .ok_or("Div::new has no .pdata entry")?;
+      .ok_or("Div::new has no unwind entry")?;
    let style_bytes = callees(image, gpui.div_new, div_end)
       .into_iter()
       .filter_map(|callee| box_alloc(callee, 0xC0))
@@ -1041,7 +1419,7 @@ pub fn message_row(image: &Image<'_>) -> Found<MessageRow> {
       "MessageRow::render",
       &common.into_iter().collect::<Vec<_>>(),
    )?;
-   if !prologue_at(image, func, ROW_PROLOGUE, ROW_PROLOGUE_LEN) {
+   if !prologues(image).row.at(image, func) {
       return Err("MessageRow::render prologue changed".to_owned());
    }
    Ok(MessageRow {
@@ -1060,11 +1438,9 @@ pub struct MessageBody {
 /// The function `MessageRow::render` calls that loads the `message-edited-`
 /// template.
 pub fn message_body(image: &Image<'_>, render_row: usize) -> Found<MessageBody> {
-   /// `mov rcx, [rcx + disp32]`, loading the message id.
-   const MSG_ID_MOV: Pattern = Pattern::new("48 8B 89 ?? ?? ?? ??");
-   /// `mov eax, imm32; mov ecx, imm32; mov edx, imm32` with consecutive
-   /// `RowColors` field offsets `+0xc`, `+0x8` and `+0x4`.
-   const ROW_COLORS: Pattern = Pattern::new("B8 ?? ?? ?? ?? B9 ?? ?? ?? ?? BA ?? ?? ?? ??");
+   // `mov rcx, [arg0 + disp32]`, loading the message id.
+   let mut msg_id_mov = rm_disp8(0x8B, Register::RCX, Abi::of(image).arg(0));
+   msg_id_mov[2] += 0x40;
    let anchor = one(
       "message-edited template",
       &image.find_bytes(b"\x0fmessage-edited-\xc0\x00"),
@@ -1072,7 +1448,7 @@ pub fn message_body(image: &Image<'_>, render_row: usize) -> Found<MessageBody> 
    let mut found = lea_refs(image, anchor)
       .into_iter()
       .filter_map(|lea| Some(image.function_bounds(lea)?.0))
-      .filter(|&func| prologue_at(image, func, ROW_PROLOGUE, ROW_PROLOGUE_LEN))
+      .filter(|&func| prologues(image).row.at(image, func))
       .filter(|&func| callers(image, func).contains(&render_row))
       .collect::<Vec<_>>();
    found.sort_unstable();
@@ -1081,16 +1457,20 @@ pub fn message_body(image: &Image<'_>, render_row: usize) -> Found<MessageBody> 
    let head = image
       .read(func, 0x120)
       .ok_or("message body builder is unmapped")?;
-   let msg_id_offset = MSG_ID_MOV
-      .find_in(&head[..0x100])
-      .into_iter()
-      .filter_map(|at| imm32(image, func + at + 3))
+   let msg_id_offset = head[..0x100]
+      .windows(3)
+      .enumerate()
+      .filter(|(_, w)| *w == msg_id_mov)
+      .filter_map(|(at, _)| imm32(image, func + at + 3))
       .find(|disp| (0x100..=0x800).contains(disp))
       .ok_or("message body id load not found")?;
-   let row_colors_offset = ROW_COLORS
-      .find_in(head)
-      .into_iter()
-      .find_map(|at| {
+   // Three `mov r32, imm32` with consecutive `RowColors` field offsets
+   // `+0xc`, `+0x8` and `+0x4`.
+   let row_colors_offset = head
+      .windows(15)
+      .enumerate()
+      .filter(|(_, w)| [w[0], w[5], w[10]].iter().all(|&op| op & 0xF8 == 0xB8))
+      .find_map(|(at, _)| {
          let (a, c, d) = (
             imm32(image, func + at + 1)?,
             imm32(image, func + at + 6)?,
@@ -1111,7 +1491,7 @@ pub fn message_body(image: &Image<'_>, render_row: usize) -> Found<MessageBody> 
 pub fn optimistic_delete(image: &Image<'_>, message_delete: usize) -> Found<usize> {
    let (del_start, del_end) = image
       .function_bounds(message_delete)
-      .ok_or("MESSAGE_DELETE handler has no .pdata entry")?;
+      .ok_or("MESSAGE_DELETE handler has no unwind entry")?;
    let del_callees = callees(image, del_start, del_end)
       .into_iter()
       .collect::<HashSet<_>>();
@@ -1129,13 +1509,22 @@ pub fn optimistic_delete(image: &Image<'_>, message_delete: usize) -> Found<usiz
       let Some(&other) = parents.iter().find(|&&parent| parent != del_start) else {
          continue;
       };
-      if found.contains(&other) || !prologue_at(image, other, FRAME_PROLOGUE, FRAME_PROLOGUE_LEN) {
+      if found.contains(&other) || !prologues(image).frame.at(image, other) {
          continue;
       }
-      // `lock cmpxchg`
-      let locks = image
-         .read(other, 0x80)
-         .is_some_and(|head| head.windows(4).any(|w| w == [0xF0, 0x48, 0x0F, 0xB1]));
+      // `lock cmpxchg [..], r64` taking the store's write lock, inline or, in
+      // ELF builds, in the first function the head calls.
+      let cmpxchg = |at: usize| {
+         image.read(at, 0x80).is_some_and(|head| {
+            head
+               .windows(4)
+               .any(|w| w[0] == 0xF0 && w[1] & 0xF8 == 0x48 && w[2..] == [0x0F, 0xB1])
+         })
+      };
+      let locks = cmpxchg(other)
+         || calls_in(image, other, 0x40)
+            .first()
+            .is_some_and(|&(_, lock)| cmpxchg(lock));
       let Some((start, end)) = image.function_bounds(other) else {
          continue;
       };
@@ -1232,29 +1621,33 @@ pub struct MenuLayout {
    pub on_click_tag: usize,
 }
 
-/// Decodes `[reg + disp8]` or `[reg + disp32]` from a `48 8D` (`lea`) or
-/// `48 8B` (`mov`) instruction where `modrm_base` is the `mod == 01` ModRM byte
-/// (so `modrm_base + 0x40` is the matching `mod == 10` disp32 ModRM byte).
-fn decode_disp(bytes: &[u8], opcode: u8, modrm_disp8: u8) -> Option<usize> {
-   let modrm_disp32 = modrm_disp8.checked_add(0x40)?;
-   for idx in 0..bytes.len().saturating_sub(3) {
-      if bytes[idx] != 0x48 || bytes[idx + 1] != opcode {
-         continue;
+/// `(reg, base, disp)` of `op r64, [base + disp]` (`REX.W op /r` with a
+/// `disp8` or `disp32`) at each offset of `bytes`, register numbers 0 to 15.
+fn mem_operands(bytes: &[u8], op: u8) -> impl Iterator<Item = (u8, u8, usize)> + '_ {
+   (0..bytes.len()).filter_map(move |at| {
+      let [rex, code, modrm, ref rest @ ..] = *bytes.get(at..)? else {
+         return None;
+      };
+      if rex & 0xF8 != 0x48 || code != op || modrm & 7 == 4 {
+         return None;
       }
-      if bytes[idx + 2] == modrm_disp8 {
-         return Some(usize::from(bytes[idx + 3]));
-      }
-      if bytes[idx + 2] == modrm_disp32 && idx + 7 <= bytes.len() {
-         let disp = u32::from_le_bytes([
-            bytes[idx + 3],
-            bytes[idx + 4],
-            bytes[idx + 5],
-            bytes[idx + 6],
-         ]);
-         return Some(disp as usize);
-      }
-   }
-   None
+      let disp = match modrm >> 6 {
+         1 => usize::from(*rest.first()?),
+         2 => u32::from_le_bytes(rest.get(..4)?.try_into().ok()?) as usize,
+         _ => return None,
+      };
+      Some((
+         (rex >> 2 & 1) << 3 | modrm >> 3 & 7,
+         (rex & 1) << 3 | modrm & 7,
+         disp,
+      ))
+   })
+}
+
+/// A register's number, as [`mem_operands`] gives it.
+fn number(register: Register) -> u8 {
+   let (low, ext) = reg(register);
+   ext << 3 | low
 }
 
 /// Locates `MessageContextMenu`'s item list builder (`build_fn`), the
@@ -1267,25 +1660,35 @@ fn decode_disp(bytes: &[u8], opcode: u8, modrm_disp8: u8) -> Option<usize> {
 pub fn message_context_menu(image: &Image<'_>) -> Found<MessageContextMenu> {
    let anchor = one(
       "MessageContextMenu string",
-      &image.find_bytes(b"MessageContextMenu\0"),
+      &literal(image, b"MessageContextMenu"),
    )?;
    let anchor_lea = one("MessageContextMenu xref", &lea_refs(image, anchor))?;
    let (build_fn, build_end) = image
       .function_bounds(anchor_lea)
-      .ok_or("MessageContextMenu xref has no .pdata entry")?;
-   if !prologue_at(image, build_fn, ROW_PROLOGUE, ROW_PROLOGUE_LEN) {
+      .ok_or("MessageContextMenu xref has no unwind entry")?;
+   if !prologues(image).row.at(image, build_fn) {
       return Err("MessageContextMenu prologue changed".to_owned());
    }
 
-   // Decode `msg_ptr_offset` (`lea rcx, [rdx + disp]`, ModRM 0x4A/0x8A) and
-   // `msg_id_offset` (`mov rdi, [rax + disp]`, ModRM 0x78/0xB8) from the head.
+   // Decode `msg_ptr_offset` (`lea arg0, [arg1 + disp]`) and `msg_id_offset`
+   // (`mov reg, [rax + disp]`) from the head.
+   let abi = Abi::of(image);
+   let (arg0, arg1, rax) = (
+      number(abi.arg(0)),
+      number(abi.arg(1)),
+      number(Register::RAX),
+   );
    let head = image
       .read(build_fn, 0x160)
       .ok_or("MessageContextMenu head is unmapped")?;
-   let msg_ptr_offset =
-      decode_disp(head, 0x8D, 0x4A).ok_or("MessageContextMenu message ptr offset not found")?;
-   let msg_id_offset =
-      decode_disp(head, 0x8B, 0x78).ok_or("MessageContextMenu message id offset not found")?;
+   let msg_ptr_offset = mem_operands(head, 0x8D)
+      .find(|&(reg, base, _)| reg == arg0 && base == arg1)
+      .ok_or("MessageContextMenu message ptr offset not found")?
+      .2;
+   let msg_id_offset = mem_operands(head, 0x8B)
+      .find(|&(reg, base, _)| reg != rax && base == rax)
+      .ok_or("MessageContextMenu message id offset not found")?
+      .2;
    if !(0x20..=0x200).contains(&msg_ptr_offset) || !(0x20..=0x200).contains(&msg_id_offset) {
       return Err(format!(
          "MessageContextMenu offsets out of range (msg={msg_ptr_offset:#x}, id={msg_id_offset:#x})"
@@ -1293,15 +1696,16 @@ pub fn message_context_menu(image: &Image<'_>) -> Found<MessageContextMenu> {
    }
 
    // Right after `MessageContextMenu`'s anchor call, the 4th call computes
-   // message permissions (`r8 = &Message`) and reads `&message.channel_id` via
-   // `lea rdx, [rdi + disp32]` (48 8D 97 disp32).
+   // message permissions and reads `&message.channel_id` into its second
+   // argument, `lea arg1, [msg + disp32]`.
    let post_anchor_calls = calls_in(image, anchor_lea, 0x80);
    let channel_id_offset = post_anchor_calls
       .iter()
       .find_map(|&(_, callee)| {
          let body = image.read(callee, 0x80)?;
-         let disp = decode_disp(body, 0x8D, 0x57)?;
-         (0x100..=0x300).contains(&disp).then_some(disp)
+         mem_operands(body, 0x8D)
+            .find(|&(reg, _, disp)| reg == arg1 && (0x100..=0x300).contains(&disp))
+            .map(|(.., disp)| disp)
       })
       .ok_or("MessageContextMenu channel_id offset not found")?;
 
@@ -1357,27 +1761,16 @@ pub fn message_context_menu(image: &Image<'_>) -> Found<MessageContextMenu> {
 
    // Walk `copy_ctor -> wrapper -> MenuItem::new_core -> MenuItemProps::new`
    // and verify the `MenuItemProps` size (`0x1C8`) and `Action` tag (`2`).
-   let (_, ctor_end) = image
-      .function_bounds(copy_ctor)
-      .ok_or("copy-id ctor has no .pdata entry")?;
-   let wrapper = calls_in(image, copy_ctor, ctor_end - copy_ctor)
+   let wrapper = straight_calls(image, copy_ctor)
       .last()
       .ok_or("copy-id ctor has no inner call")?
       .1;
-   let (_, wrap_end) = image
-      .function_bounds(wrapper)
-      .ok_or("MenuItem ctor wrapper has no .pdata entry")?;
-   let core_ctor = calls_in(image, wrapper, wrap_end - wrapper)
+   let core_ctor = straight_calls(image, wrapper)
       .last()
       .ok_or("MenuItem ctor wrapper has no core call")?
       .1;
-   let (_, core_end) = image
-      .function_bounds(core_ctor)
-      .ok_or("MenuItem core ctor has no .pdata entry")?;
-   let core_bytes = image
-      .read(core_ctor, core_end - core_ctor)
-      .ok_or("MenuItem core ctor is unmapped")?;
-   let props_new = calls_in(image, core_ctor, core_end - core_ctor)
+   let core_bytes = function_code(image, core_ctor, "MenuItem core ctor")?;
+   let props_new = calls_in(image, core_ctor, core_bytes.len())
       .first()
       .ok_or("MenuItem core ctor has no props_new call")?
       .1;
@@ -1450,14 +1843,14 @@ fn menu_layout(image: &Image<'_>, core: &[u8], vec_push: usize) -> Found<MenuLay
 }
 
 /// A `<T as IntoElement>::into_any_element` wrapper, the one small loader of
-/// the type name `T` that copies `T` once (`mov r8d, size; call memcpy`), and
+/// the type name `T` that copies `T` once (`mov arg2, size; call memcpy`), and
 /// that size.
-#[cfg(target_arch = "x86_64")]
 fn find_into_any(
    image: &Image<'_>,
    leas: &HashMap<usize, Vec<usize>>,
    type_name: &[u8],
 ) -> Found<(usize, usize)> {
+   let len = mov_imm32(Abi::of(image).arg(2));
    let mut found = Vec::new();
    for addr in image.find_bytes(type_name) {
       for &lea in leas.get(&addr).into_iter().flatten() {
@@ -1470,10 +1863,12 @@ fn find_into_any(
          let Some(code) = image.read(start, end - start) else {
             continue;
          };
-         let copies: Vec<usize> = code
-            .windows(6)
-            .filter(|w| w[..2] == [0x41, 0xB8])
-            .map(|w| u32::from_le_bytes([w[2], w[3], w[4], w[5]]) as usize)
+         // Whole instructions only: a `mov edx, imm32` is one `BA` byte, which
+         // a displacement can hold too.
+         let copies: Vec<usize> = phoenix_hook::x86::disasm(code, start, usize::MAX)
+            .into_iter()
+            .filter(|line| line.len == len.len() + 4)
+            .filter_map(|line| imm_after(code.get(line.addr - start..)?.get(..line.len)?, &len))
             .collect();
          if let [size] = copies[..] {
             found.push((start, size));
@@ -1486,7 +1881,6 @@ fn find_into_any(
 }
 
 /// The loads of every copy of each of `needles`, from one pass over `.text`.
-#[cfg(target_arch = "x86_64")]
 fn string_leas(image: &Image<'_>, needles: &[&[u8]]) -> HashMap<usize, Vec<usize>> {
    let targets: Vec<usize> = needles
       .iter()
@@ -1554,19 +1948,17 @@ pub struct Dismiss {
    clippy::too_many_lines,
    reason = "one locator per modal builder, cross-checked"
 )]
-#[cfg(target_arch = "x86_64")]
 pub fn modal(image: &Image<'_>, div_into_any: usize, div: &DivLayout) -> Found<Modal> {
    // `Modal::child::<Div>` and `Modal::footer_button` push an `AnyElement`
-   // into one of the `Modal`'s `Vec`s (`lea rcx, [rax + vec]; lea rdx, [rbp +
-   // d8]; call push`) and return it by copy (`mov ecx, size`). The child
-   // pusher is the `Div` one whose `Vec` is not the footer's.
-   const MODAL_PUSH: Pattern =
-      Pattern::new("48 8D 48 ?? 48 8D 55 ?? E8 ?? ?? ?? ?? 90 B9 ?? ?? ?? ??");
+   // into one of the `Modal`'s `Vec`s (`lea arg0, [modal + vec]; lea arg1,
+   // [element]; call push`) and return it by copy (`mov ecx, size`), Win64
+   // with its SEH `nop` between. The child pusher is the `Div` one whose
+   // `Vec` is not the footer's.
    const MODAL_TYPE: &[u8] = b"mana_html::hosted::modal::Modal";
    const BUTTON_TYPE: &[u8] = b"mana_gpui::components::button::Button";
    let leas = string_leas(image, &[
       b"nav-overlay-popout-layer",
-      b"mana-modal\0",
+      b"mana-modal",
       MODAL_TYPE,
       BUTTON_TYPE,
       b"game-server-shop-carousel",
@@ -1580,56 +1972,71 @@ pub fn modal(image: &Image<'_>, div_into_any: usize, div: &DivLayout) -> Found<M
    let overlay_lea = one("nav-overlay-popout-layer load", &leas_of(overlay_str))?;
    let (overlay_render, overlay_end) = image
       .function_bounds(overlay_lea)
-      .ok_or("Workspace::render_overlays has no .pdata entry")?;
-   if !prologue_at(image, overlay_render, FRAME_PROLOGUE, FRAME_PROLOGUE_LEN) {
+      .ok_or("Workspace::render_overlays has no unwind entry")?;
+   if !prologues(image).frame.at(image, overlay_render) {
       return Err("Workspace::render_overlays prologue changed".to_owned());
    }
 
-   // Among copies of `mana-modal\0`, pick the one referenced by exactly two
-   // functions: the large `Modal::render` (> 0x4000, FRAME_PROLOGUE) and the
-   // small `Modal::new`.
+   // `Modal::new` (about 1 KiB) shares a `mana-modal` literal with the large
+   // `Modal::render` (> 0x4000, frame prologue). ELF builds keep a copy of it
+   // per codegen unit, so the most called one is taken.
+   let calls = call_index(image);
    let mut modal_new = None;
-   for addr in image.find_bytes(b"mana-modal\0") {
+   for addr in literal(image, b"mana-modal") {
       let mut funcs: Vec<(usize, usize)> = leas_of(addr)
          .into_iter()
          .filter_map(|lea| image.function_bounds(lea))
          .collect();
       funcs.sort_unstable();
       funcs.dedup();
-      if funcs.len() != 2 {
+      let rendered = funcs
+         .iter()
+         .any(|&(start, end)| end - start > 0x4000 && prologues(image).frame.at(image, start));
+      if !rendered {
          continue;
       }
-      let (small, large) = if funcs[0].1 - funcs[0].0 < funcs[1].1 - funcs[1].0 {
-         (funcs[0], funcs[1])
-      } else {
-         (funcs[1], funcs[0])
-      };
-      if large.1 - large.0 > 0x4000
-         && prologue_at(image, large.0, FRAME_PROLOGUE, FRAME_PROLOGUE_LEN)
+      for (start, _) in funcs
+         .into_iter()
+         .filter(|&(start, end)| end - start <= 0x800)
       {
-         modal_new = Some(small.0);
-         break;
+         let sites = calls.sites(start).count();
+         if modal_new.is_none_or(|(most, _)| sites > most) {
+            modal_new = Some((sites, start));
+         }
       }
    }
-   let modal_new = modal_new.ok_or("Modal::new not found via mana-modal")?;
+   let (_, modal_new) = modal_new.ok_or("Modal::new not found via mana-modal")?;
 
    let (modal_into_any, modal_size) = find_into_any(image, &leas, MODAL_TYPE)?;
    let (button_into_any, _) = find_into_any(image, &leas, BUTTON_TYPE)?;
 
+   let arg0 = Abi::of(image).arg(0);
+   let copy = [
+      &[0xB9][..],
+      &u32::try_from(modal_size).unwrap_or(0).to_le_bytes(),
+   ]
+   .concat();
    let mut pushers: Vec<(usize, usize, usize, usize)> = Vec::new();
-   for at in image.scan(MODAL_PUSH) {
-      let Some((start, end)) = image.function_bounds(at) else {
+   for at in image.find_bytes(&copy) {
+      let Some(call) = at.checked_sub(5 + usize::from(image.read(at - 1, 1) == Some(&[0x90])))
+      else {
          continue;
       };
-      if imm32(image, at + 15) != Some(modal_size) || pushers.iter().any(|p| p.0 == start) {
+      let Some((start, end)) = image.function_bounds(call) else {
+         continue;
+      };
+      if image.read(call, 1) != Some(&[0xE8]) || pushers.iter().any(|p| p.0 == start) {
          continue;
       }
+      let vec = image
+         .read(call - 12, 12)
+         .and_then(|before| (0..before.len()).find_map(|at| lea_disp8(&before[at..], arg0)));
       let (Some(first), Some(push_fn), Some(vec)) = (
          calls_in(image, start, end - start)
             .first()
             .map(|&(_, callee)| callee),
-         rel32_target(image, at + 9),
-         image.read(at + 3, 1).map(|byte| usize::from(byte[0])),
+         rel32_target(image, call + 1),
+         vec.map(usize::from),
       ) else {
          continue;
       };
@@ -1650,7 +2057,10 @@ pub fn modal(image: &Image<'_>, div_into_any: usize, div: &DivLayout) -> Found<M
    if vec_push_any != push_b {
       return Err("Modal child/footer Vec<AnyElement>::push disagree".to_owned());
    }
-   if !callees(image, overlay_render, overlay_end).contains(&vec_push_any) {
+   if !callees(image, overlay_render, overlay_end)
+      .into_iter()
+      .any(|callee| callee == vec_push_any || same_code(image, callee, vec_push_any))
+   {
       return Err(
          "Workspace::render_overlays no longer pushes via Vec<AnyElement>::push".to_owned(),
       );
@@ -1663,33 +2073,30 @@ pub fn modal(image: &Image<'_>, div_into_any: usize, div: &DivLayout) -> Found<M
       "game-server-shop-carousel",
       &image.find_bytes(b"game-server-shop-carousel"),
    )?;
-   let carousel_lea = one("game-server-shop-carousel load", &leas_of(carousel))?;
+   // `Div::id(div, id)` takes the id string as its third argument.
+   let abi = Abi::of(image);
+   let carousel_leas: Vec<usize> = leas_of(carousel)
+      .into_iter()
+      .filter(|&lea| image.read(lea, 3) == Some(&lea_rip(abi.arg(2))[..]))
+      .collect();
+   let carousel_lea = one("game-server-shop-carousel load", &carousel_leas)?;
    let div_id = calls_in(image, carousel_lea, 0x30)
       .first()
       .ok_or("Div::id call after carousel anchor not found")?
       .1;
+   // `cmp byte [interactivity + disp32], 0xff`, `ElementId::None`.
    if !image.read(div_id, 0x200).is_some_and(|code| {
       code
          .windows(7)
-         .any(|w| w[..2] == [0x80, 0xB9] && w[6] == 0xFF)
+         .any(|w| w[0] == 0x80 && w[1] & 0xF8 == 0xB8 && !matches!(w[1] & 7, 4 | 5) && w[6] == 0xFF)
    }) {
       return Err("Div::id element_id offset check failed".to_owned());
    }
 
-   // GPUI's `Zed::Window` WndProc checks `wParam == *(rc + disp32)` for
-   // `WM_USER+5` (`0x405`, `WM_GPUI_FORCE_UPDATE_WINDOW`).
-   const VALIDATION_PAT: Pattern = Pattern::new(
-      "8D 83 FF FB FF FF 83 F8 13 0F 87 ?? ?? ?? ?? B9 ?? ?? ?? ?? 0F A3 C1 0F 83 ?? ?? ?? ?? 4C \
-       3B B2",
-   );
-   let val_hit = one("GPUI window validation check", &image.scan(VALIDATION_PAT))?;
-   let window_validation_offset =
-      imm32(image, val_hit + 32).ok_or("GPUI window validation offset did not decode")?;
-   if !(0x400..=0x4000).contains(&window_validation_offset) {
-      return Err(format!(
-         "GPUI window validation offset out of range ({window_validation_offset:#x})"
-      ));
-   }
+   let window_validation_offset = match abi {
+      Abi::Win64 => window_validation(image)?,
+      Abi::SysV => 0,
+   };
 
    Ok(Modal {
       overlay_render,
@@ -1712,9 +2119,74 @@ pub fn modal(image: &Image<'_>, div_into_any: usize, div: &DivLayout) -> Found<M
    })
 }
 
+/// GPUI's Wayland frame scheduling, which [`wayland_frame`] locates.
+///
+/// Each `WaylandWindow` is `{state, callbacks, status, ping, requested}`:
+/// `status` an `Rc<Cell<u8>>` (7 idle, 5 requested, 1 in flight, 2 again),
+/// `ping` the calloop `Ping` whose callback calls [`Self::frame`] on every
+/// requested window, and `requested` an `Rc<Cell<Option<Instant>>>`.
+#[derive(Debug, Clone, Copy)]
+pub struct WaylandFrame {
+   /// `WaylandWindowStatePtr::frame(&window, requested, force)`, which hands
+   /// the window's `request_frame` callback `state + force_render` as its
+   /// `force_render`.
+   pub frame:        usize,
+   pub force_render: usize,
+   /// calloop's `Ping::ping(&ping)`, safe from any thread.
+   pub ping:         usize,
+}
+
+/// Locates [`WaylandFrame`] from `frame`'s start and the `request_frame` that
+/// moves `status` from idle to requested and pings, on System V builds.
+pub fn wayland_frame(image: &Image<'_>) -> Found<WaylandFrame> {
+   const FRAME: Pattern = Pattern::new(
+      "55 41 57 41 56 41 55 41 54 53 48 81 EC ?? ?? ?? ?? 48 8B 6F 10 C6 45 10 01 4C 8B 2F 49 83 \
+       7D 10 00 0F 85 ?? ?? ?? ?? 41 C6 85 ?? ?? ?? ?? 00 41 80 BD ?? ?? ?? ?? 02 0F 93 C0 4C 8B \
+       67 08 49 83 7C 24 10 00 0F 85 ?? ?? ?? ?? 45 0F B6 85",
+   );
+   const FRAME_LEN: usize = 78;
+   /// `status` at +0x10, idle 7 to requested 5, `requested` at +0x20 set to
+   /// `Instant::now()`, then a tail call to `Ping::ping(&self.ping)` at +0x18.
+   const REQUEST: Pattern = Pattern::new(
+      "48 8B 47 10 0F B6 48 10 83 F9 07 74 ?? 83 F9 01 75 ?? C6 40 10 02 48 83 C4 08 5B 41 5E C3 \
+       C6 40 10 05 4C 8B 77 20 48 89 FB FF 15 ?? ?? ?? ?? 49 89 46 10 41 89 56 18 48 83 C3 18 48 \
+       89 DF 48 83 C4 08 5B 41 5E FF 25",
+   );
+   const REQUEST_LEN: usize = 71;
+   let frame = one("Wayland frame", &image.scan(FRAME))?;
+   let force_render =
+      imm32(image, frame + FRAME_LEN).ok_or("Wayland frame force_render did not decode")?;
+   let request = one("Wayland request_frame", &image.scan(REQUEST))?;
+   let ping = rel32_target(image, request + REQUEST_LEN)
+      .and_then(|slot| image.read_usize(slot))
+      .filter(|&ping| image.is_code(ping))
+      .ok_or("Wayland request_frame ping did not decode")?;
+   Ok(WaylandFrame {
+      frame,
+      force_render,
+      ping,
+   })
+}
+
+/// GPUI's `Zed::Window` `WndProc` checks `wParam == *(rc + disp32)` for
+/// `WM_USER+5` (`0x405`, `WM_GPUI_FORCE_UPDATE_WINDOW`), a Win32 message.
+fn window_validation(image: &Image<'_>) -> Found<usize> {
+   const VALIDATION_PAT: Pattern = Pattern::new(
+      "8D 83 FF FB FF FF 83 F8 13 0F 87 ?? ?? ?? ?? B9 ?? ?? ?? ?? 0F A3 C1 0F 83 ?? ?? ?? ?? 4C \
+       3B B2",
+   );
+   let val_hit = one("GPUI window validation check", &image.scan(VALIDATION_PAT))?;
+   let offset = imm32(image, val_hit + 32).ok_or("GPUI window validation offset did not decode")?;
+   if !(0x400..=0x4000).contains(&offset) {
+      return Err(format!(
+         "GPUI window validation offset out of range ({offset:#x})"
+      ));
+   }
+   Ok(offset)
+}
+
 /// The best of `ranked` (`(count, value)`, sorted down) if it beats the
 /// runner-up `margin` times over.
-#[cfg(target_arch = "x86_64")]
 fn clear_winner(what: &str, ranked: &[(usize, usize)], margin: usize) -> Found<usize> {
    match ranked {
       [(top, value), rest @ ..] if rest.first().is_none_or(|&(next, _)| *top >= margin * next) => {
@@ -1729,23 +2201,20 @@ fn clear_winner(what: &str, ranked: &[(usize, usize)], margin: usize) -> Found<u
    }
 }
 
-/// Small functions that return a `size`-byte struct by copy, `mov r8d, size;
-/// call memcpy` or `mov ecx, size; rep movsb`.
-#[cfg(target_arch = "x86_64")]
+/// Small functions that return a `size`-byte struct by copy, `mov arg2,
+/// size; call memcpy` or `mov ecx, size; rep movsb`.
 fn copy_returners(image: &Image<'_>, size: usize, max_len: usize) -> Vec<(usize, usize)> {
    let Ok(size) = u32::try_from(size) else {
       return Vec::new();
    };
    let le = size.to_le_bytes();
-   let mut funcs: Vec<(usize, usize)> = [[0x41, 0xB8, le[0], le[1], le[2], le[3]].as_slice(), &[
-      0xB9, le[0], le[1], le[2], le[3],
-   ]]
-   .into_iter()
-   .flat_map(|needle| image.find_bytes(needle))
-   .filter(|&at| image.is_code(at))
-   .filter_map(|at| image.function_bounds(at))
-   .filter(|&(start, end)| end - start <= max_len)
-   .collect();
+   let mut funcs: Vec<(usize, usize)> = [mov_imm32(Abi::of(image).arg(2)), vec![0xB9]]
+      .into_iter()
+      .flat_map(|op| image.find_bytes(&[&op[..], &le].concat()))
+      .filter(|&at| image.is_code(at))
+      .filter_map(|at| image.function_bounds(at))
+      .filter(|&(start, end)| end - start <= max_len)
+      .collect();
    funcs.sort_unstable();
    funcs.dedup();
    funcs
@@ -1753,7 +2222,6 @@ fn copy_returners(image: &Image<'_>, size: usize, max_len: usize) -> Vec<(usize,
 
 /// `Modal::subtitle`, the most called small `SharedString` setter on a
 /// `Modal` (160 callers to 2 for the next on 2026-11 builds).
-#[cfg(target_arch = "x86_64")]
 fn modal_subtitle(image: &Image<'_>, size: usize) -> Found<usize> {
    let calls = call_index(image);
    let mut setters: Vec<(usize, usize)> = copy_returners(image, size, 0x180)
@@ -1771,7 +2239,6 @@ fn modal_subtitle(image: &Image<'_>, size: usize) -> Found<usize> {
 /// `Modal::on_close`, the `Rc<dyn Fn>` most often stored into a `Modal` right
 /// before it is returned by copy (344 stores, the only field on 2026-11
 /// builds).
-#[cfg(target_arch = "x86_64")]
 fn modal_on_close(image: &Image<'_>, size: usize) -> Found<usize> {
    let mut votes: HashMap<usize, usize> = HashMap::new();
    let le = u32::try_from(size)
@@ -1798,16 +2265,25 @@ fn modal_on_close(image: &Image<'_>, size: usize) -> Found<usize> {
 
 /// How often each byte of a `size`-byte struct is set right after `ctor`
 /// returns it, over every call site, most set first.
-#[cfg(target_arch = "x86_64")]
 fn post_ctor_byte_stores(image: &Image<'_>, ctor: usize, size: usize) -> Vec<(usize, usize)> {
    let mut counts: HashMap<usize, usize> = HashMap::new();
+   let abi = Abi::of(image);
    for site in call_index(image).sites(ctor) {
-      let (Some(before), Some(after)) = (image.read(site - 0x30, 0x30), image.read(site + 5, 0x60))
+      let Some((len, _)) = image
+         .read(site, 6)
+         .and_then(|call| call_target(image, call, site))
+      else {
+         continue;
+      };
+      let (Some(before), Some(after)) =
+         (image.read(site - 0x30, 0x30), image.read(site + len, 0x60))
       else {
          continue;
       };
       let mut seen = HashSet::new();
-      for (at, _) in phoenix_hook::x86::sret_byte_stores(before, site - 0x30, after, site + 5) {
+      for (at, _) in
+         phoenix_hook::x86::sret_byte_stores(abi, before, site - 0x30, after, site + len)
+      {
          if at < size && seen.insert(at) {
             *counts.entry(at).or_default() += 1;
          }
@@ -1820,7 +2296,6 @@ fn post_ctor_byte_stores(image: &Image<'_>, ctor: usize, size: usize) -> Vec<(us
 
 /// `Modal::size`, the byte Discord most often sets right after `Modal::new`
 /// (28 call sites to 3 on 2026-11 builds).
-#[cfg(target_arch = "x86_64")]
 fn modal_scale(image: &Image<'_>, modal_new: usize, size: usize) -> Found<usize> {
    clear_winner(
       "Modal size store",
@@ -1831,7 +2306,6 @@ fn modal_scale(image: &Image<'_>, modal_new: usize, size: usize) -> Found<usize>
 
 /// Follows the `"backdrop"` element in `Workspace::render_overlays` down to its
 /// `on_mouse_down` call, a few small helpers deep.
-#[cfg(target_arch = "x86_64")]
 fn backdrop_dismiss(
    image: &Image<'_>,
    overlay: usize,
@@ -1896,35 +2370,38 @@ fn backdrop_dismiss(
 }
 
 /// `mov rax, [rcx + interactivity]` early in `Div`'s `interactivity()`.
-#[cfg(target_arch = "x86_64")]
 fn interactivity_accessor(image: &Image<'_>, func: usize, div: &DivLayout) -> bool {
    let Ok(disp) = u8::try_from(div.interactivity) else {
       return false;
    };
-   let want = [0x48, 0x8B, 0x41, disp];
+   let [rex, op, modrm] = rm_disp8(0x8B, Register::RAX, Abi::of(image).arg(0));
+   let want = [rex, op, modrm, disp];
    image
       .read(func, 0x20)
       .is_some_and(|head| head.windows(4).any(|w| w == want))
 }
 
 /// `Interactivity::on_mouse_down`: `add reg, <vec offset>`, then
-/// `lea r8, [vtable]; ...; jmp <push>`, where the vtable's `call` starts with
-/// the `DispatchPhase::Bubble` test and calls `Hitbox::is_hovered`.
-#[cfg(target_arch = "x86_64")]
+/// `lea arg2, [vtable]; ...; jmp <push>`, where the vtable's `call` starts
+/// with the `DispatchPhase::Bubble` test and calls `Hitbox::is_hovered`.
+///
+/// The listener is `call(self, event, phase, hitbox, ..)`, so the event,
+/// phase and hitbox sit in the second to fourth argument registers.
 fn on_mouse_down_shape(
    image: &Image<'_>,
    start: usize,
    end: usize,
    interactivity_size: usize,
 ) -> Option<Dismiss> {
+   let abi = Abi::of(image);
    let body = image.read(start, end - start)?;
-   let lea = body.windows(3).position(|w| w == [0x4C, 0x8D, 0x05])?;
+   let lea = body.windows(3).position(|w| w == lea_rip(abi.arg(2)))?;
    let vtable = rel32_target(image, start + lea + 3)?;
-   let jmp = body[lea + 7..].iter().take(16).position(|&b| b == 0xE9)? + lea + 7;
-   let listener_push = rel32_target(image, start + jmp + 1)?;
+   let listener_push = (lea + 7..body.len().min(lea + 23))
+      .find_map(|at| jump_target(image, &body[at..], start + at))?;
    let add = body[..lea]
       .windows(3)
-      .rposition(|w| w[0] == 0x48 && w[1] == 0x81 && w[2] & 0xF8 == 0xC0)?;
+      .rposition(|w| w[0] & 0xFE == 0x48 && w[1] == 0x81 && w[2] & 0xF8 == 0xC0)?;
    let mouse_down_listeners = imm32(image, start + add + 3)?;
    if mouse_down_listeners + 0x18 > interactivity_size || !image.is_code(listener_push) {
       return None;
@@ -1932,30 +2409,51 @@ fn on_mouse_down_shape(
 
    let call = image.read_usize(vtable + 0x28)?;
    let wrapper = image.read(call, 0x100)?;
-   if !wrapper[..0x10].windows(3).any(|w| w == [0x45, 0x84, 0xC0]) {
-      return None;
-   }
-   // `mov rcx, r9; call is_hovered; test al, al; je ..; mov byte [reg + disp32],
-   // 0`
-   let at = wrapper.windows(19).position(|w| {
-      matches!(w[..3], [0x4C, 0x89, 0xC9] | [0x49, 0x8B, 0xC9])
-         && w[3] == 0xE8
-         && w[8..11] == [0x84, 0xC0, 0x74]
-         && w[12] == 0xC6
-         && w[13] & 0xC0 == 0x80
-         && w[13] & 0x07 != 0x04
-         && w[18] == 0
-   })?;
-   // A button listener compares `event.button` first (`mov al, [rdx + disp8]`),
-   // which rules out the scroll and move listener `Vec`s of the same shape.
-   if !wrapper[..at]
-      .windows(2)
-      .any(|w| w == [0x8A, 0x42] || w == [0xB6, 0x42])
+   let phase = test_self(abi.arg(2));
+   if !phase
+      .iter()
+      .any(|test| wrapper[..0x10].windows(test.len()).any(|w| w == test))
    {
       return None;
    }
-   let hitbox_is_hovered = rel32_target(image, call + at + 4)?;
-   let propagate_event = imm32(image, call + at + 14)?;
+   // `mov arg0, hitbox; (mov arg1, window;) call is_hovered; test al, al; je
+   // ..; mov byte [cx + disp32], 0`
+   let hitbox = mov_rr(abi.arg(0), abi.arg(3));
+   let (at, hitbox_is_hovered, propagate_event) = (0..wrapper.len()).find_map(|at| {
+      let w = wrapper.get(at..)?;
+      if !hitbox.iter().any(|mov| w.starts_with(mov)) {
+         return None;
+      }
+      let skip = if w.get(3)? & 0xF8 == 0x48 && matches!(w.get(4)?, 0x89 | 0x8B) {
+         6
+      } else {
+         3
+      };
+      let (len, callee) = call_target(image, &w[skip..], call + at + skip)?;
+      let w = w.get(skip + len..skip + len + 11)?;
+      (w[..3] == [0x84, 0xC0, 0x74]
+         && w[4] == 0xC6
+         && w[5] & 0xC0 == 0x80
+         && w[5] & 0x07 != 0x04
+         && w[10] == 0)
+         .then(|| {
+            (
+               at,
+               callee,
+               u32::from_le_bytes([w[6], w[7], w[8], w[9]]) as usize,
+            )
+         })
+   })?;
+   // A button listener compares `event.button` first (`mov al, [event +
+   // disp8]`), which rules out the scroll and move listener `Vec`s of the same
+   // shape.
+   let event = 0x40 | reg(abi.arg(1)).0;
+   if !wrapper[..at]
+      .windows(2)
+      .any(|w| w == [0x8A, event] || w == [0xB6, event])
+   {
+      return None;
+   }
    (image.is_code(hitbox_is_hovered) && propagate_event < 0x10000).then_some(Dismiss {
       mouse_down_listeners,
       listener_push,
@@ -2001,9 +2499,124 @@ pub struct FieldLayout {
    pub weak_ptr:          usize,
 }
 
+/// `FieldState::new(out, a, b)` and `new_multiline`, thunks that pass their
+/// arguments on to `inner(out, multiline, a, b)`, and that inner function:
+/// the pair whose inner function ends by clearing three
+/// `Option<SharedString>`s. Win64 calls it; System V calls or tail-jumps to
+/// it.
+fn field_state_new(image: &Image<'_>, abi: Abi) -> Found<(usize, usize, usize)> {
+   /// Thunk patterns and where the call or jump to the inner function sits.
+   type Thunks<'a> = &'a [(Pattern, usize)];
+   let (singles, multis): (Thunks<'_>, Thunks<'_>) = match abi {
+      Abi::Win64 => {
+         (
+            &[(
+               Pattern::new("56 48 83 EC 20 4D 89 C1 49 89 D0 48 89 CE 31 D2 E8"),
+               16,
+            )],
+            &[(
+               Pattern::new("56 48 83 EC 20 4D 89 C1 49 89 D0 48 89 CE B2 01 E8"),
+               16,
+            )],
+         )
+      },
+      Abi::SysV => {
+         (
+            &[
+               (Pattern::new("48 89 D1 48 89 F2 31 F6"), 8),
+               (Pattern::new("53 48 89 D1 48 89 F2 48 89 FB 31 F6"), 12),
+            ],
+            &[
+               (Pattern::new("48 89 D1 48 89 F2 6A 01 5E"), 9),
+               (
+                  Pattern::new("53 48 89 D1 48 89 F2 48 89 FB BE 01 00 00 00"),
+                  15,
+               ),
+            ],
+         )
+      },
+   };
+   let inner = |at: usize| {
+      let code = image.read(at, 6)?;
+      call_target(image, code, at)
+         .map(|(_, target)| target)
+         .or_else(|| jump_target(image, code, at))
+   };
+   let thunks = |shapes: &[(Pattern, usize)]| -> Vec<(usize, usize)> {
+      shapes
+         .iter()
+         .flat_map(|&(pattern, at)| {
+            image
+               .scan(pattern)
+               .into_iter()
+               .filter_map(move |thunk| Some((thunk, inner(thunk + at)?)))
+         })
+         .collect()
+   };
+   let multis: HashMap<usize, usize> = thunks(multis)
+      .into_iter()
+      .map(|(thunk, target)| (target, thunk))
+      .collect();
+   let pairs: Vec<(usize, usize, usize)> = thunks(singles)
+      .into_iter()
+      .filter(|&(_, target)| field_slots(image, target).is_some())
+      .filter_map(|(thunk, target)| Some((thunk, *multis.get(&target)?, target)))
+      .collect();
+   one("FieldState::new thunks", &pairs)
+}
+
+/// The last three `None` stores `FieldState::new` ends with, in its own body
+/// or, where System V outlines its tail, in the one callee that holds them.
+fn field_slots(image: &Image<'_>, inner: usize) -> Option<Vec<usize>> {
+   let last3 = |func: usize| {
+      let slots = none_stores(function_code(image, func, "").ok()?);
+      slots
+         .get(slots.len().checked_sub(3)?..)
+         .map(<[usize]>::to_vec)
+   };
+   last3(inner).or_else(|| {
+      let (start, end) = image.function_bounds(inner)?;
+      calls_in(image, start, end - start)
+         .into_iter()
+         .find_map(|(_, callee)| last3(callee))
+   })
+}
+
+/// `(site, callee)` of the direct and `[rip + slot]` calls among the first
+/// `max` instructions from `start` to `end`.
+fn decoded_calls(image: &Image<'_>, start: usize, end: usize, max: usize) -> Vec<(usize, usize)> {
+   let Some(body) = image.read(start, end.saturating_sub(start)) else {
+      return Vec::new();
+   };
+   phoenix_hook::x86::disasm(body, start, max)
+      .into_iter()
+      .filter(|line| line.text.starts_with("call "))
+      .filter_map(|line| {
+         let code = image.read(line.addr, line.len)?;
+         Some((line.addr, call_target(image, code, line.addr)?.1))
+      })
+      .collect()
+}
+
+/// The end of the first `ret` between `start` and `end`. ELF builds place
+/// their landing pads after it.
+fn first_ret(image: &Image<'_>, start: usize, end: usize) -> usize {
+   image.read(start, end - start).map_or(end, |body| {
+      phoenix_hook::x86::disasm(body, start, usize::MAX)
+         .into_iter()
+         .find(|line| line.text == "ret")
+         .map_or(end, |line| line.addr + line.len)
+   })
+}
+
+/// `inc qword ptr [base + disp32]`, the `App` pending-update bump.
+fn inc_disp32(base: Register) -> [u8; 3] {
+   let (number, ext) = reg(base);
+   [0x48 | ext, 0xFF, 0x80 | number]
+}
+
 /// Locates Mana `FieldState` creation, text read/write, and hosted
 /// `TextInput`/`TextArea` element constructors.
-#[cfg(target_arch = "x86_64")]
 #[expect(
    clippy::too_many_lines,
    reason = "resolves and cross-checks FieldState, TextInput, and TextArea together"
@@ -2012,24 +2625,9 @@ pub fn text_fields(image: &Image<'_>) -> Found<TextFields> {
    const READ_PANIC: &[u8] = b"readmana_gpui::components::rich_text::state::RichTextState";
    const TEXT_INPUT_TYPE: &[u8] = b"mana_html::hosted::text_input::TextInput";
    const TEXT_AREA_TYPE: &[u8] = b"mana_html::hosted::text_area::TextArea";
-   const FIELD_NEW: Pattern = Pattern::new("56 48 83 EC 20 4D 89 C1 49 89 D0 48 89 CE 31 D2 E8");
-   const FIELD_NEW_MULTI: Pattern =
-      Pattern::new("56 48 83 EC 20 4D 89 C1 49 89 D0 48 89 CE B2 01 E8");
-   /// Hosted `TextInput::new` and `TextArea::new` clone the entity into the
-   /// struct first (`add rcx, entity; call entity_clone`).
-   const HOSTED_NEW: Pattern = Pattern::new("56 48 83 EC 20 48 89 CE 48 81 C1 ?? ?? ?? ?? E8");
 
-   let ctor_single = one("FieldState::new thunk", &image.scan(FIELD_NEW))?;
-   let ctor_multi = one(
-      "FieldState::new_multiline thunk",
-      &image.scan(FIELD_NEW_MULTI),
-   )?;
-   let inner_a = rel32_target(image, ctor_single + 17).ok_or("FieldState::new call invalid")?;
-   let inner_b =
-      rel32_target(image, ctor_multi + 17).ok_or("FieldState::new_multiline call invalid")?;
-   if inner_a != inner_b {
-      return Err("FieldState::new and new_multiline target different inner functions".to_owned());
-   }
+   let abi = Abi::of(image);
+   let (ctor_single, ctor_multi, inner_a) = field_state_new(image, abi)?;
 
    // Single pass over direct calls to find callers of both `FieldState` thunks.
    let mut single_callers = HashSet::new();
@@ -2052,22 +2650,24 @@ pub fn text_fields(image: &Image<'_>) -> Found<TextFields> {
          .iter()
          .filter_map(|&func| {
             let (start, end) = image.function_bounds(func)?;
-            let body = image.read(start, end - start)?;
-            if body.len() < 0x30 {
+            let end = first_ret(image, start, end);
+            let head = image.read(start, 0x30)?;
+            // `cx.new(app, window)` bumps `app`'s pending updates and keeps
+            // `window` for the constructor.
+            let (window, window_ext) = reg(abi.arg(2));
+            let keeps_window = head.windows(3).any(|w| {
+               w[0] & 0xFC == 0x48 | window_ext << 2
+                  && w[1] == 0x89
+                  && w[2] & 0xF8 == 0xC0 | window << 3
+            });
+            if !head.windows(3).any(|w| w == inc_disp32(abi.arg(1))) || !keeps_window {
                return None;
             }
-            let head = &body[..0x30];
-            let has_inc = head.windows(3).any(|w| w == [0x48, 0xFF, 0x82]);
-            let has_mov_rsi_r8 = head.windows(3).any(|w| w == [0x4C, 0x89, 0xC6]);
-            if !has_inc || !has_mov_rsi_r8 {
-               return None;
-            }
-            let calls: Vec<usize> = phoenix_hook::x86::disasm(body, start, 300)
+            let calls: Vec<usize> = decoded_calls(image, start, end, 300)
                .into_iter()
-               .filter(|line| line.text.starts_with("call "))
-               .filter_map(|line| line.target)
+               .map(|(_, callee)| callee)
                .collect();
-            if body.len() > 0x260 || calls.len() != 10 || calls[4] != ctor {
+            if end - start > 0x260 || calls.len() != 10 || calls[4] != ctor {
                return None;
             }
             Some((start, calls[1], calls[3], calls[5]))
@@ -2093,8 +2693,14 @@ pub fn text_fields(image: &Image<'_>) -> Found<TextFields> {
 
    // Set C: every function referencing any copy of the `RichTextState` "read"
    // panic string (may appear in multiple CGUs).
-   let leas = string_leas(image, &[READ_PANIC, TEXT_INPUT_TYPE, TEXT_AREA_TYPE]);
-   let read_panics = image.find_bytes(READ_PANIC);
+   // COFF merges the panic's verb into the type name's literal, ELF loads the
+   // bare name.
+   let read_panic = match abi {
+      Abi::Win64 => READ_PANIC,
+      Abi::SysV => &READ_PANIC[b"read".len()..],
+   };
+   let leas = string_leas(image, &[read_panic, TEXT_INPUT_TYPE, TEXT_AREA_TYPE]);
+   let read_panics = image.find_bytes(read_panic);
    if read_panics.is_empty() {
       return Err("read RichTextState panic not found".to_owned());
    }
@@ -2108,28 +2714,32 @@ pub fn text_fields(image: &Image<'_>) -> Found<TextFields> {
 
    let c_calls: Vec<(usize, Vec<(usize, usize)>)> = set_c
       .iter()
-      .map(|&(start, end)| {
-         let calls = image
-            .read(start, end - start)
-            .map(|body| {
-               phoenix_hook::x86::disasm(body, start, 600)
-                  .into_iter()
-                  .filter(|line| line.text.starts_with("call "))
-                  .filter_map(|line| Some((line.addr, line.target?)))
-                  .collect()
-            })
-            .unwrap_or_default();
-         (start, calls)
-      })
+      .map(|&(start, end)| (start, decoded_calls(image, start, end, 600)))
       .collect();
    let c_set: HashSet<usize> = set_c.iter().map(|&(start, _)| start).collect();
 
+   // `text_get(out, field, app)` opens with `lea arg0, [app + entities]` for
+   // `EntityMap::get`, which tells it from `Entity::read(entity, app)` that
+   // ELF builds keep out of line.
+   let entities_lea = rm_disp8(0x8D, abi.arg(0), abi.arg(2));
+   let app_entities_of = |func: usize| {
+      image.read(func, 0x40).and_then(|head| {
+         head
+            .windows(4)
+            .find(|w| w[..3] == entities_lea)
+            .map(|w| usize::from(w[3]))
+      })
+   };
    // `text_get` is the member of C called by the most other members of C (>= 3).
    let mut caller_counts: HashMap<usize, usize> = HashMap::new();
    for (func, calls) in &c_calls {
       let mut seen = HashSet::new();
       for &(_, callee) in calls {
-         if callee != *func && c_set.contains(&callee) && seen.insert(callee) {
+         if callee != *func
+            && c_set.contains(&callee)
+            && seen.insert(callee)
+            && app_entities_of(callee).is_some()
+         {
             *caller_counts.entry(callee).or_default() += 1;
          }
       }
@@ -2153,15 +2763,27 @@ pub fn text_fields(image: &Image<'_>) -> Found<TextFields> {
 
    // `set_value` is the member of C whose calls start `[SharedString::from,
    // text_get, ...]`, clears `pending_value` (`mov byte [reg + d8], 0xff`) and
-   // updates the `RichTextState` entity by type name (`mov r9d, len`).
-   let rts_len = u32::try_from(READ_PANIC.len() - b"read".len())
-      .map_err(|_| "RichTextState name too long")?
-      .to_le_bytes();
-   let mov_r9d_len = [0x41, 0xB9, rts_len[0], rts_len[1], rts_len[2], rts_len[3]];
+   // updates the `RichTextState` entity by type name (its length in arg 3).
+   let rts_len =
+      u8::try_from(READ_PANIC.len() - b"read".len()).map_err(|_| "RichTextState name too long")?;
+   let len_loads = imm_loads(abi.arg(3), rts_len);
+   let loads_len = |code: &[u8]| {
+      len_loads
+         .iter()
+         .any(|load| code.windows(load.len()).any(|w| w == load.as_slice()))
+   };
    let set_value_hits: Vec<(usize, &Vec<(usize, usize)>)> = c_calls
       .iter()
       .filter(|(func, calls)| {
-         if calls.len() < 4 || calls[0].1 == entity_map_get || calls[1].1 != text_get {
+         // `SharedString::from(&str)`, which `text_get` ends with too. ELF
+         // keeps `set_value::<String>` beside it, which converts first.
+         if calls.len() < 4
+            || calls[0].1 == entity_map_get
+            || calls[1].1 != text_get
+            || !text_get_calls
+               .iter()
+               .any(|&(_, callee)| callee == calls[0].1)
+         {
             return false;
          }
          let Some((start, end)) = image.function_bounds(*func) else {
@@ -2170,7 +2792,10 @@ pub fn text_fields(image: &Image<'_>) -> Found<TextFields> {
          let Some(body) = image.read(start, end - start) else {
             return false;
          };
-         none_stores(body).len() == 1 && body.windows(6).any(|w| w == mov_r9d_len)
+         // ELF repeats the store on the unwind path.
+         let mut stores = none_stores(body);
+         stores.dedup();
+         stores.len() == 1 && loads_len(body)
       })
       .map(|(f, calls)| (*f, calls))
       .collect();
@@ -2195,33 +2820,51 @@ pub fn text_fields(image: &Image<'_>) -> Found<TextFields> {
       })
       .ok_or("Arc<str>::drop_slow not found in FieldState::set_value")?;
 
-   // `update_entity_dyn` is called in `set_value` right after `mov r9d, len`
-   // and begins with `inc qword ptr [rcx + disp32]`.
+   // `update_entity_dyn` is called in `set_value` right after the name's
+   // length and begins with `inc qword ptr [arg0 + disp32]`.
    let update_entity_dyn = sv_calls
       .iter()
       .find_map(|&(site, callee)| {
-         let before = image.read(site.saturating_sub(32), 32)?;
-         if !before.windows(6).any(|w| w == mov_r9d_len) {
+         if !loads_len(image.read(site.saturating_sub(32), 32)?) {
             return None;
          }
          let head = image.read(callee, 0x40)?;
          head
             .windows(3)
-            .any(|w| w == [0x48, 0xFF, 0x81])
+            .any(|w| w == inc_disp32(abi.arg(0)))
             .then_some(callee)
       })
       .ok_or("App::update_entity_dyn not found in FieldState::set_value")?;
 
    // Several hosted elements share `HOSTED_NEW`, so each is the one that fills
    // its own size.
-   let hosted: Vec<(usize, usize, usize)> = image
-      .scan(HOSTED_NEW)
+   // Hosted `TextInput::new` and `TextArea::new` clone the entity into the
+   // struct first: `add arg0, entity; call entity_clone`, or into a temporary
+   // that the lower of two `movups [out + entity], xmm` then moves in.
+   let add_arg0 = {
+      let (number, ext) = reg(abi.arg(0));
+      [0x48 | ext, 0x81, 0xC0 | number]
+   };
+   let hosted: Vec<(usize, usize, usize)> = call_sites(image, |callee| callee == entity_clone)
       .into_iter()
-      .filter(|&at| rel32_target(image, at + 16) == Some(entity_clone))
-      .filter_map(|at| {
-         let entity = imm32(image, at + 11)?;
-         let end = image.function_bounds(at).map_or(at + 0x800, |(_, end)| end);
-         let extent = phoenix_hook::x86::sret_stores(image.read(at, end - at)?, at)
+      .filter_map(|(site, _)| {
+         let (at, end) = image
+            .function_bounds(site)
+            .filter(|&(at, _)| site - at <= 0x10)?;
+         let added = image
+            .read(site.checked_sub(7)?, 7)
+            .filter(|add| add[..3] == add_arg0)
+            .and_then(|_| imm32(image, site - 4));
+         let entity = added.or_else(|| {
+            image
+               .read(site, 0x30)?
+               .windows(7)
+               .take(0x20)
+               .filter(|w| w[..2] == [0x0F, 0x11] && w[2] & 0xC0 == 0x80 && w[2] & 7 != 4)
+               .map(|w| u32::from_le_bytes([w[3], w[4], w[5], w[6]]) as usize)
+               .min()
+         })?;
+         let extent = phoenix_hook::x86::sret_stores(abi, image.read(at, end - at)?, at)
             .into_iter()
             .map(|(field, len)| field + len)
             .max()?;
@@ -2246,10 +2889,8 @@ pub fn text_fields(image: &Image<'_>) -> Found<TextFields> {
    // `FieldState::new` ends by writing `None` into its three
    // `Option<SharedString>`s; the one `set_value` clears is the pending value.
    let pending_value = none_stores(function_code(image, set_value, "FieldState::set_value")?)[0];
-   let slots = none_stores(function_code(image, inner_a, "FieldState::new")?);
-   let slots = slots
-      .get(slots.len().saturating_sub(3)..)
-      .filter(|slots| slots.len() == 3 && slots.contains(&pending_value))
+   let slots = field_slots(image, inner_a)
+      .filter(|slots| slots.contains(&pending_value))
       .ok_or("FieldState::new no longer clears three SharedString slots")?;
    let placeholders: Vec<usize> = slots
       .iter()
@@ -2260,20 +2901,17 @@ pub fn text_fields(image: &Image<'_>) -> Found<TextFields> {
       return Err("FieldState placeholder slots did not decode".to_owned());
    };
 
-   // `text_get` opens with `lea rcx, [r8 + entities]` for `EntityMap::get`.
-   let app_entities = image
-      .read(text_get, 0x40)
-      .and_then(|head| head.windows(4).find(|w| w[..3] == [0x49, 0x8D, 0x48]))
-      .map(|w| usize::from(w[3]))
-      .ok_or("App entity map offset not found in text_get")?;
-   // `entity_downgrade` bumps the weak count: `mov rax, [rdx + weak]; cmp rax,
-   // -1`.
+   let app_entities =
+      app_entities_of(text_get).ok_or("App entity map offset not found in text_get")?;
+   // `entity_downgrade` bumps the weak count: `mov rax, [arg1 + weak]; cmp
+   // rax, -1`.
+   let weak_load = rm_disp8(0x8B, Register::RAX, abi.arg(1));
    let weak_ptr = image
       .read(entity_downgrade, 0x20)
       .and_then(|head| {
          head
             .windows(8)
-            .find(|w| w[..3] == [0x48, 0x8B, 0x42] && w[4..] == [0x48, 0x83, 0xF8, 0xFF])
+            .find(|w| w[..3] == weak_load && w[4..] == [0x48, 0x83, 0xF8, 0xFF])
       })
       .map(|w| usize::from(w[3]))
       .filter(|&weak| weak + 8 <= layout::ENTITY)
@@ -2306,9 +2944,11 @@ pub fn text_fields(image: &Image<'_>) -> Found<TextFields> {
    })
 }
 
-/// Locates `libdiscord_media::fetch` via its `tracing::Metadata` callsite
-/// static (`"media_fetch"` / `"libdiscord_media::fetch"`), so the desktop
-/// runtime can unwrap custom badge icon URLs (`/badge-icons/phx_u_<hex>`).
+/// Locates `libdiscord_media::fetch` via its `tracing::Metadata` callsite.
+///
+/// The callsite static names `"media_fetch"` / `"libdiscord_media::fetch"`,
+/// and the desktop runtime hooks the function to unwrap custom badge icon
+/// URLs (`/badge-icons/phx_u_<hex>`).
 pub fn media_fetch(image: &Image<'_>) -> Found<usize> {
    let name = one(
       "media_fetch tracing name",
@@ -2322,8 +2962,10 @@ pub fn media_fetch(image: &Image<'_>) -> Found<usize> {
       let mut pos = 0;
       while pos + 8 <= seg.bytes.len() {
          let Some(rel) = seg.bytes[pos..]
-            .chunks_exact(8)
-            .position(|chunk| chunk == name_bytes)
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .position(|chunk| *chunk == name_bytes)
          else {
             break;
          };
@@ -2349,8 +2991,106 @@ pub fn media_fetch(image: &Image<'_>) -> Found<usize> {
    funcs.sort_unstable();
    funcs.dedup();
    let func = one("libdiscord_media::fetch", &funcs)?;
-   if !prologue_at(image, func, MEDIA_FETCH_PROLOGUE, MEDIA_FETCH_PROLOGUE_LEN) {
+   if !prologues(image).media_fetch.at(image, func) {
       return Err("libdiscord_media::fetch prologue changed".to_owned());
    }
    Ok(func)
+}
+
+/// `serde_json::to_value::<Message>`, which Phoenix runs to store a message,
+/// and `drop_in_place::<serde_json::Value>`, which frees what it returns.
+#[derive(Clone, Copy, Debug)]
+pub struct MessageJson {
+   /// `fn(out: *mut Result<Value, Error>, message: *const Message)`.
+   pub to_value:   usize,
+   /// `fn(value: *mut Value)`.
+   pub drop_value: usize,
+}
+
+/// Locates [`MessageJson`].
+///
+/// `to_value` is the one function that loads `"mention_everyone"` whose first
+/// string is the struct name `Message` and whose next are the fields `id`,
+/// `channel_id` and `guild_id`, with a `type` key and no `kind` (another
+/// `Message` model's). The drop glue reads `Value`'s tag from the niche in its
+/// first word (`5` for an object), and drops an object's index table of
+/// 8-byte slots aligned to 16; every copy of it is the same function.
+pub fn message_json(image: &Image<'_>) -> Found<MessageJson> {
+   const DECODE: Pattern = Pattern::new(
+      "48 8B ?? 48 B9 00 00 00 00 00 00 00 80 48 31 C1 48 85 C0 B8 05 00 00 00 48 0F 48 C1 48 83 \
+       F8 03",
+   );
+   let mut names = image.find_bytes(b"mention_everyone");
+   names.sort_unstable();
+   let mut funcs = Vec::new();
+   for segment in image.segments.iter().filter(|segment| segment.executable) {
+      for (at, target) in rip_leas(&segment.bytes, segment.addr) {
+         if names.binary_search(&target).is_ok()
+            && let Some(bounds) = image.function_bounds(at)
+         {
+            funcs.push(bounds);
+         }
+      }
+   }
+   funcs.sort_unstable();
+   funcs.dedup();
+   let starts = |s: &[u8], prefix: &[u8]| s.starts_with(prefix);
+   let found: Vec<usize> = funcs
+      .into_iter()
+      .filter(|&(start, end)| {
+         let Some(code) = image.read(start, end - start) else {
+            return false;
+         };
+         let strings: Vec<&[u8]> = rip_leas(code, start)
+            .filter_map(|(_, target)| image.read(target, 16))
+            .collect();
+         let [first, id, channel, guild, ..] = strings.as_slice() else {
+            return false;
+         };
+         starts(first, b"Message")
+            && starts(id, b"id")
+            && starts(channel, b"channel_id")
+            && starts(guild, b"guild_id")
+            && strings.iter().any(|s| starts(s, b"type"))
+            && !strings.iter().any(|s| starts(s, b"kind"))
+      })
+      .map(|(start, _)| start)
+      .collect();
+   let to_value = one("Message to_value", &found)?;
+
+   let table_drop: &[u8] = match Abi::of(image) {
+      Abi::Win64 => &[0x41, 0xB8, 8, 0, 0, 0, 0x41, 0xB9, 0x10, 0, 0, 0],
+      Abi::SysV => &[0xBA, 8, 0, 0, 0, 0xB9, 0x10, 0, 0, 0],
+   };
+   let drop_value = image
+      .scan(DECODE)
+      .into_iter()
+      .find_map(|hit| {
+         let start = image.function_containing(hit)?;
+         let tail = image.read(hit, 0xA0)?;
+         (hit - start < 0x30 && tail.windows(table_drop.len()).any(|w| w == table_drop))
+            .then_some(start)
+      })
+      .ok_or("serde_json::Value drop glue not found")?;
+   Ok(MessageJson {
+      to_value,
+      drop_value,
+   })
+}
+
+/// Each `lea r64, [rip + disp32]` in `code` mapped at `addr`, as (instruction,
+/// target).
+fn rip_leas(code: &[u8], addr: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
+   memchr::memchr_iter(0x8D, code).filter_map(move |pos| {
+      let rex = *code.get(pos.checked_sub(1)?)?;
+      let modrm = *code.get(pos + 1)?;
+      if rex & 0xFB != 0x48 || modrm & 0xC7 != 0x05 {
+         return None;
+      }
+      let disp = i32::from_le_bytes(code.get(pos + 2..pos + 6)?.try_into().ok()?);
+      Some((
+         addr + pos - 1,
+         (addr + pos + 6).checked_add_signed(disp as isize)?,
+      ))
+   })
 }

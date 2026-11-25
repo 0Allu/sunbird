@@ -4,7 +4,8 @@
 //! Hooks Discord's window root render (`modal-layer-scrim` ->
 //! `WindowRoot::render`) and composes Discord's own
 //! `mana_html::hosted::modal::Modal`, `TextInput`, and `TextArea` natively on
-//! top of the active window — no Win32 popup windows and no WebView2 overlays.
+//! top of the active window — no Win32 popup windows and no `WebView2`
+//! overlays.
 
 use std::{
    ffi::c_void,
@@ -42,25 +43,29 @@ use phoenix_sigs::desktop::{
    layout,
 };
 
-use crate::gpui::{
-   self,
-   BtnSize,
-   BtnVariant,
-   RawAnyElement,
-   RawButton,
-   RawDiv,
-   RcFnVtbl,
-   Scratch,
-   SharedString,
-   Style,
-   W_FULL,
-   argb_to_hsla,
-   gpui_px,
-   intern_str,
+use crate::{
+   gpui::{
+      self,
+      BtnSize,
+      BtnVariant,
+      RawAnyElement,
+      RawButton,
+      RawDiv,
+      RcFnVtbl,
+      Scratch,
+      SharedString,
+      Style,
+      W_FULL,
+      argb_to_hsla,
+      gpui_px,
+      intern_str,
+   },
+   os::{
+      DesktopOs,
+      Os,
+   },
 };
 
-const WM_GPUI_FORCE_UPDATE_WINDOW: u32 = 0x0405;
-const GWLP_USERDATA: i32 = -21;
 const MAX_HIGHLIGHT_LINES: usize = 600;
 const MONO_FONT: &str = "gg sans mono";
 
@@ -420,7 +425,11 @@ const unsafe extern "C" fn noop_drop(_data: *mut u8) {}
 /// GPUI dispatches a press front to back in the capture phase, then back to
 /// front in the bubble phase, so the card (painted over the scrim) bubbles
 /// first. A press the card saw is kept; any other press on the scrim closes.
-unsafe extern "C" fn scrim_press(
+///
+/// Both press handlers are Rust ABI like the `Fn::call` slot they fill: on
+/// Linux `extern "C"` would assume the caller widened `phase`, which Rust
+/// callers do not.
+unsafe fn scrim_press(
    _data: *const u8,
    _event: *const c_void,
    phase: u8,
@@ -450,7 +459,7 @@ unsafe extern "C" fn scrim_press(
    });
 }
 
-unsafe extern "C" fn card_press(
+unsafe fn card_press(
    _data: *const u8,
    _event: *const c_void,
    phase: u8,
@@ -793,63 +802,10 @@ fn set_install_status(msg: &str, is_error: bool, busy: bool) {
    force_redraw();
 }
 
-// ---------------------------------------------------------------------------
-// GPUI Force-Redraw via `WM_GPUI_FORCE_UPDATE_WINDOW` (`WM_USER + 5`)
-// ---------------------------------------------------------------------------
-
-#[link(name = "user32")]
-unsafe extern "system" {
-   fn EnumWindows(cb: unsafe extern "system" fn(isize, isize) -> i32, lparam: isize) -> i32;
-   fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
-   fn IsWindowVisible(hwnd: isize) -> i32;
-   fn GetClassNameW(hwnd: isize, buf: *mut u16, max_count: i32) -> i32;
-   fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
-   fn PostMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> i32;
-   fn InvalidateRect(hwnd: isize, rect: *const c_void, erase: i32) -> i32;
-}
-
-unsafe extern "system" fn redraw_zed_window(hwnd: isize, lparam: isize) -> i32 {
-   let want_pid = u32::try_from(lparam).unwrap_or_default();
-   let mut pid = 0u32;
-   // SAFETY: Win32 window queries for this process's own visible `Zed::Window`s.
-   unsafe {
-      GetWindowThreadProcessId(hwnd, &raw mut pid);
-      if pid != want_pid || IsWindowVisible(hwnd) == 0 {
-         return 1;
-      }
-      let val_off = WINDOW_VAL_OFFSET.load(Ordering::Acquire);
-      if val_off != 0 {
-         let mut cls = [0u16; 32];
-         let n = GetClassNameW(hwnd, cls.as_mut_ptr(), 32);
-         if n > 0 && String::from_utf16_lossy(&cls[..n as usize]) == "Zed::Window" {
-            let user_data = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as usize;
-            if user_data != 0 && user_data != usize::MAX {
-               let rc = *(user_data as *const usize);
-               if rc != 0 && rc != usize::MAX {
-                  let strong = *(rc as *const usize);
-                  if strong != 0 {
-                     let validation = *((rc + val_off) as *const usize);
-                     PostMessageW(hwnd, WM_GPUI_FORCE_UPDATE_WINDOW, validation, 0);
-                     return 1;
-                  }
-               }
-            }
-         }
-      }
-      InvalidateRect(hwnd, ptr::null(), 0);
-   }
-   1
-}
-
-/// Forces every visible GPUI window in this process to re-render immediately
-/// (works reliably from any background thread, unlike `InvalidateRect` alone).
+/// Forces every visible GPUI window in this process to re-render, from any
+/// thread.
 pub fn force_redraw() {
-   let pid = std::process::id();
-   // SAFETY: enumerates windows in this process and posts `WM_USER + 5` with
-   // GPUI's validated window token.
-   unsafe {
-      EnumWindows(redraw_zed_window, isize::try_from(pid).unwrap_or_default());
-   }
+   Os::force_redraw(WINDOW_VAL_OFFSET.load(Ordering::Acquire));
 }
 
 // ---------------------------------------------------------------------------
@@ -945,14 +901,15 @@ pub fn install(image: &Image<'static>) {
       },
    }
 
-   // SAFETY: runs from `DllMain` before Discord threads execute;
+   let pro = desktop::Prologues::of(phoenix_hook::x86::Abi::of(image)).frame;
+   // SAFETY: runs from `prepare` before Discord threads execute;
    // `overlay_render_detour` matches `Workspace::render_overlays`'s 5-arg sret
    // ABI returning `Vec<AnyElement>`.
    let trampoline = match unsafe {
       image.hook_entry(
          found.overlay_render,
-         desktop::FRAME_PROLOGUE,
-         desktop::FRAME_PROLOGUE_LEN,
+         pro.pattern,
+         pro.len,
          overlay_render_detour as *const () as usize,
       )
    } {
@@ -1042,17 +999,17 @@ unsafe fn set_field_text(app: *mut c_void, entity: &RawEntity, text: &str) {
       return;
    }
    let mut env = SetValueEnv {
-      entity:   entity as *const RawEntity,
+      entity:   ptr::from_ref(entity),
       text_ptr: text.as_ptr(),
       text_len: text.len(),
-      tf:       tf as *const TextFieldSymbols,
+      tf:       ptr::from_ref(tf),
    };
    // SAFETY: `update_entity_dyn` leases `FieldState`, calls `set_value_trampoline`
    // synchronously on this stack frame, ends the lease, and flushes effects.
    unsafe {
       (tf.update_entity_dyn)(
          app,
-         entity as *const RawEntity,
+         ptr::from_ref(entity),
          b"FieldState".as_ptr(),
          10,
          (&raw mut env).cast::<c_void>(),
@@ -1083,6 +1040,7 @@ unsafe fn read_field_text(app: *mut c_void, entity: &RawEntity) -> Option<String
       let mut ss = ss.assume_init();
       let result = decode_shared_string(&ss);
       if ss.tag >= 0x19 && !ss.ptr.is_null() {
+         #[expect(clippy::cast_ptr_alignment, reason = "an `Arc` header is word aligned")]
          let strong = &*ss.ptr.cast::<AtomicUsize>();
          if strong.fetch_sub(1, Ordering::Release) == 1 {
             std::sync::atomic::fence(Ordering::Acquire);
@@ -1097,12 +1055,8 @@ unsafe fn decode_shared_string(ss: &SharedString) -> String {
    let tag = ss.tag;
    if tag <= 0x17 {
       // SAFETY: inline bytes live at offsets `1..=tag` inside `SharedString`.
-      let bytes = unsafe {
-         slice::from_raw_parts(
-            (ss as *const SharedString).cast::<u8>().add(1),
-            usize::from(tag),
-         )
-      };
+      let bytes =
+         unsafe { slice::from_raw_parts(ptr::from_ref(ss).cast::<u8>().add(1), usize::from(tag)) };
       return String::from_utf8_lossy(bytes).into_owned();
    }
    if tag == 0x18 {
@@ -1453,27 +1407,27 @@ fn push_overlay_into(overlays: *mut RawVecAny, window: *mut c_void, app: *mut c_
          MODAL_OPEN.store(false, Ordering::Release);
          return;
       };
-      match active {
+      let snapshot = match active {
          ActiveModal::Page { spec, .. } | ActiveModal::Choice { spec, .. } => {
             Snapshot::Page(spec.clone())
          },
          ActiveModal::CodeEditor(ed) => {
-            let init = ed.pending_init.take();
             Snapshot::CodeEditor(CodeEditorModal {
                plugin:       ed.plugin.clone(),
-               pending_init: init,
+               pending_init: ed.pending_init.take(),
                status:       ed.status.clone(),
             })
          },
          ActiveModal::InstallUrl(inst) => {
-            let init = inst.pending_init.take();
             Snapshot::InstallUrl(InstallUrlModal {
-               pending_init: init,
+               pending_init: inst.pending_init.take(),
                status:       inst.status.clone(),
                busy:         inst.busy,
             })
          },
-      }
+      };
+      drop(guard);
+      snapshot
    };
 
    MODAL_ACTIONS

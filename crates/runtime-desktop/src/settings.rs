@@ -60,21 +60,27 @@ pub fn install(image: &Image<'static>) {
 }
 
 fn patch_sidebar_label(image: &Image<'static>) {
-   const NEW: &[u8] = b"SunbirdDESKTOP_SUNBIRD";
-   const _: () = assert!(desktop::SETTINGS_LABEL.len() == NEW.len());
+   const NEW_NAME: &[u8] = b"Sunbird";
+   const NEW_ID: &[u8] = b"DESKTOP_SUNBIRD";
+   const _: () = assert!(NEW_NAME.len() == b"Phoenix".len());
+   const _: () = assert!(NEW_ID.len() == b"DESKTOP_PHOENIX".len());
 
-   let addr = match desktop::settings_label(image) {
-      Ok(addr) => addr,
+   let label = match desktop::settings_label_parts(image) {
+      Ok(label) => label,
       Err(err) => {
          log::warn!("desktop settings: {err}, leaving sidebar label");
          return;
       },
    };
-   // SAFETY: exact-length `.rdata` string patch executed from `DllMain` before
-   // Discord threads run.
-   match unsafe { image.write_code(addr, NEW) } {
+   // SAFETY: exact-length `.rodata`/`.rdata` string patches executed from
+   // `prepare` before Discord threads run.
+   if let Err(err) = unsafe { image.write_code(label.name, NEW_NAME) } {
+      log::warn!("desktop settings: relabel name failed: {err}");
+      return;
+   }
+   match unsafe { image.write_code(label.id, NEW_ID) } {
       Ok(()) => log::info!("desktop settings: relabeled page 24 to Sunbird"),
-      Err(err) => log::warn!("desktop settings: relabel failed: {err}"),
+      Err(err) => log::warn!("desktop settings: relabel id failed: {err}"),
    }
 }
 
@@ -105,13 +111,14 @@ fn hook_section_render(image: &Image<'static>) {
    };
    PAGE_OFFSET.store(offset, Ordering::Release);
 
-   // SAFETY: runs from `DllMain` before Discord threads execute;
+   let pro = desktop::Prologues::of(phoenix_hook::x86::Abi::of(image)).frame;
+   // SAFETY: runs from `prepare` before Discord threads execute;
    // `section_detour` matches `host::section`'s exact 6-argument sret ABI.
    let trampoline = match unsafe {
       image.hook_entry(
          fn_start,
-         desktop::FRAME_PROLOGUE,
-         desktop::FRAME_PROLOGUE_LEN,
+         pro.pattern,
+         pro.len,
          section_detour as *const () as usize,
       )
    } {

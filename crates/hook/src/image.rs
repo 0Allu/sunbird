@@ -35,15 +35,52 @@ use memchr::memmem;
 use crate::pattern::Pattern;
 
 /// `jmp [rip]` followed by its 8-byte target.
-#[cfg(all(windows, target_arch = "x86_64"))]
+#[cfg(all(target_arch = "x86_64", any(windows, target_os = "linux")))]
 pub(crate) const ABSOLUTE_JUMP_LEN: usize = 14;
 
-#[cfg(all(windows, target_arch = "x86_64"))]
+#[cfg(all(target_arch = "x86_64", any(windows, target_os = "linux")))]
 pub(crate) fn absolute_jump(to: usize) -> [u8; ABSOLUTE_JUMP_LEN] {
    let mut jump = [0; ABSOLUTE_JUMP_LEN];
    jump[..2].copy_from_slice(&[0xFF, 0x25]);
    jump[6..].copy_from_slice(&to.to_le_bytes());
    jump
+}
+
+/// `len` fresh read-write-execute bytes at `at`, or anywhere when `at` is 0.
+#[cfg(all(windows, target_arch = "x86_64"))]
+pub(crate) fn alloc_exec(at: usize, len: usize) -> Option<usize> {
+   // SAFETY: asks for a fresh mapping at a free address, or fails.
+   let page = unsafe {
+      win32::VirtualAlloc(
+         at as *const c_void,
+         len,
+         win32::MEM_COMMIT_RESERVE,
+         win32::PAGE_EXECUTE_READWRITE,
+      )
+   };
+   (!page.is_null()).then_some(page as usize)
+}
+
+/// `len` fresh read-write-execute bytes at `at`, or anywhere when `at` is 0.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub(crate) fn alloc_exec(at: usize, len: usize) -> Option<usize> {
+   let fixed = if at == 0 {
+      0
+   } else {
+      libc::MAP_FIXED_NOREPLACE
+   };
+   // SAFETY: asks for a fresh anonymous mapping that replaces nothing.
+   let page = unsafe {
+      libc::mmap(
+         at as *mut c_void,
+         len,
+         libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+         libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | fixed,
+         -1,
+         0,
+      )
+   };
+   (page != libc::MAP_FAILED).then_some(page as usize)
 }
 
 const NT_GNU_BUILD_ID: u32 = 3;
@@ -415,7 +452,7 @@ impl Image<'static> {
             // SAFETY: the loader reports dlpi_phnum headers at dlpi_phdr.
             unsafe { slice::from_raw_parts(info.dlpi_phdr, usize::from(info.dlpi_phnum)) }
          };
-         let path = if info.dlpi_name.is_null() {
+         let mut path = if info.dlpi_name.is_null() {
             String::new()
          } else {
             // SAFETY: dlpi_name is NUL-terminated when present.
@@ -423,6 +460,13 @@ impl Image<'static> {
                .to_string_lossy()
                .into_owned()
          };
+         // The loader reports the main executable first and without a name.
+         if path.is_empty()
+            && images.is_empty()
+            && let Ok(exe) = std::fs::read_link("/proc/self/exe")
+         {
+            path = exe.to_string_lossy().into_owned();
+         }
 
          let mut image = Image {
             path,
@@ -852,7 +896,7 @@ impl Image<'static> {
    ///
    /// `detour` has the function's exact ABI, and no thread runs the
    /// function's first bytes while they are written.
-   #[cfg(all(windows, target_arch = "x86_64"))]
+   #[cfg(all(target_arch = "x86_64", any(windows, target_os = "linux")))]
    pub unsafe fn hook_entry(
       &self,
       addr: usize,
@@ -875,23 +919,13 @@ impl Image<'static> {
       }
       let mut code = displaced.to_vec();
       code.extend(absolute_jump(addr + prologue_len));
-      // SAFETY: a fresh allocation, filled before anything runs it.
-      let trampoline = unsafe {
-         win32::VirtualAlloc(
-            std::ptr::null(),
-            code.len(),
-            win32::MEM_COMMIT_RESERVE,
-            win32::PAGE_EXECUTE_READWRITE,
-         )
-      };
-      if trampoline.is_null() {
-         return Err(refuse("no memory for the trampoline"));
-      }
+      let trampoline =
+         alloc_exec(0, code.len()).ok_or_else(|| refuse("no memory for the trampoline"))?;
       // SAFETY: `trampoline` holds `code.len()` writable bytes.
-      unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), trampoline.cast::<u8>(), code.len()) };
+      unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), trampoline as *mut u8, code.len()) };
       // SAFETY: forwarded from the caller.
       unsafe { self.write_code(addr, &absolute_jump(detour)) }?;
-      Ok(trampoline as usize)
+      Ok(trampoline)
    }
 }
 
@@ -1035,10 +1069,6 @@ impl Image<'_> {
    /// `.eh_frame_hdr`.
    #[must_use]
    pub fn function_containing(&self, addr: usize) -> Option<usize> {
-      const UDATA4: u8 = 0x03;
-      const SDATA4: u8 = 0x0B;
-      const DATAREL_SDATA4: u8 = 0x3B;
-
       if let Some((image_base, base, len)) = self.pdata {
          return self
             .pdata_bounds(image_base, base, len / 12, addr)
@@ -1053,9 +1083,30 @@ impl Image<'_> {
             let prel31 = (self.read_u32(at)? << 1).cast_signed() >> 1;
             at.checked_add_signed(prel31 as isize)
          };
-         return last_at_or_below(len / 8, start, addr);
+         return start(last_at_or_below(len / 8, start, addr)?);
       }
 
+      self.eh_frame_entry(addr).map(|(start, _)| start)
+   }
+
+   /// Exact `[start, end)` bounds of the function containing `addr`, from PE64
+   /// `.pdata` or the FDE `.eh_frame_hdr` points at.
+   #[must_use]
+   pub fn function_bounds(&self, addr: usize) -> Option<(usize, usize)> {
+      if let Some((image_base, base, len)) = self.pdata {
+         return self.pdata_bounds(image_base, base, len / 12, addr);
+      }
+      let (start, fde) = self.eh_frame_entry(addr)?;
+      let end = start.checked_add(self.fde_range(fde, start)?)?;
+      (addr < end).then_some((start, end))
+   }
+
+   /// `(start, fde)` of the last `.eh_frame_hdr` search table entry at or below
+   /// `addr`.
+   fn eh_frame_entry(&self, addr: usize) -> Option<(usize, usize)> {
+      const UDATA4: u8 = 0x03;
+      const SDATA4: u8 = 0x0B;
+      const DATAREL_SDATA4: u8 = 0x3B;
       let hdr = self.eh_frame_hdr?;
       let &[1, frame_encoding, UDATA4, DATAREL_SDATA4] = self.read(hdr, 4)? else {
          return None;
@@ -1063,20 +1114,82 @@ impl Image<'_> {
       if !matches!(frame_encoding & 0x0F, UDATA4 | SDATA4) {
          return None;
       }
-
       let word = |at: usize| Some(i32::from_ne_bytes(self.read(at, 4)?.try_into().ok()?));
-      let start = |index: usize| {
-         word(hdr + 12 + index * 8).and_then(|rel| hdr.checked_add_signed(rel as isize))
-      };
-      last_at_or_below(usize::try_from(word(hdr + 8)?).ok()?, start, addr)
+      let field = |at: usize| word(at).and_then(|rel| hdr.checked_add_signed(rel as isize));
+      let count = usize::try_from(word(hdr + 8)?).ok()?;
+      let start = |index: usize| field(hdr + 12 + index * 8);
+      let index = last_at_or_below(count, start, addr)?;
+      Some((start(index)?, field(hdr + 16 + index * 8)?))
    }
 
-   /// Exact `[start, end)` bounds of the function containing `addr` when the
-   /// image carries a PE64 `.pdata` exception directory.
-   #[must_use]
-   pub fn function_bounds(&self, addr: usize) -> Option<(usize, usize)> {
-      let (image_base, base, len) = self.pdata?;
-      self.pdata_bounds(image_base, base, len / 12, addr)
+   /// The `pc_range` of the FDE at `fde`, in the pointer encoding its CIE's
+   /// `R` augmentation names. Its `pc_begin` must decode to `start`.
+   fn fde_range(&self, fde: usize, start: usize) -> Option<usize> {
+      let cie = (fde + 4).checked_sub(self.read_u32(fde + 4)? as usize)?;
+      if self.read_u32(cie)? >= 0xFFFF_FFF0 || self.read_u32(cie + 4)? != 0 {
+         return None;
+      }
+      let mut at = cie + 9;
+      let augmentation = self.read(cie + 9, 16)?;
+      let augmentation = &augmentation[..augmentation.iter().position(|&b| b == 0)?];
+      at += augmentation.len() + 1;
+      self.uleb(&mut at)?; // code alignment
+      self.uleb(&mut at)?; // data alignment
+      if self.read(cie + 8, 1)? == [1] {
+         at += 1;
+      } else {
+         self.uleb(&mut at)?;
+      }
+      let mut encoding = 0; // DW_EH_PE_absptr
+      if augmentation.first() == Some(&b'z') {
+         self.uleb(&mut at)?;
+         for &kind in &augmentation[1..] {
+            if kind == b'S' {
+               continue;
+            }
+            let enc = self.read(at, 1)?[0];
+            at += 1;
+            match kind {
+               b'R' => encoding = enc,
+               b'L' => {},
+               b'P' => at += pointer_size(enc, self.pointer_width)?,
+               _ => return None,
+            }
+         }
+      }
+      let size = pointer_size(encoding, self.pointer_width)?;
+      let read = |at: usize| -> Option<i64> {
+         let bytes = self.read(at, size)?;
+         let mut word = [0u8; 8];
+         word[..size].copy_from_slice(bytes);
+         let raw = i64::from_le_bytes(word);
+         // DW_EH_PE_sdata*
+         Some(if encoding & 0x08 != 0 && size < 8 {
+            raw << (64 - size * 8) >> (64 - size * 8)
+         } else {
+            raw
+         })
+      };
+      let begin = match encoding & 0x70 {
+         0x00 => usize::try_from(read(fde + 8)?).ok()?,
+         0x10 => (fde + 8).checked_add_signed(isize::try_from(read(fde + 8)?).ok()?)?,
+         _ => return None,
+      };
+      (begin == start).then_some(usize::try_from(read(fde + 8 + size)?).ok()?)
+   }
+
+   /// The ULEB128 at `*at`, moving `at` past it.
+   fn uleb(&self, at: &mut usize) -> Option<usize> {
+      let (mut value, mut shift) = (0usize, 0);
+      loop {
+         let byte = self.read(*at, 1)?[0];
+         *at += 1;
+         value |= usize::from(byte & 0x7F).checked_shl(shift)?;
+         shift += 7;
+         if byte & 0x80 == 0 {
+            return Some(value);
+         }
+      }
    }
 
    /// Binary search over PE64 `.pdata`, whose `count` `RUNTIME_FUNCTION`
@@ -1089,25 +1202,26 @@ impl Image<'_> {
       count: usize,
       addr: usize,
    ) -> Option<(usize, usize)> {
-      let rva = u32::try_from(addr.checked_sub(image_base)?).ok()?;
-      let begin = |index: usize| self.read_u32(base + index * 12);
-      let (mut low, mut high) = (0, count);
-      while low < high {
-         let mid = low + (high - low) / 2;
-         if begin(mid)? <= rva {
-            low = mid + 1;
-         } else {
-            high = mid;
-         }
-      }
-      let index = low.checked_sub(1)?;
-      let start = begin(index)?;
-      let end = self.read_u32(base + index * 12 + 4)?;
-      (rva < end).then(|| (image_base + start as usize, image_base + end as usize))
+      let rva = addr.checked_sub(image_base)?;
+      let field = |at: usize| self.read_u32(at).map(|value| value as usize);
+      let index = last_at_or_below(count, |index| field(base + index * 12), rva)?;
+      let (start, end) = (field(base + index * 12)?, field(base + index * 12 + 4)?);
+      (rva < end).then_some((image_base + start, image_base + end))
    }
 }
 
-/// The last of `count` ascending function starts at or below `addr`.
+/// Bytes a `DW_EH_PE_*` pointer encoding takes.
+const fn pointer_size(encoding: u8, pointer_width: usize) -> Option<usize> {
+   match encoding & 0x0F {
+      0x00 => Some(pointer_width),
+      0x02 | 0x0A => Some(2),
+      0x03 | 0x0B => Some(4),
+      0x04 | 0x0C => Some(8),
+      _ => None,
+   }
+}
+
+/// Index of the last of `count` ascending function starts at or below `addr`.
 fn last_at_or_below(
    count: usize,
    start: impl Fn(usize) -> Option<usize>,
@@ -1122,5 +1236,48 @@ fn last_at_or_below(
          high = mid;
       }
    }
-   start(low.checked_sub(1)?)
+   low.checked_sub(1)
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[test]
+   fn function_bounds_read_the_fde_range() {
+      let mut bytes = vec![0u8; 0x100];
+      let mut put = |at: usize, data: &[u8]| bytes[at..at + data.len()].copy_from_slice(data);
+      // `.eh_frame_hdr` at 0x1000 with one entry: the function at 0x2000 and
+      // its FDE at 0x1040, both relative to the header.
+      put(0x00, &[1, 0x1B, 0x03, 0x3B, 0, 0, 0, 0, 1, 0, 0, 0]);
+      put(0x0C, &0x1000_i32.to_le_bytes());
+      put(0x10, &0x40_i32.to_le_bytes());
+      // CIE at 0x1020: version 1, "zR", code 1, data -8, return register 16,
+      // pointers `pcrel | sdata4`.
+      put(0x20, &[
+         0x10, 0, 0, 0, 0, 0, 0, 0, 1, b'z', b'R', 0, 1, 0x78, 0x10, 1, 0x1B,
+      ]);
+      // FDE at 0x1040: its CIE 0x24 bytes back, `pc_begin` relative to itself
+      // and a `pc_range` of 0x80.
+      put(0x40, &[0x14, 0, 0, 0, 0x24, 0, 0, 0]);
+      put(0x48, &(0x2000_i32 - 0x1048).to_le_bytes());
+      put(0x4C, &0x80_u32.to_le_bytes());
+      let image = Image {
+         path:          String::new(),
+         build_id:      None,
+         segments:      vec![Segment {
+            addr:       0x1000,
+            bytes:      Cow::Owned(bytes),
+            executable: false,
+            writable:   false,
+         }],
+         eh_frame_hdr:  Some(0x1000),
+         arm_exidx:     None,
+         pdata:         None,
+         pointer_width: 8,
+      };
+      assert_eq!(image.function_bounds(0x2010), Some((0x2000, 0x2080)));
+      assert_eq!(image.function_bounds(0x2080), None);
+      assert_eq!(image.function_containing(0x2080), Some(0x2000));
+   }
 }

@@ -5,14 +5,25 @@
 //! desktop-side UI interactions: clipboard, opening URLs / standalone settings
 //! window, system tray + global hotkey (`Ctrl+Shift+U`) + native notifications,
 //! and the self-contained Desktop Settings dashboard served over localhost.
+//!
+//! Each OS implements [`DesktopHost`]; everything above it is shared here.
 
+#[cfg(target_os = "linux")] mod linux;
 #[cfg(windows)] mod webview;
 #[cfg(windows)] mod windows;
 
 use std::{
    path::PathBuf,
-   sync::Arc,
+   process::Command,
+   sync::{
+      Arc,
+      OnceLock,
+   },
+   thread,
 };
+
+#[cfg(target_os = "linux")] use linux::Host as Os;
+#[cfg(windows)] use windows::Host as Os;
 
 /// Self-contained HTML/JS/CSS companion dashboard for Desktop settings,
 /// plugin management, catalog installs, OTA updates, and JS console.
@@ -34,70 +45,209 @@ pub struct TrayConfig {
    pub on_check_updates: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
+/// What the tray menu offers, the same on every OS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+   not(any(windows, target_os = "linux")),
+   allow(dead_code, reason = "no tray backend on this target")
+)]
+enum TrayAction {
+   OpenSettings,
+   OpenDevtools,
+   ReloadAll,
+   CheckUpdates,
+   CopyUrl,
+   OpenPlugins,
+}
+
+impl TrayAction {
+   /// The menu in order, `None` for a separator.
+   #[cfg_attr(
+      not(any(target_os = "linux", test)),
+      expect(
+         dead_code,
+         reason = "the Windows menu has its own labels with hotkey hints"
+      )
+   )]
+   const MENU: [Option<Self>; 8] = [
+      Some(Self::OpenSettings),
+      Some(Self::OpenDevtools),
+      None,
+      Some(Self::ReloadAll),
+      Some(Self::CheckUpdates),
+      None,
+      Some(Self::CopyUrl),
+      Some(Self::OpenPlugins),
+   ];
+
+   #[cfg_attr(
+      not(any(target_os = "linux", test)),
+      expect(
+         dead_code,
+         reason = "the Windows menu has its own labels with hotkey hints"
+      )
+   )]
+   const fn label(self) -> &'static str {
+      match self {
+         Self::OpenSettings => "Open Sunbird Settings",
+         Self::OpenDevtools => "Open DevTools (Console)",
+         Self::ReloadAll => "Reload All Plugins",
+         Self::CheckUpdates => "Check for Updates",
+         Self::CopyUrl => "Copy Dashboard URL",
+         Self::OpenPlugins => "Open Plugins Folder",
+      }
+   }
+
+   #[cfg_attr(
+      not(any(windows, target_os = "linux")),
+      allow(dead_code, reason = "no tray backend on this target")
+   )]
+   fn run(self) {
+      let Some(config) = config() else {
+         return;
+      };
+      match self {
+         Self::OpenSettings => open_settings(),
+         Self::OpenDevtools => open_devtools(),
+         Self::ReloadAll => {
+            if let Some(reload) = &config.on_reload_all {
+               reload();
+            }
+         },
+         Self::CheckUpdates => {
+            if let Some(check) = &config.on_check_updates {
+               check();
+            }
+         },
+         Self::CopyUrl => {
+            if copy(&config.dashboard_url).is_ok() {
+               Os::notify("Sunbird", &format!("Copied {}", config.dashboard_url));
+            }
+         },
+         Self::OpenPlugins => {
+            let _ = std::fs::create_dir_all(&config.plugins_dir);
+            if let Err(err) = Os::open(&config.plugins_dir.to_string_lossy()) {
+               log::warn!("tray: could not open the plugins folder: {err}");
+            }
+         },
+      }
+   }
+}
+
+/// The OS primitives a desktop backend provides. The defaults are what a
+/// target without a backend gets.
+trait DesktopHost {
+   fn copy(_text: &str) -> Result<(), Error> {
+      Err(Error::Unsupported)
+   }
+
+   /// Opens a URL or local path with the system handler. Callers have
+   /// already checked the URL scheme.
+   fn open(_target: &str) -> Result<(), Error> {
+      Err(Error::Unsupported)
+   }
+
+   /// A Chromium-family browser that takes `--app=<url>`, if one is installed.
+   fn app_browser() -> Option<Command> {
+      None
+   }
+
+   /// Asks for a `.js` file with the native picker.
+   fn pick_js_path() -> Option<PathBuf> {
+      None
+   }
+
+   fn notify(_title: &str, _body: &str) {}
+
+   /// Starts the tray and hotkeys after [`config`] is set.
+   fn start_tray() {}
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+struct Os;
+
+#[cfg(not(any(windows, target_os = "linux")))]
+impl DesktopHost for Os {}
+
+static CONFIG: OnceLock<TrayConfig> = OnceLock::new();
+
+fn config() -> Option<&'static TrayConfig> {
+   CONFIG.get()
+}
+
 /// Starts the desktop system tray icon and `Ctrl+Shift+U` global hotkey
 /// pointing at `config.dashboard_url`.
-#[cfg_attr(
-   not(windows),
-   allow(clippy::needless_pass_by_value, reason = "the body is Windows-only")
-)]
 pub fn start_tray(config: TrayConfig) {
-   #[cfg(windows)]
-   windows::start_tray(config);
-   #[cfg(not(windows))]
-   let _ = config;
+   let _ = CONFIG.set(config);
+   Os::start_tray();
 }
 
 /// Opens the Sunbird Settings dashboard in a standalone chromeless app window
-/// (Microsoft Edge `--app` mode when available, else the system browser).
-#[cfg_attr(
-   not(windows),
-   allow(clippy::missing_const_for_fn, reason = "the body is Windows-only")
-)]
+/// (a Chromium `--app` window when available, else the system browser).
 pub fn open_settings() {
-   #[cfg(windows)]
-   windows::open_dashboard();
+   if let Some(config) = config() {
+      open_app_window(&config.dashboard_url, 1020, 740);
+   }
 }
 
 /// Opens the Sunbird `DevTools` / Runtime Console directly in a standalone
 /// window (`Ctrl+Shift+I` while Discord Phoenix is focused).
-#[cfg_attr(
-   not(windows),
-   allow(clippy::missing_const_for_fn, reason = "the body is Windows-only")
-)]
 pub fn open_devtools() {
-   #[cfg(windows)]
-   windows::open_devtools();
+   if let Some(config) = config() {
+      open_app_window(&format!("{}#console", config.dashboard_url), 960, 680);
+   }
+}
+
+fn open_app_window(url: &str, width: u32, height: u32) {
+   let Some(config) = config() else {
+      return;
+   };
+   if let Some(mut browser) = Os::app_browser() {
+      let profile_dir = config
+         .plugins_dir
+         .parent()
+         .unwrap_or(&config.plugins_dir)
+         .join("app-ui");
+      browser
+         .arg(format!("--app={url}"))
+         .arg(format!("--window-size={width},{height}"))
+         .arg(format!("--user-data-dir={}", profile_dir.display()));
+      if spawn_reaped(&mut browser).is_ok() {
+         return;
+      }
+   }
+   if let Err(err) = open_url(url) {
+      log::warn!("desktop ui: could not open {url}: {err}");
+   }
+}
+
+/// Spawns `command` and waits for it on a background thread, so it never
+/// lingers as a zombie on Unix.
+fn spawn_reaped(command: &mut Command) -> Result<(), Error> {
+   let mut child = command.spawn().map_err(|err| {
+      Error::Platform {
+         message: format!("{}: {err}", command.get_program().display()),
+      }
+   })?;
+   let _ = thread::Builder::new()
+      .name("sunbird-reap".to_owned())
+      .spawn(move || child.wait());
+   Ok(())
 }
 
 /// Copies `text` to the system clipboard.
-#[cfg_attr(
-   not(windows),
-   allow(clippy::missing_const_for_fn, reason = "the body is Windows-only")
-)]
 pub fn copy(text: &str) -> Result<(), Error> {
-   #[cfg(windows)]
-   {
-      windows::copy(text)
-   }
-   #[cfg(not(windows))]
-   {
-      let _ = text;
-      Err(Error::Unsupported)
-   }
+   Os::copy(text)
 }
 
 /// Opens the native OS file picker for choosing a `.js` plugin bundle to
 /// install (`(file_name, bytes)`).
 #[must_use]
 pub fn pick_js_file() -> Option<(String, Vec<u8>)> {
-   #[cfg(windows)]
-   {
-      windows::pick_js_file()
-   }
-   #[cfg(not(windows))]
-   {
-      None
-   }
+   let path = Os::pick_js_path()?;
+   let name = path.file_name()?.to_string_lossy().into_owned();
+   let bytes = std::fs::read(&path).ok()?;
+   Some((name, bytes))
 }
 
 /// Opens `url` in the system's default browser / handler.
@@ -108,22 +258,13 @@ pub fn open_url(url: &str) -> Result<(), Error> {
          message: format!("refusing to open non-web URL: {url}"),
       });
    }
-   #[cfg(windows)]
-   {
-      windows::open_url(url)
-   }
-   #[cfg(not(windows))]
-   {
-      let _ = url;
-      Err(Error::Unsupported)
-   }
+   Os::open(url)
 }
 
 /// Shows a short desktop toast / notification message.
 pub fn toast(message: &str) {
    log::info!("[toast] {message}");
-   #[cfg(windows)]
-   windows::balloon("Sunbird", message);
+   Os::notify("Sunbird", message);
 }
 
 /// Shows a titled desktop notification.
@@ -131,13 +272,11 @@ pub fn notify(title: &str, body: Option<&str>) {
    match body {
       Some(body) if !body.is_empty() => {
          log::info!("[notify] {title}: {body}");
-         #[cfg(windows)]
-         windows::balloon(title, body);
+         Os::notify(title, body);
       },
       _ => {
          log::info!("[notify] {title}");
-         #[cfg(windows)]
-         windows::balloon("Sunbird", title);
+         Os::notify("Sunbird", title);
       },
    }
 }
@@ -150,6 +289,16 @@ mod tests {
    fn rejects_unsafe_url_schemes() {
       assert!(open_url("file:///C:/Windows/notepad.exe").is_err());
       assert!(open_url("javascript:alert(1)").is_err());
+   }
+
+   #[test]
+   fn tray_menu_lists_every_action_once() {
+      let actions = TrayAction::MENU.iter().flatten().collect::<Vec<_>>();
+      assert_eq!(actions.len(), 6);
+      for (at, action) in actions.iter().enumerate() {
+         assert!(!actions[at + 1..].contains(action));
+         assert_ne!(action.label(), "");
+      }
    }
 
    #[test]

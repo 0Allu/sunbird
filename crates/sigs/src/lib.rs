@@ -1,15 +1,16 @@
 //! Where Phoenix's gateway handlers live and how they are called.
 //!
-//! The event set is never compiled in. [`GatewayRegistry`](registry::GatewayRegistry)
-//! walks the target's registry at load time by event name, so a new Discord
-//! build brings its own events and needs no table entry.
-//! `cargo run -p sigscan -- liblibdiscord_wasm_host.so` dumps what it finds.
+//! The event set is never compiled in.
+//! [`GatewayRegistry`](registry::GatewayRegistry) walks the target's registry
+//! at load time by event name, so a new Discord build brings its own events and
+//! needs no table entry. `cargo run -p sigscan -- liblibdiscord_wasm_host.so`
+//! dumps what it finds.
 
 use std::ffi::c_void;
 
-pub mod desktop;
+#[cfg(target_arch = "x86_64")] pub mod desktop;
 #[cfg(feature = "file")] pub mod file;
-pub mod http;
+#[cfg(target_arch = "x86_64")] pub mod http;
 pub mod ios;
 pub mod mobile;
 pub mod registry;
@@ -34,8 +35,14 @@ pub struct StaffField {
 }
 
 /// Libraries that carry the gateway registry, Phoenix's and the stand-in's.
-#[cfg(not(any(target_os = "windows", target_os = "ios")))]
+#[cfg(not(any(
+   target_os = "windows",
+   target_os = "ios",
+   all(target_os = "linux", target_arch = "x86_64")
+)))]
 pub const LIBRARIES: &[&str] = &["liblibdiscord_wasm_host.so", "libstand_in.so"];
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const LIBRARIES: &[&str] = &["discord-phoenix", "libstand_in.so"];
 #[cfg(target_os = "ios")]
 pub const LIBRARIES: &[&str] = &["PhoenixFatClient"];
 #[cfg(target_os = "windows")]
@@ -75,20 +82,34 @@ pub struct GatewayEvent {
 }
 
 /// The Rust `Result` a handler returns through a hidden pointer:
-/// - 96 bytes (12 words) on Windows Desktop (`Discord.exe`), with `Ok` niche
-///   `u64::MAX - 1` (`0xffff_ffff_ffff_fffe`)
-/// - 32 bytes (4 words) on 64-bit Unix / Android, with `Ok` niche `u64::MAX`
+/// - 96 bytes (12 words) on Desktop Phoenix (`Discord.exe`, Linux
+///   `discord-phoenix`), with `Ok` niche `u64::MAX - 1`
+///   (`0xffff_ffff_ffff_fffe`)
+/// - 32 bytes (4 words) on mobile 64-bit, with `Ok` niche `u64::MAX`
 /// - 16 bytes (2 words) on armeabi-v7a, with `Ok` niche `u64::MAX`
-#[cfg(target_os = "windows")]
+#[cfg(any(
+   target_os = "windows",
+   all(target_os = "linux", target_arch = "x86_64")
+))]
 pub const RESULT_WORDS: usize = 12;
-#[cfg(all(not(target_os = "windows"), not(target_arch = "arm")))]
+#[cfg(not(any(
+   target_os = "windows",
+   all(target_os = "linux", target_arch = "x86_64"),
+   target_arch = "arm"
+)))]
 pub const RESULT_WORDS: usize = 4;
 #[cfg(target_arch = "arm")]
 pub const RESULT_WORDS: usize = 2;
 
-#[cfg(target_os = "windows")]
+#[cfg(any(
+   target_os = "windows",
+   all(target_os = "linux", target_arch = "x86_64")
+))]
 const OK_TAG: u64 = u64::MAX - 1;
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(
+   target_os = "windows",
+   all(target_os = "linux", target_arch = "x86_64")
+)))]
 const OK_TAG: u64 = u64::MAX;
 
 #[repr(C)]
@@ -122,12 +143,19 @@ mod tests {
       let mut err = HandlerResult::OK;
       err.0[0] = 0;
       assert!(!err.is_ok());
-      #[cfg(target_os = "windows")]
+      #[cfg(any(
+         target_os = "windows",
+         all(target_os = "linux", target_arch = "x86_64")
+      ))]
       {
          assert_eq!(size_of::<HandlerResult>(), 96);
-         assert_eq!(HandlerResult::OK.0[0], 0xffff_ffff_ffff_fffe);
+         assert_eq!(HandlerResult::OK.0[0], 0xFFFF_FFFF_FFFF_FFFE);
       }
-      #[cfg(all(not(target_os = "windows"), not(target_arch = "arm")))]
+      #[cfg(not(any(
+         target_os = "windows",
+         all(target_os = "linux", target_arch = "x86_64"),
+         target_arch = "arm"
+      )))]
       {
          assert_eq!(size_of::<HandlerResult>(), 32);
          assert_eq!(HandlerResult::OK.0[0], u64::MAX);

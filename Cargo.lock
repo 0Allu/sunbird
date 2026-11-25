@@ -692,6 +692,7 @@ name = "phoenix-runtime-desktop"
 version = "0.1.0"
 dependencies = [
  "flub",
+ "libc",
  "log",
  "phoenix-hook",
  "phoenix-runtime",

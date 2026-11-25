@@ -17,8 +17,6 @@ use std::{
    time::Duration,
 };
 
-use crate::windows;
-
 const WM_NCDESTROY: u32 = 0x0082;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_SYSKEYDOWN: u32 = 0x0104;
@@ -43,10 +41,7 @@ struct Rect {
 
 #[link(name = "user32")]
 unsafe extern "system" {
-   fn EnumWindows(
-      cb: unsafe extern "system" fn(*mut c_void, isize) -> i32,
-      lparam: isize,
-   ) -> i32;
+   fn EnumWindows(cb: unsafe extern "system" fn(*mut c_void, isize) -> i32, lparam: isize) -> i32;
    fn GetWindowThreadProcessId(hwnd: *mut c_void, pid: *mut u32) -> u32;
    fn IsWindow(hwnd: *mut c_void) -> i32;
    fn IsWindowVisible(hwnd: *mut c_void) -> i32;
@@ -94,7 +89,7 @@ unsafe extern "system" fn discord_subclass_proc(
                let shift = GetKeyState(VK_SHIFT) < 0;
                let alt = GetKeyState(VK_MENU) < 0;
                if ctrl && shift && !alt {
-                  windows::open_devtools();
+                  crate::open_devtools();
                   return 0;
                }
             }

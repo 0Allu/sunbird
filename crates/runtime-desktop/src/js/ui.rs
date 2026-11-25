@@ -349,7 +349,9 @@ fn build_message_context<'js>(
       arg.set("channelId", Value::new_null(ctx.clone()))?;
    }
    let (msg_json, me_id) = if include_message {
-      cached_message_and_me(channel_id, message_id)
+      let memory = context_menu::menu_message(message_id);
+      let (cached, me) = cached_message_and_me(channel_id, message_id);
+      (memory.or(cached), me)
    } else {
       (None, None)
    };

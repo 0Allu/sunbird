@@ -1,10 +1,12 @@
 //! `libphoenix.so` / `phoenix.dll`, injected through `DT_NEEDED` on Android,
-//! as a dylib on iOS, or loaded into Desktop Phoenix on Windows.
+//! as a dylib on iOS, or loaded into Desktop Phoenix on Windows and, through
+//! `LD_PRELOAD`, on Linux.
 //!
 //! On Unix the constructor runs once the host library is mapped and relocated.
-//! On Windows `DllMain` spawns a thread so startup never runs under the OS
-//! loader lock. Plugins come from the bundle stored beside this library (when
-//! present) plus `$PHOENIX_HOME/plugins`.
+//! Desktop hooks Discord synchronously, from `DllMain` or the constructor, then
+//! starts on a thread so startup never runs under the OS loader lock. Plugins
+//! come from the bundle stored beside this library (when present) plus
+//! `$PHOENIX_HOME/plugins`.
 
 use std::{
    env,
@@ -51,25 +53,43 @@ pub unsafe extern "system" fn DllMain(
    if reason == DLL_PROCESS_ATTACH {
       // SAFETY: `module` is the HINSTANCE handed to DllMain.
       unsafe { DisableThreadLibraryCalls(module) };
-      logging();
-      let started = std::time::Instant::now();
-      if let Err(err) = phoenix_runtime_desktop::prepare() {
-         log::error!("phoenix could not hook Discord: {err}");
-      }
-      log::info!("hooked Discord in {:?}", started.elapsed());
-      let _ = std::thread::Builder::new()
-         .name("sunbird-init".to_owned())
-         .spawn(|| init());
+      desktop();
    }
    1
 }
 
+#[cfg(unix)]
 extern "C" fn init() {
-   logging();
+   #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+   if linux::claim() {
+      desktop();
+   }
    #[cfg(target_os = "ios")]
-   ios::start_with_phoenix();
-   #[cfg(not(target_os = "ios"))]
-   run();
+   {
+      logging();
+      ios::start_with_phoenix();
+   }
+   #[cfg(not(any(target_os = "ios", all(target_os = "linux", target_arch = "x86_64"))))]
+   {
+      logging();
+      run();
+   }
+}
+
+/// Hooks Discord before its own code runs, since Desktop Phoenix settles on
+/// the access gate and reads its HTTP vtables in its first frames, then starts
+/// phoenix on a thread.
+#[cfg(any(windows, all(target_os = "linux", target_arch = "x86_64")))]
+fn desktop() {
+   logging();
+   let started = std::time::Instant::now();
+   if let Err(err) = phoenix_runtime_desktop::prepare() {
+      log::error!("phoenix could not hook Discord: {err}");
+   }
+   log::info!("hooked Discord in {:?}", started.elapsed());
+   let _ = std::thread::Builder::new()
+      .name("sunbird-init".to_owned())
+      .spawn(run);
 }
 
 fn run() {
@@ -96,12 +116,17 @@ fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    phoenix_runtime_mobile::start(home, bundled)
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, all(target_os = "linux", target_arch = "x86_64")))]
 fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    phoenix_runtime_desktop::start(home, bundled)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios", windows)))]
+#[cfg(not(any(
+   target_os = "android",
+   target_os = "ios",
+   windows,
+   all(target_os = "linux", target_arch = "x86_64")
+)))]
 fn start(_home: PathBuf, _bundled: Vec<Plugin>) -> Result<Started, Error> {
    Err(Error::NoTarget)
 }
@@ -117,7 +142,25 @@ fn home() -> PathBuf {
          .map_or_else(env::temp_dir, PathBuf::from)
          .join("Library/Application Support/phoenix")
    }
-   #[cfg(all(unix, not(target_os = "ios")))]
+   #[cfg(target_os = "linux")]
+   {
+      // Sits directly under Linux Phoenix's data directory, which holds
+      // `app.lock`, `modules/` and `store/<account>/cache.sqlite`, so its
+      // parent is the `store` root.
+      let data = env::var_os("LIBDISCORD_DATA_DIR").map_or_else(
+         || {
+            env::var_os("XDG_DATA_HOME")
+               .filter(|dir| !dir.is_empty())
+               .map(PathBuf::from)
+               .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+               .unwrap_or_else(env::temp_dir)
+               .join("discord-phoenix")
+         },
+         PathBuf::from,
+      );
+      data.join("sunbird")
+   }
+   #[cfg(all(unix, not(any(target_os = "ios", target_os = "linux"))))]
    {
       // /proc/self/cmdline starts with the package name, plus `:process` for
       // secondary processes.
@@ -190,11 +233,8 @@ mod unix {
       result::ZipError,
    };
 
-   /// Reads [`PLUGIN_BUNDLE`] from beside this library. Android maps native
-   /// libraries straight out of the APK, so `dladdr` names
-   /// `<apk>!/lib/<abi>/...` and the bundle is a stored entry in the same
-   /// split.
-   pub fn read_bundle() -> misstep::Result<Vec<Plugin>> {
+   /// This library's path as the dynamic loader opened it.
+   pub fn library_path() -> Option<&'static CStr> {
       let mut info = libc::Dl_info {
          dli_fname: std::ptr::null(),
          dli_fbase: std::ptr::null_mut(),
@@ -205,10 +245,21 @@ mod unix {
       if unsafe { libc::dladdr(super::init as *const c_void, &raw mut info) } == 0
          || info.dli_fname.is_null()
       {
-         return Ok(Vec::new());
+         return None;
       }
       // SAFETY: dli_fname is NUL-terminated and lives as long as the module.
-      let path = unsafe { CStr::from_ptr(info.dli_fname) }.to_str()?;
+      Some(unsafe { CStr::from_ptr(info.dli_fname) })
+   }
+
+   /// Reads [`PLUGIN_BUNDLE`] from beside this library. Android maps native
+   /// libraries straight out of the APK, so `dladdr` names
+   /// `<apk>!/lib/<abi>/...` and the bundle is a stored entry in the same
+   /// split.
+   pub fn read_bundle() -> misstep::Result<Vec<Plugin>> {
+      let Some(path) = library_path() else {
+         return Ok(Vec::new());
+      };
+      let path = path.to_str()?;
 
       let bytes = if let Some((apk, inner)) = path.split_once("!/") {
          let dir = inner.rsplit_once('/').map_or("", |(dir, _)| dir);
@@ -234,6 +285,55 @@ mod unix {
          .into_iter()
          .map(|(name, source)| Plugin { name, source })
          .collect())
+   }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod linux {
+   use std::{
+      env,
+      ffi::OsStr,
+      os::unix::ffi::OsStrExt,
+      path::Path,
+   };
+
+   /// The Linux client's executable. `AppRun` is a shell script, so the
+   /// preload reaches it and every process it starts.
+   const CLIENT: &str = "discord-phoenix";
+
+   /// Whether this process is the client. If so, takes this library out of
+   /// `LD_PRELOAD` so the client's children (`discord_media`, the CEF helper,
+   /// `xdg-open`) never load it.
+   pub fn claim() -> bool {
+      let client = std::fs::read_link("/proc/self/exe")
+         .is_ok_and(|exe| exe.file_name() == Some(OsStr::new(CLIENT)));
+      if client && let Some(path) = super::unix::library_path() {
+         unpreload(Path::new(OsStr::from_bytes(path.to_bytes())));
+      }
+      client
+   }
+
+   fn unpreload(ours: &Path) {
+      let Some(preload) = env::var_os("LD_PRELOAD") else {
+         return;
+      };
+      let kept = preload
+         .as_bytes()
+         .split(|byte| matches!(byte, b':' | b' '))
+         .filter(|entry| {
+            !entry.is_empty() && Path::new(OsStr::from_bytes(entry)).file_name() != ours.file_name()
+         })
+         .collect::<Vec<_>>()
+         .join(&b':');
+      // SAFETY: constructors run before `main`, while the loader is the only
+      // thread.
+      unsafe {
+         if kept.is_empty() {
+            env::remove_var("LD_PRELOAD");
+         } else {
+            env::set_var("LD_PRELOAD", OsStr::from_bytes(&kept));
+         }
+      }
    }
 }
 

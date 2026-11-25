@@ -1,7 +1,7 @@
 //! phoenix on Desktop Phoenix: the access gate, the HTTP transport hooks, the
 //! Sunbird pages in User Settings, message accessories and the tray.
 
-#![cfg(windows)]
+#![cfg(any(windows, all(target_os = "linux", target_arch = "x86_64")))]
 
 mod accessories;
 mod badges;
@@ -10,7 +10,9 @@ mod discord;
 mod fetch;
 mod gpui;
 mod js;
+mod message;
 mod modal;
+mod os;
 mod settings;
 mod staff;
 
@@ -91,7 +93,8 @@ struct DialogAnswer {
 /// The target and its swapped gateway registry, once [`prepare`] hooked them.
 static PREPARED: Mutex<Option<(Image<'static>, &'static GatewayRegistry)>> = Mutex::new(None);
 
-/// Hooks `Discord.exe` from `DllMain`, before its own code runs.
+/// Hooks Discord from `DllMain` on Windows or the `.init_array` constructor on
+/// Linux, before its own code runs.
 ///
 /// Desktop Phoenix settles on the access gate in its first frames and stops
 /// reading the gateway registry and HTTP vtables once started, so hooks swapped
@@ -106,7 +109,9 @@ pub fn prepare() -> Result<(), Error> {
    modal::install(&image);
    accessories::install(&image);
    context_menu::install(&image);
+   message::install(&image);
    badges::install(&image);
+   <os::Os as os::DesktopOs>::install(&image);
    let registry = phoenix_runtime::hook(&image)?;
    discord::install(&image);
    accessories::install_optimistic_delete(&image);
@@ -131,12 +136,12 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
 }
 
 /// Desktop Phoenix shows "This app isn't available for your account" from
-/// `libdiscord_ops_surfaces::client_access::ClientAccessGate`. One function
-/// reads it (1 blocked, 2 no gate, also what a missing value reads as), and the
-/// gate is only considered while it is not 2: its one small caller is
-/// `signed_in && access(..) != 2`. This makes it return 2. Discord settles on
-/// the gate within its first frames, so the loader calls this from `DllMain`,
-/// before Discord's own code.
+/// `libdiscord_ops_surfaces::client_access::ClientAccessGate`, and blocks the
+/// login on it. One function reads it (1 blocked, 2 no gate, also what a
+/// missing value reads as), and the gate is only considered while it is not 2:
+/// its small caller is `signed_in && access(..) != 2`. This makes it return 2.
+/// Discord settles on the gate within its first frames, so the loader calls
+/// this from `DllMain` or the constructor, before Discord's own code.
 fn open_access_gate(image: &Image<'static>) {
    /// `mov al, 2; ret`
    const ALLOWED: [u8; 3] = [0xB0, 0x02, 0xC3];
@@ -148,8 +153,8 @@ fn open_access_gate(image: &Image<'static>) {
          return;
       },
    };
-   // SAFETY: code in Discord.exe, written from `DllMain` before Discord's own
-   // code runs.
+   // SAFETY: Discord's own code, written from `DllMain` or the constructor
+   // before it runs.
    match unsafe { image.write_code(access, &ALLOWED) } {
       Ok(()) => log::info!("access gate: open"),
       Err(err) => log::error!("access gate: {err}"),

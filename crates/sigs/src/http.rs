@@ -2,12 +2,20 @@
 //! `ReqwestTransport` and `SendFuture` vtable slots.
 //!
 //! Desktop Phoenix routes all Discord REST traffic through a single-method
-//! `dyn Transport` trait (`ReqwestTransport::send(&self, req) -> Pin<Box<dyn Future>>`).
-//! Swapping the `send` and `poll` vtable slots in `.rdata` intercepts every
-//! outgoing request and incoming response without any inline code patching.
+//! `dyn Transport` trait (`ReqwestTransport::send(&self, req) -> Pin<Box<dyn
+//! Future>>`). Swapping the `send` and `poll` vtable slots in `.rdata`
+//! intercepts every outgoing request and incoming response without any inline
+//! code patching.
 
 use memchr::memchr_iter;
-use phoenix_hook::image::Image;
+use phoenix_hook::{
+   image::Image,
+   x86::{
+      Abi,
+      call_target,
+      jump_target,
+   },
+};
 
 /// Unique error string inside `ReqwestTransport::send` when handed a mobile
 /// host-file body.
@@ -33,13 +41,15 @@ pub struct DesktopHttpTransport {
 }
 
 impl DesktopHttpTransport {
-   /// Scans a 64-bit PE `Image` for `ReqwestTransport::send`, its returned
-   /// `SendFuture::poll` vtable, and the host's Rust allocator functions.
+   /// Scans a 64-bit PE or ELF `Image` for `ReqwestTransport::send`, its
+   /// returned `SendFuture::poll` vtable, and the host's Rust allocator
+   /// functions.
    #[must_use]
    pub fn locate(image: &Image<'_>) -> Option<Self> {
-      if image.pointer_width != 8 || image.pdata.is_none() {
+      if image.pointer_width != 8 {
          return None;
       }
+      let abi = Abi::of(image);
 
       // 1. Locate the unique anchor string inside `ReqwestTransport::send`.
       let anchor = *image.find_bytes(HOST_FILE_ANCHOR).first()?;
@@ -52,8 +62,8 @@ impl DesktopHttpTransport {
          return None;
       }
 
-      // 3. Inside `send_fn`, find the small `box_future` helper that boxes the
-      //    async state machine and returns `(ptr, poll_vtable)`.
+      // 3. The `Box::pin` of the async state machine returns `(ptr, poll_vtable)`,
+      //    from `send_fn` itself or a small helper it calls.
       let (poll_fn, poll_vtable, box_future) = find_poll_vtable(image, send_fn, send_end)?;
       let mut poll_slots = find_vtable_method_slots(image, poll_fn, 0x100..=0x4000);
       let direct_slot = poll_vtable + 24;
@@ -61,10 +71,11 @@ impl DesktopHttpTransport {
          poll_slots.push(direct_slot);
       }
 
-      // 4. Locate `Discord.exe`'s own `__rust_alloc` and `__rust_dealloc` so
-      //    response body growth stays 100% allocator-compatible.
-      let host_alloc = find_host_alloc(image, box_future);
-      let host_dealloc = find_host_dealloc(image, send_fn, send_end);
+      // 4. Locate the host's own `__rust_alloc` and `__rust_dealloc` so response body
+      //    growth stays 100% allocator-compatible.
+      let host_alloc = box_future.and_then(|box_future| find_host_alloc(image, abi, box_future));
+      let host_dealloc = find_host_dealloc(image, abi, send_fn, send_end)
+         .or_else(|| host_alloc.and_then(|alloc| dealloc_beside(image, alloc)));
 
       Some(Self {
          send_slots,
@@ -77,8 +88,8 @@ impl DesktopHttpTransport {
    }
 }
 
-/// Finds the first x86_64 RIP-relative `LEA r64, [rip + disp32]` in executable
-/// segments whose effective address equals `target`.
+/// Finds the first `x86_64` RIP-relative `LEA r64, [rip + disp32]` in
+/// executable segments whose effective address equals `target`.
 fn find_rip_lea_target(image: &Image<'_>, target: usize) -> Option<usize> {
    for seg in &image.segments {
       if !seg.executable || seg.bytes.len() < 7 {
@@ -139,42 +150,39 @@ fn find_vtable_method_slots(
    slots
 }
 
-/// Iterates every direct `call rel32` (`E8`) target inside `[start, end)` that
-/// lands on a `.pdata` function start.
-fn direct_calls(image: &Image<'_>, start: usize, end: usize) -> Vec<usize> {
+/// The targets of every call inside `[start, end)` that land on a function
+/// start.
+fn calls(image: &Image<'_>, start: usize, end: usize) -> Vec<usize> {
    let Some(code) = image.read(start, end.saturating_sub(start)) else {
       return Vec::new();
    };
-   let mut targets = Vec::new();
-   for pos in memchr_iter(0xE8, code) {
-      let Some(raw) = code.get(pos + 1..pos + 5) else {
-         continue;
-      };
-      let disp = i32::from_le_bytes(raw.try_into().unwrap_or([0; 4]));
-      let next_rip = start + pos + 5;
-      if let Some(callee) = next_rip.checked_add_signed(disp as isize)
-         && image.is_function(callee)
-      {
-         targets.push(callee);
-      }
-   }
-   targets
+   (0..code.len())
+      .filter_map(|pos| call_target(image, &code[pos..], start + pos))
+      .map(|(_, callee)| callee)
+      .filter(|&callee| image.is_function(callee))
+      .collect()
 }
 
-/// Scans small callees of `send_fn` for the `Box::pin` helper that loads the
-/// `SendFuture` vtable via `lea rdx, [rip + disp32]` (`48 8D 15`).
+/// The bounds of `func` when it is at most `max` bytes long.
+fn small(image: &Image<'_>, func: usize, max: usize) -> Option<(usize, usize)> {
+   image
+      .function_bounds(func)
+      .filter(|&(start, end)| end - start <= max)
+}
+
+/// The `SendFuture` vtable loaded with `lea rdx, [rip + disp32]` (`48 8D 15`),
+/// the high half of the returned fat pointer, in `send_fn` or a small callee
+/// that boxes the future. Returns `(poll_fn, vtable, box_future)`, where
+/// `box_future` is the callee that boxes it, when one does.
 fn find_poll_vtable(
    image: &Image<'_>,
    send_fn: usize,
    send_end: usize,
-) -> Option<(usize, usize, usize)> {
-   for callee in direct_calls(image, send_fn, send_end) {
-      let Some((cs, ce)) = image.function_bounds(callee) else {
-         continue;
-      };
-      if ce - cs > 0x80 {
-         continue;
-      }
+) -> Option<(usize, usize, Option<usize>)> {
+   let boxers = calls(image, send_fn, send_end)
+      .into_iter()
+      .filter_map(|callee| small(image, callee, 0x80));
+   for (cs, ce) in boxers.chain([(send_fn, send_end)]) {
       let Some(code) = image.read(cs, ce - cs) else {
          continue;
       };
@@ -199,86 +207,153 @@ fn find_poll_vtable(
             && (0x100..=0x4000).contains(&size)
             && align == 8
          {
-            return Some((poll_fn, vtable, cs));
+            return Some((poll_fn, vtable, (cs != send_fn).then_some(cs)));
          }
       }
    }
    None
 }
 
-/// Follows `box_future`'s alloc wrapper to `Discord.exe`'s `__rust_alloc(size, align)`.
-fn find_host_alloc(image: &Image<'_>, box_future: usize) -> Option<usize> {
+/// `__rust_alloc(size, align)`, reached from `box_future`.
+///
+/// Some call in `box_future` or a small callee passes the future's alignment,
+/// a constant 8, in an argument register. Win64 builds make that the call to
+/// `__rust_alloc`, System V ones a call to `Layout` wrappers that forward to
+/// it, so small callees are followed breadth-first to the first function
+/// shaped like `__rust_alloc`: its first call, whether the allocator is set
+/// up, is followed by `test al, al`.
+fn find_host_alloc(image: &Image<'_>, abi: Abi, box_future: usize) -> Option<usize> {
    let (bs, be) = image.function_bounds(box_future)?;
-   for wrapper in direct_calls(image, bs, be) {
-      let (ws, we) = image.function_bounds(wrapper)?;
-      if we - ws > 0x60 {
-         continue;
-      }
+   let align_8: Vec<Vec<u8>> = (0..2)
+      .flat_map(|index| crate::desktop::imm_loads(abi.arg(index), 8))
+      .collect();
+   let mut frontier = Vec::new();
+   for (ws, we) in std::iter::once((bs, be)).chain(
+      calls(image, bs, be)
+         .into_iter()
+         .filter_map(|f| small(image, f, 0x60)),
+   ) {
       let code = image.read(ws, we - ws)?;
-      // Pattern in alloc wrapper: `mov edx, 8` (`BA 08 00 00 00`), `mov rcx, rsi` (`48 89 F1`),
-      // `call __rust_alloc` (`E8 <rel32>`).
-      for pos in memchr_iter(0xE8, code) {
-         if pos < 5 || pos + 5 > code.len() {
+      for pos in 0..code.len() {
+         let Some((_, callee)) = call_target(image, &code[pos..], ws + pos) else {
             continue;
-         }
+         };
          let before = &code[pos.saturating_sub(12)..pos];
-         if !before.windows(5).any(|w| w == [0xBA, 0x08, 0x00, 0x00, 0x00]) {
-            continue;
-         }
-         let disp = i32::from_le_bytes(code[pos + 1..pos + 5].try_into().ok()?);
-         if let Some(alloc) = (ws + pos + 5).checked_add_signed(disp as isize)
-            && image.is_function(alloc)
+         if align_8
+            .iter()
+            .any(|load| before.windows(load.len()).any(|w| w == load))
+            && image.is_function(callee)
          {
-            return Some(alloc);
+            frontier.push(callee);
          }
       }
+   }
+   for _ in 0..3 {
+      if let Some(&alloc) = frontier.iter().find(|&&func| checks_allocator(image, func)) {
+         return Some(alloc);
+      }
+      frontier = frontier
+         .iter()
+         .filter_map(|&func| small(image, func, 0x60))
+         .flat_map(|(start, end)| calls(image, start, end))
+         .collect();
    }
    None
 }
 
-/// Follows `send_fn` → request builder helper → leaf `Method::drop`
-/// (`mov r8d, 1; jmp __rust_dealloc`). Leaf functions have no `.pdata` entry
-/// on Windows x64, so inner call targets are checked via `is_code`.
-fn find_host_dealloc(image: &Image<'_>, send_fn: usize, send_end: usize) -> Option<usize> {
-   // `mov r8d, 1; jmp rel32` = `41 B8 01 00 00 00 E9 <rel32>`
-   const TAIL_JUMP: &[u8] = &[0x41, 0xB8, 0x01, 0x00, 0x00, 0x00, 0xE9];
+/// Whether the first call in `func` is followed by `test al, al`.
+fn checks_allocator(image: &Image<'_>, func: usize) -> bool {
+   let Some(code) = image.read(func, 0x20) else {
+      return false;
+   };
+   phoenix_hook::x86::disasm(code, func, 12)
+      .iter()
+      .find(|line| line.text.starts_with("call "))
+      .is_some_and(|call| image.read(call.addr + call.len, 2) == Some(&[0x84, 0xC0]))
+}
 
-   for callee in direct_calls(image, send_fn, send_end) {
-      let Some((cs, ce)) = image.function_bounds(callee) else {
+/// Follows `send_fn` → request builder helper → leaf `Method::drop`, a tail
+/// call `__rust_dealloc(ptr, size, 1)` that sets only the alignment
+/// argument. Leaf functions have no `.pdata` entry on Windows x64, so inner
+/// call targets are checked via `is_code`. Other leaves end the same way, so
+/// the target must also count the freed bytes down with `lock sub`.
+fn find_host_dealloc(
+   image: &Image<'_>,
+   abi: Abi,
+   send_fn: usize,
+   send_end: usize,
+) -> Option<usize> {
+   let tails = crate::desktop::imm_loads(abi.arg(2), 1);
+   let dealloc_in = |code: &[u8], ip: usize| {
+      tails.iter().find_map(|tail| {
+         memchr::memmem::find_iter(code, tail).find_map(|hit| {
+            // A size-optimized leaf may load the pointer between the two.
+            let after = hit + tail.len();
+            (after..code.len().min(after + 8)).find_map(|at| {
+               jump_target(image, &code[at..], ip + at)
+                  .filter(|&dealloc| image.is_function(dealloc) && counts_down(image, dealloc))
+            })
+         })
+      })
+   };
+   for callee in calls(image, send_fn, send_end) {
+      let Some((cs, ce)) = small(image, callee, 0x400) else {
          continue;
       };
-      if ce - cs > 0x400 {
-         continue;
-      }
       let Some(callee_code) = image.read(cs, ce - cs) else {
          continue;
       };
-      for pos in memchr_iter(0xE8, callee_code) {
-         let Some(raw) = callee_code.get(pos + 1..pos + 5) else {
+      for pos in 0..callee_code.len() {
+         let Some((_, inner)) = call_target(image, &callee_code[pos..], cs + pos) else {
             continue;
          };
-         let disp = i32::from_le_bytes(raw.try_into().unwrap_or([0; 4]));
-         let Some(inner) = (cs + pos + 5).checked_add_signed(disp as isize) else {
-            continue;
-         };
-         if !image.is_code(inner) {
-            continue;
-         }
-         let Some(code) = image.read(inner, 0x30) else {
-            continue;
-         };
-         if let Some(hit) = memchr::memmem::find(code, TAIL_JUMP)
-            && let Some(jraw) = code.get(hit + TAIL_JUMP.len()..hit + TAIL_JUMP.len() + 4)
+         if let Some(code) = image.read(inner, 0x30).filter(|_| image.is_code(inner))
+            && let Some(dealloc) = dealloc_in(code, inner)
          {
-            let jdisp = i32::from_le_bytes(jraw.try_into().ok()?);
-            if let Some(dealloc) =
-               (inner + hit + TAIL_JUMP.len() + 4).checked_add_signed(jdisp as isize)
-               && image.is_function(dealloc)
-            {
-               return Some(dealloc);
-            }
+            return Some(dealloc);
          }
       }
    }
    None
+}
+
+/// Whether `func` counts freed bytes down with `lock sub` near its start.
+fn counts_down(image: &Image<'_>, func: usize) -> bool {
+   image.read(func, 0x40).is_some_and(|body| {
+      body
+         .windows(3)
+         .any(|w| w == [0xF0, 0x48, 0x29] || w == [0xF0, 0x4C, 0x29])
+   })
+}
+
+/// `__rust_dealloc`, from the allocator shims emitted next to `alloc`.
+///
+/// System V builds free request bodies through wrappers the leaf search in
+/// [`find_host_dealloc`] does not reach. `alloc` hands the global allocator
+/// static to its implementation with `lea rdi, [rip + disp32]`, and so does
+/// `__rust_dealloc`, without `alloc`'s set-up check and counting the freed
+/// bytes down after.
+fn dealloc_beside(image: &Image<'_>, alloc: usize) -> Option<usize> {
+   /// The shims are a few dozen bytes each.
+   const NEAR: usize = 0x400;
+   let (_, global) = lea_rdi(image.read(alloc, 0x40)?, alloc).next()?;
+   let start = alloc.saturating_sub(NEAR);
+   let mut found: Vec<usize> = lea_rdi(image.read(start, 2 * NEAR)?, start)
+      .filter(|&(_, target)| target == global)
+      .filter_map(|(lea, _)| Some(image.function_bounds(lea)?.0))
+      .filter(|&func| func != alloc && !checks_allocator(image, func) && counts_down(image, func))
+      .collect();
+   found.dedup();
+   match found[..] {
+      [dealloc] => Some(dealloc),
+      _ => None,
+   }
+}
+
+/// Each `lea rdi, [rip + disp32]` in `code` at `ip`, as (instruction, target).
+fn lea_rdi(code: &[u8], ip: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
+   memchr::memmem::find_iter(code, &[0x48, 0x8D, 0x3D]).filter_map(move |pos| {
+      let disp = i32::from_le_bytes(code.get(pos + 3..pos + 7)?.try_into().ok()?);
+      Some((ip + pos, (ip + pos + 7).checked_add_signed(disp as isize)?))
+   })
 }

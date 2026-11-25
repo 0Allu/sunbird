@@ -36,10 +36,14 @@ struct RawPinnedFuture {
    vtable: *const c_void,
 }
 
-/// Win64 Rust-ABI signature of `libdiscord_media::fetch`:
+/// Rust-ABI signature of `libdiscord_media::fetch`:
 /// `fn(this, url_ptr, url_len, max_bytes) -> Pin<Box<dyn Future>>` in
-/// `RAX:RDX`.
-type MediaFetchFn = unsafe fn(*const c_void, *const u8, usize, usize) -> RawPinnedFuture;
+/// `RAX:RDX`. The Linux build takes two more words in `R8`/`R9` (8 and 0 at
+/// its one call site) and returns the box in `RAX` alone, so the detour
+/// forwards six words. On Win64 the last two are caller stack slots the
+/// original ignores.
+type MediaFetchFn =
+   unsafe fn(*const c_void, *const u8, usize, usize, usize, usize) -> RawPinnedFuture;
 
 static ORIG_MEDIA_FETCH: OnceLock<MediaFetchFn> = OnceLock::new();
 
@@ -53,14 +57,15 @@ pub fn install(image: &Image<'static>) {
          return;
       },
    };
-   // SAFETY: runs from `DllMain` before Discord threads execute;
-   // `media_fetch_detour` matches `libdiscord_media::fetch`'s exact Win64 Rust
-   // ABI (`this, url.ptr, url.len, max_bytes -> Pin<Box<dyn Future>>`).
+   let pro = desktop::Prologues::of(phoenix_hook::x86::Abi::of(image)).media_fetch;
+   // SAFETY: runs from `prepare` before Discord threads execute;
+   // `media_fetch_detour` matches `libdiscord_media::fetch`'s exact Rust ABI
+   // (`this, url.ptr, url.len, max_bytes -> Pin<Box<dyn Future>>`).
    let trampoline = match unsafe {
       image.hook_entry(
          func,
-         desktop::MEDIA_FETCH_PROLOGUE,
-         desktop::MEDIA_FETCH_PROLOGUE_LEN,
+         pro.pattern,
+         pro.len,
          media_fetch_detour as *const () as usize,
       )
    } {
@@ -102,6 +107,8 @@ unsafe fn media_fetch_detour(
    url_ptr: *const u8,
    url_len: usize,
    max_bytes: usize,
+   extra0: usize,
+   extra1: usize,
 ) -> RawPinnedFuture {
    let orig = ORIG_MEDIA_FETCH
       .get()
@@ -127,10 +134,19 @@ unsafe fn media_fetch_detour(
 
    if let Some(real_url) = rewritten {
       // SAFETY: `real_url` is a `'static` UTF-8 string slice.
-      return unsafe { orig(this, real_url.as_ptr(), real_url.len(), max_bytes) };
+      return unsafe {
+         orig(
+            this,
+            real_url.as_ptr(),
+            real_url.len(),
+            max_bytes,
+            extra0,
+            extra1,
+         )
+      };
    }
    // SAFETY: forward untouched arguments to original `libdiscord_media::fetch`.
-   unsafe { orig(this, url_ptr, url_len, max_bytes) }
+   unsafe { orig(this, url_ptr, url_len, max_bytes, extra0, extra1) }
 }
 
 #[cfg(test)]

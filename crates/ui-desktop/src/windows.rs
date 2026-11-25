@@ -5,7 +5,6 @@ use std::{
    ptr,
    sync::{
       Mutex,
-      OnceLock,
       PoisonError,
       atomic::{
          AtomicBool,
@@ -18,8 +17,9 @@ use std::{
 };
 
 use crate::{
+   DesktopHost,
    Error,
-   TrayConfig,
+   TrayAction,
 };
 
 const CF_UNICODETEXT: u32 = 13;
@@ -73,7 +73,6 @@ static TRAY_STARTED: AtomicBool = AtomicBool::new(false);
 static TRAY_HWND: AtomicUsize = AtomicUsize::new(0);
 static TRAY_ICON: AtomicUsize = AtomicUsize::new(0);
 static TASKBAR_CREATED_MSG: AtomicU32 = AtomicU32::new(0);
-static TRAY_CONFIG: OnceLock<TrayConfig> = OnceLock::new();
 static PENDING_BALLOONS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
 #[repr(C)]
@@ -128,18 +127,19 @@ struct NotifyIconDataW {
 }
 
 #[repr(C)]
+#[expect(clippy::struct_field_names, reason = "Win32's BITMAPINFOHEADER names")]
 struct BitmapInfoHeader {
-   bi_size:           u32,
-   bi_width:          i32,
-   bi_height:         i32,
-   bi_planes:         u16,
-   bi_bit_count:      u16,
-   bi_compression:    u32,
-   bi_size_image:     u32,
-   bi_x_pels:         i32,
-   bi_y_pels:         i32,
-   bi_clr_used:       u32,
-   bi_clr_important:  u32,
+   bi_size:          u32,
+   bi_width:         i32,
+   bi_height:        i32,
+   bi_planes:        u16,
+   bi_bit_count:     u16,
+   bi_compression:   u32,
+   bi_size_image:    u32,
+   bi_x_pels:        i32,
+   bi_y_pels:        i32,
+   bi_clr_used:      u32,
+   bi_clr_important: u32,
 }
 
 #[repr(C)]
@@ -288,7 +288,11 @@ fn wide(text: &str) -> Vec<u16> {
 
 fn fill_wide<const N: usize>(dst: &mut [u16; N], text: &str) {
    dst.fill(0);
-   for (slot, unit) in dst.iter_mut().take(N.saturating_sub(1)).zip(text.encode_utf16()) {
+   for (slot, unit) in dst
+      .iter_mut()
+      .take(N.saturating_sub(1))
+      .zip(text.encode_utf16())
+   {
       *slot = unit;
    }
 }
@@ -302,7 +306,10 @@ fn os_err(context: &str) -> Error {
 /// Builds a crisp 32×32 ARGB Sunbird amber emblem icon for the system tray.
 unsafe fn create_sunbird_icon() -> *mut c_void {
    const SIZE: i32 = 32;
-   #[expect(clippy::cast_possible_truncation, reason = "BITMAPINFOHEADER is 40 bytes")]
+   #[expect(
+      clippy::cast_possible_truncation,
+      reason = "BITMAPINFOHEADER is 40 bytes"
+   )]
    let bmi = BitmapInfoHeader {
       bi_size:          size_of::<BitmapInfoHeader>() as u32,
       bi_width:         SIZE,
@@ -317,7 +324,8 @@ unsafe fn create_sunbird_icon() -> *mut c_void {
       bi_clr_important: 0,
    };
    let mut bits: *mut c_void = ptr::null_mut();
-   // SAFETY: Win32 GDI DIB creation and icon assembly; temporary bitmaps are deleted.
+   // SAFETY: Win32 GDI DIB creation and icon assembly; temporary bitmaps are
+   // deleted.
    unsafe {
       let color = CreateDIBSection(
          ptr::null_mut(),
@@ -346,7 +354,9 @@ unsafe fn create_sunbird_icon() -> *mut c_void {
             } else {
                0x0000_0000 // transparent
             };
-            pixels[(y * SIZE + x) as usize] = pixel;
+            #[expect(clippy::cast_sign_loss, reason = "x and y are in 0..SIZE")]
+            let index = (y * SIZE + x) as usize;
+            pixels[index] = pixel;
          }
       }
       let mask_bytes = [0u8; (SIZE * SIZE / 8) as usize];
@@ -371,90 +381,16 @@ unsafe fn create_sunbird_icon() -> *mut c_void {
    }
 }
 
-fn find_edge_exe() -> Option<PathBuf> {
-   let candidates = [
-      r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-      r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-   ];
-   candidates
-      .into_iter()
-      .map(PathBuf::from)
-      .find(|path| path.is_file())
-}
-
-pub fn dashboard_url() -> Option<&'static str> {
-   TRAY_CONFIG.get().map(|cfg| cfg.dashboard_url.as_str())
-}
-
-fn open_app_window(url: &str, width: u32, height: u32) {
-   let Some(config) = TRAY_CONFIG.get() else {
-      return;
-   };
-   if let Some(edge) = find_edge_exe() {
-      let profile_dir = config
-         .plugins_dir
-         .parent()
-         .unwrap_or(&config.plugins_dir)
-         .join("app-ui");
-      let spawned = Command::new(edge)
-         .arg(format!("--app={url}"))
-         .arg(format!("--window-size={width},{height}"))
-         .arg(format!("--user-data-dir={}", profile_dir.display()))
-         .spawn();
-      if spawned.is_ok() {
-         return;
-      }
-   }
-   if let Err(err) = crate::open_url(url) {
-      log::warn!("tray: could not open dashboard: {err}");
-   }
-}
-
-/// Opens the Sunbird Settings dashboard in a standalone chromeless Edge app
-/// window when Edge is available, falling back to the default system browser.
-pub fn open_dashboard() {
-   let Some(url) = dashboard_url() else {
-      return;
-   };
-   open_app_window(url, 1020, 740);
-}
-
-/// Opens the Sunbird `DevTools` / Runtime Console directly (`Ctrl+Shift+I` while
-/// Discord Phoenix is focused).
-pub fn open_devtools() {
-   let Some(url) = dashboard_url() else {
-      return;
-   };
-   open_app_window(&format!("{url}#console"), 960, 680);
-}
-
-fn open_plugins_folder() {
-   let Some(config) = TRAY_CONFIG.get() else {
-      return;
-   };
-   let _ = std::fs::create_dir_all(&config.plugins_dir);
-   let op = wide("open");
-   let target = wide(&config.plugins_dir.to_string_lossy());
-   // SAFETY: NUL-terminated UTF-16 strings passed to ShellExecuteW.
-   unsafe {
-      ShellExecuteW(
-         ptr::null_mut(),
-         op.as_ptr(),
-         target.as_ptr(),
-         ptr::null(),
-         ptr::null(),
-         SW_SHOWNORMAL,
-      );
-   }
-}
-
 fn tray_uid() -> u32 {
    // SAFETY: GetCurrentProcessId has no preconditions.
    TRAY_UID ^ unsafe { GetCurrentProcessId() }
 }
 
 fn empty_nid(hwnd: *mut c_void) -> NotifyIconDataW {
-   #[expect(clippy::cast_possible_truncation, reason = "NOTIFYICONDATAW is 976 bytes")]
+   #[expect(
+      clippy::cast_possible_truncation,
+      reason = "NOTIFYICONDATAW is 976 bytes"
+   )]
    let cb_size = size_of::<NotifyIconDataW>() as u32;
    NotifyIconDataW {
       cb_size,
@@ -479,13 +415,15 @@ unsafe fn add_tray_icon(hwnd: *mut c_void, icon: *mut c_void) -> bool {
    let mut nid = empty_nid(hwnd);
    nid.u_flags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
    nid.h_icon = icon;
-   fill_wide(&mut nid.sz_tip, "Sunbird — Click or press Ctrl+Shift+U for Settings");
+   fill_wide(
+      &mut nid.sz_tip,
+      "Sunbird — Click or press Ctrl+Shift+U for Settings",
+   );
    // SAFETY: `hwnd` and `icon` are live Win32 handles on the tray thread.
    unsafe { Shell_NotifyIconW(NIM_ADD, &raw mut nid) != 0 }
 }
 
-pub fn start_tray(config: TrayConfig) {
-   let _ = TRAY_CONFIG.set(config);
+fn start_tray() {
    crate::webview::start_window_hook();
    if TRAY_STARTED.swap(true, Ordering::AcqRel) {
       return;
@@ -499,7 +437,8 @@ fn run_tray_loop() {
    let class_name = wide("SunbirdTrayWindow");
    let title = wide("Sunbird");
    let taskbar_msg_name = wide("TaskbarCreated");
-   // SAFETY: Win32 hidden message window, hotkey, and tray registration on dedicated thread.
+   // SAFETY: Win32 hidden message window, hotkey, and tray registration on
+   // dedicated thread.
    unsafe {
       let taskbar_msg = RegisterWindowMessageW(taskbar_msg_name.as_ptr());
       TASKBAR_CREATED_MSG.store(taskbar_msg, Ordering::Release);
@@ -540,7 +479,10 @@ fn run_tray_loop() {
          ptr::null_mut(),
       );
       if hwnd.is_null() {
-         log::warn!("tray: CreateWindowExW failed: {}", std::io::Error::last_os_error());
+         log::warn!(
+            "tray: CreateWindowExW failed: {}",
+            std::io::Error::last_os_error()
+         );
          return;
       }
 
@@ -611,7 +553,7 @@ fn send_balloon(hwnd: *mut c_void, icon: *mut c_void, title: &str, body: &str) {
    }
 }
 
-pub fn balloon(title: &str, body: &str) {
+fn balloon(title: &str, body: &str) {
    let raw = TRAY_HWND.load(Ordering::Acquire);
    if raw == 0 {
       let mut queue = PENDING_BALLOONS
@@ -620,6 +562,7 @@ pub fn balloon(title: &str, body: &str) {
       if queue.len() < 8 {
          queue.push((title.to_owned(), body.to_owned()));
       }
+      drop(queue);
       return;
    }
    let icon = TRAY_ICON.load(Ordering::Acquire) as *mut c_void;
@@ -627,29 +570,16 @@ pub fn balloon(title: &str, body: &str) {
 }
 
 fn run_menu_action(cmd: usize) {
-   match cmd {
-      ID_OPEN_SETTINGS => open_dashboard(),
-      ID_OPEN_DEVTOOLS => open_devtools(),
-      ID_RELOAD_ALL => {
-         if let Some(cb) = TRAY_CONFIG.get().and_then(|c| c.on_reload_all.as_ref()) {
-            cb();
-         }
-      },
-      ID_CHECK_UPDATES => {
-         if let Some(cb) = TRAY_CONFIG.get().and_then(|c| c.on_check_updates.as_ref()) {
-            cb();
-         }
-      },
-      ID_COPY_URL => {
-         if let Some(cfg) = TRAY_CONFIG.get()
-            && crate::copy(&cfg.dashboard_url).is_ok()
-         {
-            balloon("Sunbird", &format!("Copied {}", cfg.dashboard_url));
-         }
-      },
-      ID_OPEN_PLUGINS => open_plugins_folder(),
-      _ => {},
-   }
+   let action = match cmd {
+      ID_OPEN_SETTINGS => TrayAction::OpenSettings,
+      ID_OPEN_DEVTOOLS => TrayAction::OpenDevtools,
+      ID_RELOAD_ALL => TrayAction::ReloadAll,
+      ID_CHECK_UPDATES => TrayAction::CheckUpdates,
+      ID_COPY_URL => TrayAction::CopyUrl,
+      ID_OPEN_PLUGINS => TrayAction::OpenPlugins,
+      _ => return,
+   };
+   action.run();
 }
 
 unsafe extern "system" fn tray_wnd_proc(
@@ -674,9 +604,9 @@ unsafe extern "system" fn tray_wnd_proc(
             clippy::cast_sign_loss,
             reason = "Win32 tray event code sits in low bits of lparam"
          )]
-         let event = (lparam as usize) & 0xffff;
+         let event = (lparam as usize) & 0xFFFF;
          match event {
-            WM_LBUTTONUP | WM_LBUTTONDBLCLK | NIN_BALLOONUSERCLICK => open_dashboard(),
+            WM_LBUTTONUP | WM_LBUTTONDBLCLK | NIN_BALLOONUSERCLICK => crate::open_settings(),
             WM_RBUTTONUP => {
                // SAFETY: Win32 popup menu owned and destroyed in this scope.
                unsafe {
@@ -727,12 +657,12 @@ unsafe extern "system" fn tray_wnd_proc(
       },
       WM_HOTKEY => {
          if wparam == usize::try_from(HOTKEY_ID).unwrap_or(0) {
-            open_dashboard();
+            crate::open_settings();
          }
          0
       },
       WM_COMMAND => {
-         run_menu_action(wparam & 0xffff);
+         run_menu_action(wparam & 0xFFFF);
          0
       },
       WM_DESTROY => {
@@ -747,7 +677,7 @@ unsafe extern "system" fn tray_wnd_proc(
    }
 }
 
-pub fn copy(text: &str) -> Result<(), Error> {
+fn copy(text: &str) -> Result<(), Error> {
    let units = wide(text);
    let bytes = units.len() * size_of::<u16>();
 
@@ -788,9 +718,9 @@ pub fn copy(text: &str) -> Result<(), Error> {
    Ok(())
 }
 
-pub fn open_url(url: &str) -> Result<(), Error> {
+fn open(target: &str) -> Result<(), Error> {
    let op = wide("open");
-   let target = wide(url);
+   let target = wide(target);
    // SAFETY: NUL-terminated UTF-16 strings passed to ShellExecuteW.
    let result = unsafe {
       ShellExecuteW(
@@ -810,16 +740,18 @@ pub fn open_url(url: &str) -> Result<(), Error> {
    Ok(())
 }
 
-/// Opens the native Windows file picker filtered to `.js` plugin bundles and
-/// returns `(file_name, bytes)` if the user chose a file.
-pub fn pick_js_file() -> Option<(String, Vec<u8>)> {
+/// Opens the native Windows file picker filtered to `.js` plugin bundles.
+fn pick_js_path() -> Option<PathBuf> {
    let mut file_buf = vec![0u16; 32_768];
    let filter: Vec<u16> = "JavaScript Plugins (*.js)\0*.js\0All Files (*.*)\0*.*\0\0"
       .encode_utf16()
       .collect();
    let title = wide("Install Sunbird Plugin (.js)");
    let def_ext = wide("js");
-   #[expect(clippy::cast_possible_truncation, reason = "OPENFILENAMEW is 152 bytes")]
+   #[expect(
+      clippy::cast_possible_truncation,
+      reason = "OPENFILENAMEW is 152 bytes"
+   )]
    let mut ofn = OpenFileNameW {
       l_struct_size:       size_of::<OpenFileNameW>() as u32,
       hwnd_owner:          ptr::null_mut(),
@@ -854,8 +786,40 @@ pub fn pick_js_file() -> Option<(String, Vec<u8>)> {
       .iter()
       .position(|&c| c == 0)
       .unwrap_or(file_buf.len());
-   let path = PathBuf::from(String::from_utf16_lossy(&file_buf[..nul]));
-   let name = path.file_name()?.to_string_lossy().into_owned();
-   let bytes = std::fs::read(&path).ok()?;
-   Some((name, bytes))
+   Some(PathBuf::from(String::from_utf16_lossy(&file_buf[..nul])))
+}
+
+pub struct Host;
+
+impl DesktopHost for Host {
+   fn copy(text: &str) -> Result<(), Error> {
+      copy(text)
+   }
+
+   fn open(target: &str) -> Result<(), Error> {
+      open(target)
+   }
+
+   fn app_browser() -> Option<Command> {
+      [
+         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+      ]
+      .into_iter()
+      .map(PathBuf::from)
+      .find(|path| path.is_file())
+      .map(Command::new)
+   }
+
+   fn pick_js_path() -> Option<PathBuf> {
+      pick_js_path()
+   }
+
+   fn notify(title: &str, body: &str) {
+      balloon(title, body);
+   }
+
+   fn start_tray() {
+      start_tray();
+   }
 }

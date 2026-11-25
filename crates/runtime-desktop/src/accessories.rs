@@ -242,14 +242,15 @@ pub fn install(image: &Image<'static>) {
    };
    MSG_ID_OFFSET.store(offset, Ordering::Release);
 
-   // SAFETY: runs from `DllMain` before Discord threads execute;
+   let pro = desktop::Prologues::of(phoenix_hook::x86::Abi::of(image)).row;
+   // SAFETY: runs from `prepare` before Discord threads execute;
    // `render_row_detour` matches `MessageRow::render`'s exact 11-argument sret
-   // ABI (4 reg + 7 stack u64s).
+   // ABI.
    let trampoline = match unsafe {
       image.hook_entry(
          render_row,
-         desktop::ROW_PROLOGUE,
-         desktop::ROW_PROLOGUE_LEN,
+         pro.pattern,
+         pro.len,
          render_row_detour as *const () as usize,
       )
    } {
@@ -285,14 +286,14 @@ fn install_body_tint(image: &Image<'static>, render_row: usize) {
    BODY_MSG_ID_OFFSET.store(msg_id_off, Ordering::Release);
    ROW_COLORS_OFFSET.store(colors_off, Ordering::Release);
 
-   // SAFETY: runs from `DllMain` before Discord threads execute;
-   // `build_body_detour` matches `build_message_body`'s verified 6-argument ABI
-   // (4 reg + 2 stack args).
+   let pro = desktop::Prologues::of(phoenix_hook::x86::Abi::of(image)).row;
+   // SAFETY: runs from `prepare` before Discord threads execute;
+   // `build_body_detour` matches `build_message_body`'s verified 6-argument ABI.
    let trampoline = match unsafe {
       image.hook_entry(
          body_fn,
-         desktop::ROW_PROLOGUE,
-         desktop::ROW_PROLOGUE_LEN,
+         pro.pattern,
+         pro.len,
          build_body_detour as *const () as usize,
       )
    } {
@@ -439,14 +440,15 @@ pub fn install_optimistic_delete(image: &Image<'static>) {
       },
    };
 
-   // SAFETY: runs from `DllMain` before Discord threads execute;
+   let pro = desktop::Prologues::of(phoenix_hook::x86::Abi::of(image)).frame;
+   // SAFETY: runs from `prepare` before Discord threads execute;
    // `optimistic_delete_detour` matches `Store::delete_message`'s exact
    // `(store, args, meta) -> bool` ABI.
    let trampoline = match unsafe {
       image.hook_entry(
          opt_del,
-         desktop::FRAME_PROLOGUE,
-         desktop::FRAME_PROLOGUE_LEN,
+         pro.pattern,
+         pro.len,
          optimistic_delete_detour as *const () as usize,
       )
    } {

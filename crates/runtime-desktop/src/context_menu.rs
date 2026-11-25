@@ -109,9 +109,9 @@ static ACTIONS: LazyLock<RwLock<Vec<ActionMeta>>> = LazyLock::new(|| RwLock::new
 /// `(action_id, message_id, channel_id)` to invoke when the user clicks it.
 #[derive(Clone, Copy)]
 struct PendingClick {
-   action_id:  u64,
-   message_id: u64,
-   channel_id: u64,
+   action:  u64,
+   message: u64,
+   channel: u64,
 }
 
 const MAX_PENDING_CLICKS: usize = 512;
@@ -163,9 +163,9 @@ fn ensure_worker() -> &'static mpsc::Sender<PendingClick> {
                if let Some(engine) = phoenix_runtime::engine() {
                   crate::js::ui::invoke_message_action(
                      &engine,
-                     click.action_id,
-                     click.message_id,
-                     click.channel_id,
+                     click.action,
+                     click.message,
+                     click.channel,
                   );
                }
             }
@@ -236,13 +236,14 @@ pub fn install(image: &Image<'static>) {
       },
    };
 
-   // SAFETY: runs from `DllMain` before Discord threads execute;
+   let pro = desktop::Prologues::of(phoenix_hook::x86::Abi::of(image)).row;
+   // SAFETY: runs from `prepare` before Discord threads execute;
    // `build_context_menu_detour` matches `MessageContextMenu`'s 8-arg sret ABI.
    let trampoline = match unsafe {
       image.hook_entry(
          menu.build_fn,
-         desktop::ROW_PROLOGUE,
-         desktop::ROW_PROLOGUE_LEN,
+         pro.pattern,
+         pro.len,
          build_context_menu_detour as *const () as usize,
       )
    } {
@@ -310,6 +311,7 @@ unsafe extern "C" fn build_context_menu_detour(
          let cid = if msg_ptr.is_null() {
             0
          } else {
+            remember_message(msg_ptr, mid);
             msg_ptr
                .add(syms.channel_id_offset)
                .cast::<u64>()
@@ -334,6 +336,42 @@ unsafe extern "C" fn build_context_menu_detour(
    out
 }
 
+/// The JSON of the message the last menu opened on, read from Discord's memory
+/// while the menu's input still holds it.
+static MENU_MESSAGE: Mutex<Option<(u64, String)>> = Mutex::new(None);
+
+/// Serializes the message at `message` once per menu; GPUI rebuilds an open
+/// menu every frame.
+///
+/// # Safety
+///
+/// `message` points to the live `Message` the menu is built for.
+unsafe fn remember_message(message: *const u8, id: u64) {
+   if MENU_MESSAGE
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .as_ref()
+      .is_some_and(|(held, _)| *held == id)
+   {
+      return;
+   }
+   // SAFETY: the caller's `message` is live for this call.
+   if let Some(json) = unsafe { crate::message::json(message, id) } {
+      *MENU_MESSAGE.lock().unwrap_or_else(PoisonError::into_inner) = Some((id, json));
+   }
+}
+
+/// The JSON of message `id`, when the last menu was opened on it.
+pub fn menu_message(id: u64) -> Option<String> {
+   let held = MENU_MESSAGE.lock().unwrap_or_else(PoisonError::into_inner);
+   let json = held
+      .as_ref()
+      .filter(|(held, _)| *held == id)
+      .map(|(_, json)| json.clone());
+   drop(held);
+   json
+}
+
 fn append_plugin_actions(
    syms: &MenuSymbols,
    vec: *mut RawMenuVec,
@@ -342,8 +380,7 @@ fn append_plugin_actions(
 ) {
    let actions: Vec<ActionMeta> = ACTIONS
       .read()
-      .map(|guard| guard.clone())
-      .unwrap_or_default();
+      .map_or_else(|_| Vec::new(), |guard| guard.clone());
    if actions.is_empty() {
       return;
    }
@@ -376,9 +413,9 @@ fn append_plugin_actions(
 
    for action in visible {
       let token = register_click(PendingClick {
-         action_id: action.id,
-         message_id,
-         channel_id,
+         action:  action.id,
+         message: message_id,
+         channel: channel_id,
       });
       let Some(rc_ptr) = gpui::alloc_rc_u64(token) else {
          continue;
