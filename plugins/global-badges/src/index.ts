@@ -1,5 +1,5 @@
 // @description Shows user badges from other Discord client mods on profiles
-// @version 0.5.6
+// @version 0.5.7
 // @author iFlex0x, wolfieeeeeeee
 // @warning Fetches badges from Equibadges (badges.equicord.org)
 
@@ -179,6 +179,9 @@ phoenix.discord.onResponse(
 phoenix.discord.onResponse(
   { method: "GET", pathPrefix: "/users/", pathSuffix: "/badges" },
   async (res) => {
+    // `/users/@me/badges` is the directory where you order and hide your own
+    // badges, and saves back to Discord, which rejects ids it never issued.
+    if (res.path.startsWith("/users/@me/")) return;
     // Discord 404s this endpoint when the user has no badges of its own, which
     // leaves the badge window erroring. Give it a 200 with ours instead.
     const noBadges = res.status === 404;
