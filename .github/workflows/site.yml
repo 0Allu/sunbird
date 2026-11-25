@@ -2,7 +2,7 @@ name: site
 on:
   push:
     branches: [main]
-    paths: ['web/**', 'plugins/**', 'crates/**', 'frida/**', 'Cargo.*', 'flake.*', 'nix/**', 'scripts/site.nu', '.github/workflows/site.yml']
+    paths: ['web/**', 'plugins/**', 'crates/**', 'frida/**', 'Cargo.*', 'flake.*', 'nix/**', 'scripts/site.nu', 'scripts/sunbird-linux.sh', '.github/workflows/site.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -23,19 +23,24 @@ jobs:
         include:
           - os: windows-latest
             toolchain: stable-x86_64-pc-windows-gnu
-            files: target/release/phoenix.dll target/release/phoenix-inject.exe
+            files: |
+              target/release/phoenix.dll
+              target/release/phoenix-inject.exe
           - os: ubuntu-22.04
             toolchain: stable
             files: target/release/libphoenix.so
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal
-      - run: cargo +${{ matrix.toolchain }} build --release -p phoenix-loader ${{ runner.os == 'Windows' && '-p phoenix-inject' || '' }}
+      - run: cargo +${{ matrix.toolchain }} build --locked --release -p phoenix-loader ${{ runner.os == 'Windows' && '-p phoenix-inject' || '' }}
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ runner.os }}
           path: ${{ matrix.files }}
+          if-no-files-found: error
   build:
     needs: [ios, desktop]
     runs-on: ubuntu-latest
