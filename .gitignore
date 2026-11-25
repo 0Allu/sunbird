@@ -59,6 +59,7 @@
 !scripts/*.nu
 !scripts/*.ps1
 !scripts/*.py
+!scripts/*.sh
 
 !web/
 !web/tools/

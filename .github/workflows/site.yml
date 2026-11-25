@@ -14,8 +14,30 @@ concurrency:
 jobs:
   ios:
     uses: ./.github/workflows/ios.yml
+  # The desktop launchers and loaders. Ubuntu 22.04 links the Linux loader
+  # against an older glibc than Discord's AppImage needs, so it loads anywhere
+  # Discord runs.
+  desktop:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            toolchain: stable-x86_64-pc-windows-gnu
+            files: target/release/phoenix.dll target/release/phoenix-inject.exe
+          - os: ubuntu-22.04
+            toolchain: stable
+            files: target/release/libphoenix.so
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal
+      - run: cargo +${{ matrix.toolchain }} build --release -p phoenix-loader ${{ runner.os == 'Windows' && '-p phoenix-inject' || '' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ runner.os }}
+          path: ${{ matrix.files }}
   build:
-    needs: ios
+    needs: [ios, desktop]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,6 +48,15 @@ jobs:
           name: libphoenix-ios
           path: ios
       - run: mv ios/libphoenix.dylib web/plugins/libphoenix-ios.dylib
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          path: desktop
+      - run: |
+          mv desktop/desktop-Windows/phoenix.dll web/plugins/phoenix-windows-x86_64.dll
+          mv desktop/desktop-Windows/phoenix-inject.exe web/plugins/sunbird-windows-x86_64.exe
+          mv desktop/desktop-Linux/libphoenix.so web/plugins/libphoenix-linux-x86_64.so
+          cp scripts/sunbird-linux.sh web/plugins/sunbird-linux.sh
       - uses: actions/setup-node@v4
         with:
           node-version: 24
