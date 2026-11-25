@@ -438,6 +438,8 @@ fn logging() {
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn logging() {
+   use std::io::Write as _;
+
    struct Stderr;
 
    impl log::Log for Stderr {
@@ -447,7 +449,14 @@ fn logging() {
 
       fn log(&self, record: &log::Record<'_>) {
          if self.enabled(record.metadata()) {
-            eprintln!("[phoenix {}] {}", record.level(), record.args());
+            // `eprintln!` panics when stderr is gone, a closed terminal or
+            // a broken pipe, and a panic here takes Discord down.
+            let _ = writeln!(
+               std::io::stderr(),
+               "[phoenix {}] {}",
+               record.level(),
+               record.args()
+            );
          }
       }
 
