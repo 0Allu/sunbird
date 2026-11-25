@@ -3,8 +3,9 @@
 # loader into Discord, and a desktop entry for it. Discord's own files stay
 # untouched, so its updates never undo Sunbird.
 #
-#   sh sunbird-linux.sh [Discord AppImage or discord-phoenix binary]
-#   sh sunbird-linux.sh --uninstall
+#   curl -fsSL https://assets.sunbird.tools/plugins/sunbird-linux.sh | sh
+#   curl -fsSL https://assets.sunbird.tools/plugins/sunbird-linux.sh | sh -s -- /path/to/Discord.AppImage
+#   curl -fsSL https://assets.sunbird.tools/plugins/sunbird-linux.sh | sh -s -- --uninstall
 #
 # SUNBIRD_SITE points it at a local server for testing.
 set -eu
@@ -40,24 +41,35 @@ case $home in
       ;;
 esac
 
+script="curl -fsSL $site/plugins/sunbird-linux.sh | sh -s --"
 discord=${1:-}
-if [ -z "$discord" ]; then
-   for found in \
-      "$(command -v discord-phoenix 2>/dev/null || true)" \
-      "$HOME"/Applications/discord-desktop*.AppImage \
-      "$HOME"/Downloads/discord-desktop*.AppImage; do
-      if [ -f "$found" ]; then
-         discord=$found
-         break
-      fi
-   done
+if [ -n "$discord" ] && [ ! -f "$discord" ]; then
+   echo "No file at $discord. Pass the path of Discord Phoenix's AppImage:" >&2
+   echo "  $script /path/to/discord-desktop.AppImage" >&2
+   exit 1
 fi
-if [ -z "$discord" ] || [ ! -f "$discord" ]; then
-   echo "Discord Phoenix not found. Pass its AppImage: sh $0 /path/to/discord-desktop.AppImage" >&2
+if [ -z "$discord" ]; then
+   discord=$(command -v discord-phoenix 2>/dev/null || true)
+fi
+if [ -z "$discord" ]; then
+   # The newest AppImage wins when an older download is still around.
+   discord=$(ls -t "$PWD"/*[Dd]iscord*.AppImage "$HOME"/Applications/*[Dd]iscord*.AppImage \
+      "$HOME"/Downloads/*[Dd]iscord*.AppImage "$HOME"/Desktop/*[Dd]iscord*.AppImage \
+      2>/dev/null | head -n 1 || true)
+fi
+if [ -z "$discord" ]; then
+   cat >&2 <<EOF
+Couldn't find Discord Phoenix. Looked for discord-phoenix on PATH and for a
+Discord AppImage in $PWD, ~/Applications, ~/Downloads and ~/Desktop.
+
+Download Discord Phoenix's AppImage, then run this again with its path:
+  $script /path/to/discord-desktop.AppImage
+EOF
    exit 1
 fi
 discord=$(realpath "$discord")
 [ -x "$discord" ] || chmod +x "$discord"
+echo "Using Discord Phoenix at $discord"
 
 # Single-quotes a value for the generated launcher.
 q() { printf "'%s'" "$(printf %s "$1" | sed "s/'/'\\\\''/g")"; }
@@ -104,10 +116,12 @@ command -v update-desktop-database >/dev/null && update-desktop-database "$data/
 
 # First download now, so a missing network shows up here rather than as a
 # Discord without Sunbird.
+echo "Downloading Sunbird..."
 rm -f "$home/version"
 "$home/sunbird" --update
 if [ -f "$home/libphoenix.so" ]; then
-   echo "Sunbird installed. Open \"Sunbird\" from your app menu."
+   echo "Sunbird is installed. Open \"Sunbird\" from your app menu to start Discord with it."
 else
-   echo "Installed, but downloading the loader failed. It will retry on each start." >&2
+   echo "Installed, but downloading Sunbird failed. It will retry each time you open it." >&2
 fi
+echo "It runs Discord from $discord: if you move or replace that file, run this again."
