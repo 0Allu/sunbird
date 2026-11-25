@@ -71,6 +71,9 @@ static HOST_CALL: OnceLock<HostCall> = OnceLock::new();
 static CALLBACKS: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 /// View frames for the guest, each wrapped in a kind-4 batch.
 static INJECTED: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+/// UI batches for the host, with their 4 zero bytes. The guest makes every UI
+/// call from its own thread, so ours wait for the next dispatch there.
+static OUTGOING: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 
 #[derive(Debug, flub::Error)]
 enum BridgeError {
@@ -152,21 +155,23 @@ unsafe extern "C" {
    );
 }
 
-/// Calls the host as the guest would. UI batches go straight in, and every
-/// other call goes in on the main queue, since host modules like `Timing`
-/// schedule on the calling thread's run loop. An answer, which no frame
-/// phoenix sends gets, would leak.
+/// Calls the host as the guest would. UI batches go in on the guest thread at
+/// its next dispatch, and every other call goes in on the main queue, since
+/// host modules like `Timing` schedule on the calling thread's run loop. An
+/// answer, which no frame phoenix sends gets, would leak.
 pub fn invoke(frame: &[u8]) -> bool {
    let (Some(&original), callbacks) = (HOST_CALL.get(), CALLBACKS.load(Ordering::Acquire)) else {
       return false;
    };
-   if callbacks.is_null() {
+   if callbacks.is_null() || DISPATCH.get().is_none() {
       return false;
    }
    if frame.starts_with(&[0; 4]) {
-      // SAFETY: `original` is the host's call, `callbacks` its own first
-      // argument, and `frame` outlives the call.
-      unsafe { original(callbacks, frame.as_ptr(), frame.len()) };
+      OUTGOING
+         .lock()
+         .unwrap_or_else(PoisonError::into_inner)
+         .push(frame.to_vec());
+      wake();
       return true;
    }
    let call = Box::into_raw(Box::new((original, callbacks as usize, frame.to_vec())));
@@ -263,7 +268,21 @@ unsafe extern "C" fn dispatch(
       // SAFETY: as above.
       let _ = unsafe { deliver(original, data, &pending, out) };
    }
+   send_outgoing();
    result
+}
+
+/// Hands the host the UI batches [`invoke`] queued. Runs on the guest thread.
+fn send_outgoing() {
+   let outgoing = std::mem::take(&mut *OUTGOING.lock().unwrap_or_else(PoisonError::into_inner));
+   let (Some(&call), callbacks) = (HOST_CALL.get(), CALLBACKS.load(Ordering::Acquire)) else {
+      return;
+   };
+   for batch in outgoing {
+      // SAFETY: `call` is the host's call, `callbacks` its own first argument,
+      // and the guest thread is where the guest makes the same call.
+      unsafe { call(callbacks, batch.as_ptr(), batch.len()) };
+   }
 }
 
 unsafe extern "C" fn host_call(callbacks: *mut c_void, bytes: *const u8, len: usize) -> Answer {
