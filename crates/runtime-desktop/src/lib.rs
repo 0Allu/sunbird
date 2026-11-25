@@ -229,7 +229,7 @@ impl Platform for Desktop {
       unsafe { staff::apply(store) };
    }
 
-   fn started(&self, first_run: bool, plugins: &[String]) {
+   fn started(&self, _first_run: bool, _plugins: &[String]) {
       let Some(state) = phoenix_runtime::state() else {
          return;
       };
