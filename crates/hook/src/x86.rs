@@ -48,6 +48,24 @@ const fn addr(value: u64) -> usize {
    value as usize
 }
 
+/// Whether `code` at `ip` is whole instructions that run the same from
+/// anywhere: no RIP-relative operand and no branch.
+#[must_use]
+pub fn relocatable(code: &[u8], ip: usize) -> bool {
+   let mut decoder = Decoder::with_ip(64, code, ip as u64, DecoderOptions::NONE);
+   let mut instruction = Instruction::default();
+   while decoder.can_decode() {
+      decoder.decode_out(&mut instruction);
+      if instruction.is_invalid()
+         || instruction.is_ip_rel_memory_operand()
+         || instruction.flow_control() != iced_x86::FlowControl::Next
+      {
+         return false;
+      }
+   }
+   true
+}
+
 /// Up to `count` instructions decoded from `code`, which starts at `ip`. Stops
 /// early at bytes that do not decode.
 #[must_use]
@@ -365,6 +383,22 @@ pub fn debug_fields(abi: Abi, code: &[u8], ip: usize) -> Vec<DebugField> {
       let dst = (ins.op_count() > 0 && ins.op0_kind() == OpKind::Register)
          .then(|| ins.op0_register().full_register());
       let to_this = dst.is_some() && dst == this;
+      let self_lea = ins.mnemonic() == Mnemonic::Lea
+         && Some(ins.memory_base()) == this
+         && ins.memory_index() == Register::None;
+      // Any other write to `self`'s register means it no longer holds `self`.
+      // The epilogue's `pop` is the exception: cold blocks decoded after the
+      // `ret` are reached from the body and still have `self` there.
+      if to_this
+         && !matches!(
+            ins.mnemonic(),
+            Mnemonic::Add | Mnemonic::Inc | Mnemonic::Pop
+         )
+         && !self_lea
+      {
+         this = None;
+         added = 0;
+      }
       match (ins.mnemonic(), dst) {
          (Mnemonic::Mov, Some(_))
             if this.is_none()
@@ -377,20 +411,39 @@ pub fn debug_fields(abi: Abi, code: &[u8], ip: usize) -> Vec<DebugField> {
          (Mnemonic::Lea, Some(dst)) => {
             let value = if ins.is_ip_rel_memory_operand() {
                Some(Value::Rip(addr(ins.ip_rel_memory_address())))
-            } else if Some(ins.memory_base()) == this && ins.memory_index() == Register::None {
-               Some(Value::Field(addr(ins.memory_displacement64())))
+            } else if self_lea {
+               added
+                  .checked_add(addr(ins.memory_displacement64()))
+                  .map(Value::Field)
             } else {
                None
             };
             match value {
-               Some(value) => regs.insert(dst, value),
-               None => regs.remove(&dst),
-            };
+               Some(Value::Field(offset)) if to_this => added = offset,
+               Some(value) => {
+                  regs.insert(dst, value);
+               },
+               None => {
+                  regs.remove(&dst);
+               },
+            }
          },
-         (Mnemonic::Add, Some(_)) if to_this && ins.op1_kind() != OpKind::Register => {
-            added = addr(ins.immediate(1));
+         (Mnemonic::Add, Some(_)) if to_this => {
+            // A register, a negative or an overflowing step loses track of `self`.
+            if let Some(sum) = ins
+               .try_immediate(1)
+               .ok()
+               .and_then(|step| i64::try_from(step).ok())
+               .and_then(|step| usize::try_from(step).ok())
+               .and_then(|step| added.checked_add(step))
+            {
+               added = sum;
+            } else {
+               this = None;
+               added = 0;
+            }
          },
-         (Mnemonic::Inc, Some(_)) if to_this => added = 1,
+         (Mnemonic::Inc, Some(_)) if to_this => added = added.saturating_add(1),
          (Mnemonic::Mov | Mnemonic::Pop, Some(dst)) => {
             let value = match constant {
                Some(value) => Some(Value::Imm(value)),
@@ -437,9 +490,9 @@ pub fn debug_fields(abi: Abi, code: &[u8], ip: usize) -> Vec<DebugField> {
                   },
                });
             }
+            // `self` lives in a callee-saved register, so it survives the call.
             regs.clear();
             stack.clear();
-            added = 0;
          },
          (Mnemonic::Jmp | Mnemonic::Ret, _) => {
             regs.clear();

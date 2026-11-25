@@ -16,6 +16,10 @@ use std::{
    sync::Mutex,
 };
 
+use phoenix_sigs::{
+   HandlerResult,
+   REST_WORDS,
+};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
@@ -54,15 +58,15 @@ impl Str {
 struct Event {
    name: Str,
    data: Str,
-   rest: [u64; 4],
+   rest: [u64; REST_WORDS],
 }
 
-#[repr(C)]
-struct HandlerResult([u64; 4]);
-
-impl HandlerResult {
-   const OK: Self = Self([u64::MAX, 0, 0, 0]);
-   const BAD_PAYLOAD: Self = Self([0, 1, 0, 0]);
+/// The result shape the loader expects on this target.
+const fn bad_payload() -> HandlerResult {
+   let mut result = HandlerResult::OK;
+   result.0[0] = 0;
+   result.0[1] = 1;
+   result
 }
 
 type Handler = extern "C" fn(*mut Store, *const Event, *mut c_void) -> HandlerResult;
@@ -139,7 +143,7 @@ extern "C" fn message_create(
 ) -> HandlerResult {
    // SAFETY: dispatch passes a live event.
    let Some(message) = (unsafe { payload::<Message>(event) }) else {
-      return HandlerResult::BAD_PAYLOAD;
+      return bad_payload();
    };
    println!(
       "[stand-in] #{} <{}> {}",
@@ -157,7 +161,7 @@ extern "C" fn message_update(
 ) -> HandlerResult {
    // SAFETY: dispatch passes a live event.
    let Some(update) = (unsafe { payload::<Message>(event) }) else {
-      return HandlerResult::BAD_PAYLOAD;
+      return bad_payload();
    };
    // SAFETY: dispatch passes the locked store.
    let store = unsafe { &mut *store };
@@ -179,7 +183,7 @@ extern "C" fn message_delete(
 ) -> HandlerResult {
    // SAFETY: dispatch passes a live event.
    let Some(deleted) = (unsafe { payload::<Deleted>(event) }) else {
-      return HandlerResult::BAD_PAYLOAD;
+      return bad_payload();
    };
    // SAFETY: dispatch passes the locked store.
    unsafe { &mut *store }
@@ -223,12 +227,12 @@ pub unsafe extern "C" fn stand_in_gateway_receive(frame: *const u8, len: usize) 
    let event = Event {
       name: Str::borrowed(frame.t),
       data: Str::borrowed(frame.d.get()),
-      rest: [0; 4],
+      rest: [0; REST_WORDS],
    };
    let mut store = STORE
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner);
    let result = (entry.handler)(&raw mut *store, &raw const event, std::ptr::null_mut());
    drop(store);
-   result.0[0] == u64::MAX
+   result.is_ok()
 }

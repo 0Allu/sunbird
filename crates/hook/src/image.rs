@@ -34,6 +34,11 @@ use memchr::memmem;
 
 use crate::pattern::Pattern;
 
+/// Held across each protect, swap and restore, so a second writer on the same
+/// page never records the first one's temporary protection as the page's own.
+#[cfg(any(unix, windows))]
+static PROTECT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// `jmp [rip]` followed by its 8-byte target.
 #[cfg(all(target_arch = "x86_64", any(windows, target_os = "linux")))]
 pub(crate) const ABSOLUTE_JUMP_LEN: usize = 14;
@@ -61,21 +66,16 @@ pub(crate) fn alloc_exec(at: usize, len: usize) -> Option<usize> {
    (!page.is_null()).then_some(page as usize)
 }
 
-/// `len` fresh read-write-execute bytes at `at`, or anywhere when `at` is 0.
+/// `len` fresh read-write-execute bytes, near `at` when the kernel can.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub(crate) fn alloc_exec(at: usize, len: usize) -> Option<usize> {
-   let fixed = if at == 0 {
-      0
-   } else {
-      libc::MAP_FIXED_NOREPLACE
-   };
    // SAFETY: asks for a fresh anonymous mapping that replaces nothing.
    let page = unsafe {
       libc::mmap(
          at as *mut c_void,
          len,
          libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
-         libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | fixed,
+         libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
          -1,
          0,
       )
@@ -403,6 +403,9 @@ unsafe fn swap_protected(
       }
    };
 
+   let _serial = PROTECT
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
    for (done, &(page, prot)) in restore.iter().enumerate() {
       if let Err(err) = protect(page, prot | libc::PROT_WRITE) {
          for &(page, prot) in &restore[..done] {
@@ -801,6 +804,9 @@ pub unsafe fn swap_words(writes: &[(usize, usize)]) -> Result<Vec<usize>, crate:
    pages.sort_unstable();
    pages.dedup();
 
+   let _serial = PROTECT
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
    let mut restore = Vec::with_capacity(pages.len());
    for page in pages {
       let mut old = 0u32;
@@ -837,17 +843,12 @@ pub unsafe fn swap_words(writes: &[(usize, usize)]) -> Result<Vec<usize>, crate:
       })
       .collect();
 
+   // A page left writable after a failed restore stays that way: the swap
+   // has landed, and reporting an error would hide it from the caller.
    for (page, prot) in restore {
       let mut ignored = 0u32;
       // SAFETY: restoring the page's original protection.
-      if unsafe { win32::VirtualProtect(page as *mut c_void, page_size, prot, &raw mut ignored) }
-         == 0
-      {
-         return Err(crate::Error::Protect {
-            addr:   page,
-            source: std::io::Error::last_os_error(),
-         });
-      }
+      unsafe { win32::VirtualProtect(page as *mut c_void, page_size, prot, &raw mut ignored) };
    }
    Ok(previous)
 }
@@ -916,6 +917,11 @@ impl Image<'static> {
          .ok_or(crate::Error::Unmapped { addr })?;
       if prologue_len < ABSOLUTE_JUMP_LEN || prologue.find_in(displaced).first() != Some(&0) {
          return Err(refuse("the prologue does not match"));
+      }
+      if !crate::x86::relocatable(displaced, addr) {
+         return Err(refuse(
+            "the prologue does not end on an instruction, or moves badly",
+         ));
       }
       let mut code = displaced.to_vec();
       code.extend(absolute_jump(addr + prologue_len));

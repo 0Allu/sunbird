@@ -127,21 +127,19 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
          let http = DesktopHttpTransport::locate(image);
          report(
             "http transport",
-            http
-               .as_ref()
-               .ok_or_else(|| "not found".to_owned())
-               .and_then(|http| {
-                  prologues
-                     .frame
-                     .at(image, http.send_fn)
-                     .then(|| at(http.send_fn))
-                     .ok_or_else(|| "send prologue changed".to_owned())
-               }),
+            http.as_ref().map_err(Clone::clone).and_then(|http| {
+               prologues
+                  .frame
+                  .at(image, http.send_fn)
+                  .then(|| at(http.send_fn))
+                  .ok_or_else(|| "send prologue changed".to_owned())
+            }),
          );
          report(
             "host allocator",
             match http
                .as_ref()
+               .ok()
                .map(|http| (http.host_alloc, http.host_dealloc))
             {
                Some((Some(alloc), Some(dealloc))) => {
@@ -406,7 +404,7 @@ fn dump(image: &Image<'_>) -> misstep::Result<()> {
 
       println!("   {:<40} {:#010x}{note}", entry.name, entry.handler);
    }
-   if let Some(http) = DesktopHttpTransport::locate(image) {
+   if let Ok(http) = DesktopHttpTransport::locate(image) {
       let fmt_opt = |addr: Option<usize>| {
          addr.map_or_else(|| "none".to_owned(), |addr| format!("{addr:#010x}"))
       };

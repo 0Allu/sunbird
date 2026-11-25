@@ -17,6 +17,8 @@ use phoenix_hook::{
    },
 };
 
+use crate::Found;
+
 /// Unique error string inside `ReqwestTransport::send` when handed a mobile
 /// host-file body.
 const HOST_FILE_ANCHOR: &[u8] = b"a host file body needs the host's transport";
@@ -44,22 +46,25 @@ impl DesktopHttpTransport {
    /// Scans a 64-bit PE or ELF `Image` for `ReqwestTransport::send`, its
    /// returned `SendFuture::poll` vtable, and the host's Rust allocator
    /// functions.
-   #[must_use]
-   pub fn locate(image: &Image<'_>) -> Option<Self> {
+   pub fn locate(image: &Image<'_>) -> Found<Self> {
       if image.pointer_width != 8 {
-         return None;
+         return Err("not a 64-bit image".to_owned());
       }
       let abi = Abi::of(image);
 
-      // 1. Locate the unique anchor string inside `ReqwestTransport::send`.
-      let anchor = *image.find_bytes(HOST_FILE_ANCHOR).first()?;
-      let lea_addr = find_rip_lea_target(image, anchor)?;
-      let (send_fn, send_end) = image.function_bounds(lea_addr)?;
+      // 1. The unique anchor string inside `ReqwestTransport::send`.
+      let anchor = crate::one("transport anchor", &image.find_bytes(HOST_FILE_ANCHOR))?;
+      let lea = *crate::desktop::lea_refs(image, anchor)
+         .first()
+         .ok_or("transport anchor is never loaded")?;
+      let (send_fn, send_end) = image
+         .function_bounds(lea)
+         .ok_or("ReqwestTransport::send has no unwind entry")?;
 
-      // 2. Find every `dyn Transport` vtable slot in `.rdata` pointing to `send_fn`.
+      // 2. Every `dyn Transport` vtable slot in `.rdata` pointing to `send_fn`.
       let send_slots = find_vtable_method_slots(image, send_fn, 1..=0x2000);
       if send_slots.is_empty() {
-         return None;
+         return Err("no Transport vtable holds ReqwestTransport::send".to_owned());
       }
 
       // 3. The `Box::pin` of the async state machine returns `(ptr, poll_vtable)`,
@@ -71,13 +76,23 @@ impl DesktopHttpTransport {
          poll_slots.push(direct_slot);
       }
 
-      // 4. Locate the host's own `__rust_alloc` and `__rust_dealloc` so response body
-      //    growth stays 100% allocator-compatible.
+      // 4. The host's own `__rust_alloc` and `__rust_dealloc`, so response body
+      //    growth stays allocator-compatible. Both hand the same global allocator
+      //    static to its implementation.
       let host_alloc = box_future.and_then(|box_future| find_host_alloc(image, abi, box_future));
       let host_dealloc = find_host_dealloc(image, abi, send_fn, send_end)
-         .or_else(|| host_alloc.and_then(|alloc| dealloc_beside(image, alloc)));
+         .or_else(|| host_alloc.and_then(|alloc| dealloc_beside(image, abi, alloc)));
+      let (host_alloc, host_dealloc) = match (host_alloc, host_dealloc) {
+         (Some(alloc), Some(dealloc))
+            if allocator_static(image, abi, alloc).is_none()
+               || allocator_static(image, abi, alloc) != allocator_static(image, abi, dealloc) =>
+         {
+            (None, None)
+         },
+         pair => pair,
+      };
 
-      Some(Self {
+      Ok(Self {
          send_slots,
          send_fn,
          poll_slots,
@@ -86,36 +101,6 @@ impl DesktopHttpTransport {
          host_dealloc,
       })
    }
-}
-
-/// Finds the first `x86_64` RIP-relative `LEA r64, [rip + disp32]` in
-/// executable segments whose effective address equals `target`.
-fn find_rip_lea_target(image: &Image<'_>, target: usize) -> Option<usize> {
-   for seg in &image.segments {
-      if !seg.executable || seg.bytes.len() < 7 {
-         continue;
-      }
-      let bytes = seg.bytes.as_ref();
-      for pos in memchr_iter(0x8D, bytes) {
-         if pos == 0 || pos + 6 > bytes.len() {
-            continue;
-         }
-         let rex = bytes[pos - 1];
-         if rex != 0x48 && rex != 0x4C {
-            continue;
-         }
-         // ModRM with mod == 0b00 and rm == 0b101 encodes RIP-relative addressing.
-         if (bytes[pos + 1] & 0xC7) != 0x05 {
-            continue;
-         }
-         let disp = i32::from_le_bytes(bytes[pos + 2..pos + 6].try_into().ok()?);
-         let next_rip = seg.addr + pos + 6;
-         if next_rip.checked_add_signed(disp as isize) == Some(target) {
-            return Some(seg.addr + pos - 1);
-         }
-      }
-   }
-   None
 }
 
 /// Finds all `.rdata` vtable method-0 slots (`vtable + 24`) holding `method_fn`
@@ -150,15 +135,10 @@ fn find_vtable_method_slots(
    slots
 }
 
-/// The targets of every call inside `[start, end)` that land on a function
-/// start.
+/// The functions called inside `[start, end)`.
 fn calls(image: &Image<'_>, start: usize, end: usize) -> Vec<usize> {
-   let Some(code) = image.read(start, end.saturating_sub(start)) else {
-      return Vec::new();
-   };
-   (0..code.len())
-      .filter_map(|pos| call_target(image, &code[pos..], start + pos))
-      .map(|(_, callee)| callee)
+   crate::desktop::callees(image, start, end)
+      .into_iter()
       .filter(|&callee| image.is_function(callee))
       .collect()
 }
@@ -171,47 +151,64 @@ fn small(image: &Image<'_>, func: usize, max: usize) -> Option<(usize, usize)> {
 }
 
 /// The `SendFuture` vtable loaded with `lea rdx, [rip + disp32]` (`48 8D 15`),
-/// the high half of the returned fat pointer, in `send_fn` or a small callee
-/// that boxes the future. Returns `(poll_fn, vtable, box_future)`, where
-/// `box_future` is the callee that boxes it, when one does.
+/// the high half of the returned fat pointer, in a small callee of `send_fn`
+/// that boxes the future, or else in `send_fn`. Returns `(poll_fn, vtable,
+/// box_future)`, where `box_future` is the callee that boxes it, when one does.
+///
+/// `lea rdx` also passes an argument, so the vtable must be the only one in
+/// whichever of the two places has any.
 fn find_poll_vtable(
    image: &Image<'_>,
    send_fn: usize,
    send_end: usize,
-) -> Option<(usize, usize, Option<usize>)> {
-   let boxers = calls(image, send_fn, send_end)
+) -> Found<(usize, usize, Option<usize>)> {
+   let boxers: Vec<(usize, usize)> = calls(image, send_fn, send_end)
       .into_iter()
-      .filter_map(|callee| small(image, callee, 0x80));
-   for (cs, ce) in boxers.chain([(send_fn, send_end)]) {
-      let Some(code) = image.read(cs, ce - cs) else {
-         continue;
-      };
-      for pos in memchr_iter(0x8D, code) {
-         if pos == 0 || pos + 6 > code.len() || code[pos - 1] != 0x48 || code[pos + 1] != 0x15 {
-            continue;
-         }
-         let disp = i32::from_le_bytes(code[pos + 2..pos + 6].try_into().ok()?);
-         let Some(vtable) = (cs + pos + 6).checked_add_signed(disp as isize) else {
-            continue;
-         };
-         let (Some(drop_fn), Some(size), Some(align), Some(poll_fn)) = (
-            image.read_usize(vtable),
-            image.read_usize(vtable + 8),
-            image.read_usize(vtable + 16),
-            image.read_usize(vtable + 24),
-         ) else {
-            continue;
-         };
-         if image.is_function(drop_fn)
-            && image.is_function(poll_fn)
-            && (0x100..=0x4000).contains(&size)
-            && align == 8
-         {
-            return Some((poll_fn, vtable, (cs != send_fn).then_some(cs)));
-         }
+      .filter_map(|callee| small(image, callee, 0x80))
+      .collect();
+   for group in [boxers, vec![(send_fn, send_end)]] {
+      let mut found: Vec<(usize, usize, usize)> = group
+         .into_iter()
+         .flat_map(|(cs, ce)| {
+            future_vtables(image, cs, ce).map(move |(vtable, poll_fn)| (vtable, poll_fn, cs))
+         })
+         .collect();
+      found.sort_unstable();
+      found.dedup_by_key(|&mut (vtable, ..)| vtable);
+      match found[..] {
+         [] => {},
+         [(vtable, poll_fn, cs)] => return Ok((poll_fn, vtable, (cs != send_fn).then_some(cs))),
+         _ => return Err(format!("{} SendFuture vtable candidates", found.len())),
       }
    }
-   None
+   Err("SendFuture vtable not found".to_owned())
+}
+
+/// `(vtable, poll_fn)` for each `lea rdx, [rip + vtable]` in `[cs, ce)` whose
+/// target reads as a future's vtable.
+fn future_vtables(image: &Image<'_>, cs: usize, ce: usize) -> impl Iterator<Item = (usize, usize)> {
+   let code = image.read(cs, ce - cs).unwrap_or_default();
+   memchr_iter(0x8D, code)
+      .filter(move |&pos| {
+         pos > 0 && pos + 6 <= code.len() && code[pos - 1] == 0x48 && code[pos + 1] == 0x15
+      })
+      .filter_map(move |pos| {
+         let disp = i32::from_le_bytes(code[pos + 2..pos + 6].try_into().ok()?);
+         let vtable = (cs + pos + 6).checked_add_signed(disp as isize)?;
+         let (drop_fn, size, align, poll_fn) = (
+            image.read_usize(vtable)?,
+            image.read_usize(vtable + 8)?,
+            image.read_usize(vtable + 16)?,
+            image.read_usize(vtable + 24)?,
+         );
+         (image.is_function(drop_fn)
+            && image.is_function(poll_fn)
+            && (0x100..=0x4000).contains(&size)
+            && align == 8)
+            .then_some((vtable, poll_fn))
+      })
+      .collect::<Vec<_>>()
+      .into_iter()
 }
 
 /// `__rust_alloc(size, align)`, reached from `box_future`.
@@ -221,7 +218,8 @@ fn find_poll_vtable(
 /// `__rust_alloc`, System V ones a call to `Layout` wrappers that forward to
 /// it, so small callees are followed breadth-first to the first function
 /// shaped like `__rust_alloc`: its first call, whether the allocator is set
-/// up, is followed by `test al, al`.
+/// up, is followed by `test al, al`. Bool helpers share that shape, so the
+/// first level with any must have exactly one.
 fn find_host_alloc(image: &Image<'_>, abi: Abi, box_future: usize) -> Option<usize> {
    let (bs, be) = image.function_bounds(box_future)?;
    let align_8: Vec<Vec<u8>> = (0..2)
@@ -249,8 +247,17 @@ fn find_host_alloc(image: &Image<'_>, abi: Abi, box_future: usize) -> Option<usi
       }
    }
    for _ in 0..3 {
-      if let Some(&alloc) = frontier.iter().find(|&&func| checks_allocator(image, func)) {
-         return Some(alloc);
+      let mut found: Vec<usize> = frontier
+         .iter()
+         .copied()
+         .filter(|&func| checks_allocator(image, func))
+         .collect();
+      found.sort_unstable();
+      found.dedup();
+      match found[..] {
+         [] => {},
+         [alloc] => return Some(alloc),
+         _ => return None,
       }
       frontier = frontier
          .iter()
@@ -333,12 +340,12 @@ fn counts_down(image: &Image<'_>, func: usize) -> bool {
 /// static to its implementation with `lea rdi, [rip + disp32]`, and so does
 /// `__rust_dealloc`, without `alloc`'s set-up check and counting the freed
 /// bytes down after.
-fn dealloc_beside(image: &Image<'_>, alloc: usize) -> Option<usize> {
+fn dealloc_beside(image: &Image<'_>, abi: Abi, alloc: usize) -> Option<usize> {
    /// The shims are a few dozen bytes each.
    const NEAR: usize = 0x400;
-   let (_, global) = lea_rdi(image.read(alloc, 0x40)?, alloc).next()?;
+   let global = allocator_static(image, abi, alloc)?;
    let start = alloc.saturating_sub(NEAR);
-   let mut found: Vec<usize> = lea_rdi(image.read(start, 2 * NEAR)?, start)
+   let mut found: Vec<usize> = lea_arg0(abi, image.read(start, 2 * NEAR)?, start)
       .filter(|&(_, target)| target == global)
       .filter_map(|(lea, _)| Some(image.function_bounds(lea)?.0))
       .filter(|&func| func != alloc && !checks_allocator(image, func) && counts_down(image, func))
@@ -350,9 +357,22 @@ fn dealloc_beside(image: &Image<'_>, alloc: usize) -> Option<usize> {
    }
 }
 
-/// Each `lea rdi, [rip + disp32]` in `code` at `ip`, as (instruction, target).
-fn lea_rdi(code: &[u8], ip: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
-   memchr::memmem::find_iter(code, &[0x48, 0x8D, 0x3D]).filter_map(move |pos| {
+/// The global allocator static an allocator shim hands its implementation:
+/// the first `lea` of it into the first argument register.
+fn allocator_static(image: &Image<'_>, abi: Abi, shim: usize) -> Option<usize> {
+   lea_arg0(abi, image.read(shim, 0x40)?, shim)
+      .next()
+      .map(|(_, target)| target)
+}
+
+/// Each `lea <first argument>, [rip + disp32]` in `code` at `ip`, as
+/// (instruction, target).
+fn lea_arg0(abi: Abi, code: &[u8], ip: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
+   let lea: &'static [u8] = match abi {
+      Abi::Win64 => &[0x48, 0x8D, 0x0D],
+      Abi::SysV => &[0x48, 0x8D, 0x3D],
+   };
+   memchr::memmem::find_iter(code, lea).filter_map(move |pos| {
       let disp = i32::from_le_bytes(code.get(pos + 3..pos + 7)?.try_into().ok()?);
       Some((ip + pos, (ip + pos + 7).checked_add_signed(disp as isize)?))
    })

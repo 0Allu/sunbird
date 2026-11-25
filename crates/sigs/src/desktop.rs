@@ -41,18 +41,16 @@ use crate::{
 
 /// Win64 `MessageRow::render` and `build_message_body` prologue: 8 pushes and
 /// `mov eax, imm32`, before `call __chkstk`.
-pub const ROW_PROLOGUE: Pattern =
-   Pattern::new("55 41 57 41 56 41 55 41 54 56 57 53 B8 ?? ?? ?? ??");
-pub const ROW_PROLOGUE_LEN: usize = 17;
+const ROW_PROLOGUE: Pattern = Pattern::new("55 41 57 41 56 41 55 41 54 56 57 53 B8 ?? ?? ?? ??");
+const ROW_PROLOGUE_LEN: usize = 17;
 /// Win64 `host::section`, `WindowRoot::render`, and `Store::delete_message`
 /// prologue: 8 pushes and `sub rsp, imm32`.
-pub const FRAME_PROLOGUE: Pattern =
+const FRAME_PROLOGUE: Pattern =
    Pattern::new("55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC ?? ?? ?? ??");
-pub const FRAME_PROLOGUE_LEN: usize = 19;
+const FRAME_PROLOGUE_LEN: usize = 19;
 /// Win64 `libdiscord_media::fetch` prologue: 6 pushes and `sub rsp, imm32`.
-pub const MEDIA_FETCH_PROLOGUE: Pattern =
-   Pattern::new("55 41 57 41 56 56 57 53 48 81 EC ?? ?? ?? ??");
-pub const MEDIA_FETCH_PROLOGUE_LEN: usize = 15;
+const MEDIA_FETCH_PROLOGUE: Pattern = Pattern::new("55 41 57 41 56 56 57 53 48 81 EC ?? ?? ?? ??");
+const MEDIA_FETCH_PROLOGUE_LEN: usize = 15;
 
 /// A function entry [`Image::hook_entry`] can displace: whole instructions
 /// with no RIP-relative operand, at least 14 bytes.
@@ -257,9 +255,6 @@ fn literal(image: &Image<'_>, text: &[u8]) -> Vec<usize> {
    }
 }
 
-/// The 22-byte `.rdata` string naming settings page 24, relabeled in place.
-pub const SETTINGS_LABEL: &[u8] = b"PhoenixDESKTOP_PHOENIX";
-
 /// What the runtime fixes at compile time. Every Mana and GPUI struct it builds
 /// is decoded from the binary instead, and must fit the scratch buffer it is
 /// built in.
@@ -277,94 +272,153 @@ pub mod layout {
    pub const MENU_ITEM_SEPARATOR_TAG: u64 = 4;
 }
 
-/// Every [`call_target`] into code, as `callee << 32 | site` RVAs sorted by
-/// callee. One pass replaces a `.text` scan per caller lookup.
-struct CallIndex {
-   key:   (usize, usize),
-   base:  usize,
-   calls: Vec<u64>,
+/// Code references as `target << 32 | site` RVAs sorted by target: every
+/// [`call_target`] into code, or every RIP-relative `lea`. One pass replaces a
+/// `.text` scan per lookup, about a second each on `Discord.exe`.
+struct RefIndex {
+   key:  (usize, usize),
+   base: usize,
+   refs: Vec<u64>,
 }
 
-static CALLS: Mutex<Option<Arc<CallIndex>>> = Mutex::new(None);
+static CALLS: Mutex<Option<Arc<RefIndex>>> = Mutex::new(None);
+static LEAS: Mutex<Option<Arc<RefIndex>>> = Mutex::new(None);
 
-/// The shared [`CallIndex`] for `image`, built on first use.
-fn call_index(image: &Image<'_>) -> Arc<CallIndex> {
+/// The shared index in `cache` for `image`, built on first use from the
+/// `(site, target)` pairs `refs` finds in each executable segment.
+fn ref_index(
+   image: &Image<'_>,
+   cache: &Mutex<Option<Arc<RefIndex>>>,
+   refs: impl Fn(usize, &[u8], &mut dyn FnMut(usize, usize)),
+) -> Arc<RefIndex> {
    let base = image
       .segments
       .iter()
       .map(|segment| segment.addr)
       .min()
       .unwrap_or(0);
-   let code: Vec<(usize, usize)> = image
+   let code_len = image
       .segments
       .iter()
       .filter(|segment| segment.executable)
-      .map(|segment| (segment.addr, segment.addr + segment.bytes.len()))
-      .collect();
-   let key = (base, code.iter().map(|&(start, end)| end - start).sum());
-   let mut cached = CALLS.lock().unwrap_or_else(PoisonError::into_inner);
+      .map(|segment| segment.bytes.len())
+      .sum();
+   let key = (base, code_len);
+   let mut cached = cache.lock().unwrap_or_else(PoisonError::into_inner);
    if let Some(index) = cached.as_ref().filter(|index| index.key == key) {
       return Arc::clone(index);
    }
-   let in_code = |target: usize| {
-      code
-         .iter()
-         .any(|&(start, end)| (start..end).contains(&target))
+   let rva = |addr: usize| {
+      addr
+         .checked_sub(base)
+         .and_then(|rva| u32::try_from(rva).ok())
+         .map(u64::from)
    };
-   let rva = |addr: usize| u32::try_from(addr - base).ok().map(u64::from);
-   let mut calls = Vec::new();
+   let mut all = Vec::new();
    for segment in image.segments.iter().filter(|segment| segment.executable) {
-      for offset in memchr::memchr2_iter(0xE8, 0xFF, &segment.bytes) {
-         let site = segment.addr + offset;
-         if let Some((_, callee)) = call_target(image, &segment.bytes[offset..], site)
-            && in_code(callee)
-            && let (Some(callee), Some(site)) = (rva(callee), rva(site))
-         {
-            calls.push(callee << 32 | site);
+      refs(segment.addr, &segment.bytes, &mut |site, target| {
+         if let (Some(target), Some(site)) = (rva(target), rva(site)) {
+            all.push(target << 32 | site);
          }
-      }
+      });
    }
-   calls.sort_unstable();
-   let index = Arc::new(CallIndex { key, base, calls });
+   all.sort_unstable();
+   let index = Arc::new(RefIndex {
+      key,
+      base,
+      refs: all,
+   });
    *cached = Some(Arc::clone(&index));
    index
 }
 
-/// Frees the shared call index once every locator has run.
-pub fn release_call_index() {
-   *CALLS.lock().unwrap_or_else(PoisonError::into_inner) = None;
+/// Every call into code.
+fn call_index(image: &Image<'_>) -> Arc<RefIndex> {
+   ref_index(image, &CALLS, |addr, bytes, push| {
+      for offset in memchr::memchr2_iter(0xE8, 0xFF, bytes) {
+         if let Some((_, callee)) = call_target(image, &bytes[offset..], addr + offset)
+            && image.is_code(callee)
+         {
+            push(addr + offset, callee);
+         }
+      }
+   })
 }
 
-impl CallIndex {
-   /// The call sites of `callee`.
-   fn sites(&self, callee: usize) -> impl Iterator<Item = usize> + '_ {
-      let key = callee
-         .checked_sub(self.base)
-         .and_then(|rva| u32::try_from(rva).ok())
-         .map(u64::from);
-      let (start, end) = key.map_or((0, 0), |rva| {
-         (
-            self.calls.partition_point(|&call| call >> 32 < rva),
-            self.calls.partition_point(|&call| call >> 32 <= rva),
-         )
-      });
-      self.calls[start..end]
-         .iter()
-         .map(|&call| self.base + (call & 0xFFFF_FFFF) as usize)
-   }
+/// Every `lea r, [rip + disp32]`, any REX.
+fn lea_index(image: &Image<'_>) -> Arc<RefIndex> {
+   ref_index(image, &LEAS, |addr, bytes, push| {
+      for pos in memchr::memchr_iter(0x8D, bytes) {
+         let (Some(&rex), Some(&modrm), Some(disp)) = (
+            pos.checked_sub(1).and_then(|at| bytes.get(at)),
+            bytes.get(pos + 1),
+            bytes.get(pos + 2..pos + 6),
+         ) else {
+            continue;
+         };
+         if rex & 0xF0 != 0x40 || modrm & 0xC7 != 0x05 {
+            continue;
+         }
+         let disp = i32::from_le_bytes([disp[0], disp[1], disp[2], disp[3]]);
+         if let Some(target) = (addr + pos + 6).checked_add_signed(disp as isize) {
+            push(addr + pos - 1, target);
+         }
+      }
+   })
+}
 
-   /// `(site, callee)` for every call whose callee passes `keep`.
-   fn matching(&self, keep: impl Fn(usize) -> bool) -> Vec<(usize, usize)> {
-      self
-         .calls
+/// Frees the shared indexes once every locator has run.
+pub fn release_call_index() {
+   *CALLS.lock().unwrap_or_else(PoisonError::into_inner) = None;
+   *LEAS.lock().unwrap_or_else(PoisonError::into_inner) = None;
+}
+
+impl RefIndex {
+   /// The sites referencing a target in `targets`, as `(site, target)` in
+   /// target then site order.
+   fn range(&self, targets: std::ops::RangeInclusive<usize>) -> Vec<(usize, usize)> {
+      let rva = |addr: usize| {
+         u64::try_from(addr.saturating_sub(self.base))
+            .unwrap_or(u64::MAX)
+            .min(u64::from(u32::MAX))
+      };
+      let (low, high) = (rva(*targets.start()), rva(*targets.end()));
+      if *targets.end() < self.base {
+         return Vec::new();
+      }
+      let start = self.refs.partition_point(|&r| r >> 32 < low);
+      let end = self.refs.partition_point(|&r| r >> 32 <= high);
+      self.refs[start..end]
          .iter()
-         .map(|&call| {
+         .map(|&r| {
             (
-               self.base + (call & 0xFFFF_FFFF) as usize,
-               self.base + (call >> 32) as usize,
+               self.base + (r & 0xFFFF_FFFF) as usize,
+               self.base + (r >> 32) as usize,
             )
          })
-         .filter(|&(_, callee)| keep(callee))
+         .collect()
+   }
+
+   /// The sites referencing `target`, in address order.
+   fn sites(&self, target: usize) -> impl Iterator<Item = usize> {
+      self
+         .range(target..=target)
+         .into_iter()
+         .map(|(site, _)| site)
+   }
+
+   /// `(site, target)` for every reference whose target passes `keep`.
+   fn matching(&self, keep: impl Fn(usize) -> bool) -> Vec<(usize, usize)> {
+      self
+         .refs
+         .iter()
+         .map(|&r| {
+            (
+               self.base + (r & 0xFFFF_FFFF) as usize,
+               self.base + (r >> 32) as usize,
+            )
+         })
+         .filter(|&(_, target)| keep(target))
          .collect()
    }
 }
@@ -482,40 +536,19 @@ fn rel32_target(image: &Image<'_>, field: usize) -> Option<usize> {
    (field + 4).checked_add_signed(rel as isize)
 }
 
-/// Starts of the `lea reg, [rip + target]` instructions.
-fn lea_refs(image: &Image<'_>, target: usize) -> Vec<usize> {
-   lea_refs_many(image, &[target])
-      .remove(&target)
-      .unwrap_or_default()
+/// Starts of the `lea reg, [rip + target]` instructions, in address order.
+pub(crate) fn lea_refs(image: &Image<'_>, target: usize) -> Vec<usize> {
+   lea_index(image).sites(target).collect()
 }
 
-/// [`lea_refs`] for every target in one pass over `.text`. Each pass is about
-/// a second on `Discord.exe`, so locators batch their string loads.
+/// [`lea_refs`] for every target.
 fn lea_refs_many(image: &Image<'_>, targets: &[usize]) -> HashMap<usize, Vec<usize>> {
-   let mut sorted = targets.to_vec();
-   sorted.sort_unstable();
-   sorted.dedup();
-   let mut found: HashMap<usize, Vec<usize>> = HashMap::new();
-   let (Some(&low), Some(&high)) = (sorted.first(), sorted.last()) else {
-      return found;
-   };
-   for segment in image.segments.iter().filter(|segment| segment.executable) {
-      let bytes = &segment.bytes;
-      for (offset, window) in bytes.windows(7).enumerate() {
-         if window[1] != 0x8D || window[0] & 0xF0 != 0x40 || window[2] & 0xC7 != 0x05 {
-            continue;
-         }
-         let rel = i32::from_le_bytes([window[3], window[4], window[5], window[6]]);
-         let start = segment.addr + offset;
-         if let Some(target) = (start + 7).checked_add_signed(rel as isize)
-            && (low..=high).contains(&target)
-            && sorted.binary_search(&target).is_ok()
-         {
-            found.entry(target).or_default().push(start);
-         }
-      }
-   }
-   found
+   let index = lea_index(image);
+   targets
+      .iter()
+      .map(|&target| (target, index.sites(target).collect::<Vec<_>>()))
+      .filter(|(_, sites)| !sites.is_empty())
+      .collect()
 }
 
 /// `(site, callee)` for every `call rel32` whose callee passes `keep`.
@@ -585,9 +618,15 @@ fn straight_calls(image: &Image<'_>, func: usize) -> Vec<(usize, usize)> {
       return Vec::new();
    };
    let lines = phoenix_hook::x86::disasm(code, func, usize::MAX);
+   let body = func..func + code.len();
+   // A jump inside the function is a branch of it, not where it ends.
    let end = lines
       .iter()
-      .position(|line| line.text == "ret" || line.text.starts_with("jmp "))
+      .position(|line| {
+         line.text == "ret"
+            || line.text.starts_with("jmp ")
+               && line.target.is_none_or(|target| !body.contains(&target))
+      })
       .unwrap_or(lines.len());
    let mut calls = calls_in(
       image,
@@ -629,7 +668,7 @@ fn same_code(image: &Image<'_>, a: usize, b: usize) -> bool {
 }
 
 /// The distinct code targets of calls in `[start, end)`.
-fn callees(image: &Image<'_>, start: usize, end: usize) -> Vec<usize> {
+pub(crate) fn callees(image: &Image<'_>, start: usize, end: usize) -> Vec<usize> {
    let Some(bytes) = image.read(start, end.saturating_sub(start)) else {
       return Vec::new();
    };
@@ -685,7 +724,7 @@ pub struct SettingsLabel {
 
 /// Page 24's label, from its one loader: `lea rax, [name]` with length 7,
 /// then a load of the id. COFF builds keep the two as one literal,
-/// [`SETTINGS_LABEL`]; ELF builds place them apart.
+/// `PhoenixDESKTOP_PHOENIX`; ELF builds place them apart.
 pub fn settings_label_parts(image: &Image<'_>) -> Found<SettingsLabel> {
    const NAME: &[u8] = b"Phoenix";
    let ids = image.find_bytes(b"DESKTOP_PHOENIX");
@@ -706,15 +745,6 @@ pub fn settings_label_parts(image: &Image<'_>) -> Found<SettingsLabel> {
    found.dedup();
    let (name, id) = one("settings label loader", &found)?;
    Ok(SettingsLabel { name, id })
-}
-
-/// The settings page 24 label, [`SETTINGS_LABEL`] as one literal.
-pub fn settings_label(image: &Image<'_>) -> Found<usize> {
-   let label = settings_label_parts(image)?;
-   if label.id != label.name + 7 {
-      return Err("settings label name and id are apart, use settings_label_parts".to_owned());
-   }
-   Ok(label.name)
 }
 
 /// The `cmp <arg2>, 0xf` immediate in `is_page_visible`, which the runtime
@@ -876,13 +906,13 @@ pub fn gpui(image: &Image<'_>) -> Found<Gpui> {
          *firsts.entry(first).or_default() += 1;
       }
    }
-   let div_style_mut = firsts
+   let mut ranked: Vec<(usize, usize)> = firsts
       .into_iter()
-      .filter(|&(first, _)| first != div_new)
-      .max_by_key(|&(_, count)| count)
-      .filter(|&(_, count)| count >= 2)
-      .ok_or("div_style_mut not found in ActionRow's setters")?
-      .0;
+      .filter(|&(first, count)| first != div_new && count >= 2)
+      .map(|(first, count)| (count, first))
+      .collect();
+   ranked.sort_unstable_by(|a, b| b.cmp(a));
+   let div_style_mut = clear_winner("div_style_mut", &ranked, 2)?;
 
    // `SmallVec::<[AnyElement; 2]>::push`, after `lea arg0, [div + 0x40]`.
    let child_calls = calls_in(image, div_child_div, 0x60);
@@ -1058,8 +1088,9 @@ fn debug_offsets(image: &Image<'_>, func: usize, depth: usize) -> HashMap<String
          && let Some(fmt) = fmt.filter(|&fmt| image.is_code(fmt))
       {
          for (inner, offset) in debug_offsets(image, fmt, depth - 1) {
-            out.entry(format!("{name}.{inner}"))
-               .or_insert(field.offset + offset);
+            if let Some(offset) = field.offset.checked_add(offset) {
+               out.entry(format!("{name}.{inner}")).or_insert(offset);
+            }
          }
       }
    }
@@ -1175,7 +1206,7 @@ fn style_offsets(image: &Image<'_>, bytes: usize) -> Found<StyleOffsets> {
    if let Some(end) = single
       .into_iter()
       .chain(lengths)
-      .map(|(at, len)| at + len)
+      .map(|(at, len)| at.saturating_add(len))
       .max()
       && end > bytes
    {
@@ -1981,7 +2012,7 @@ pub fn modal(image: &Image<'_>, div_into_any: usize, div: &DivLayout) -> Found<M
    // `Modal::render` (> 0x4000, frame prologue). ELF builds keep a copy of it
    // per codegen unit, so the most called one is taken.
    let calls = call_index(image);
-   let mut modal_new = None;
+   let mut ranked = Vec::new();
    for addr in literal(image, b"mana-modal") {
       let mut funcs: Vec<(usize, usize)> = leas_of(addr)
          .into_iter()
@@ -1995,17 +2026,16 @@ pub fn modal(image: &Image<'_>, div_into_any: usize, div: &DivLayout) -> Found<M
       if !rendered {
          continue;
       }
-      for (start, _) in funcs
-         .into_iter()
-         .filter(|&(start, end)| end - start <= 0x800)
-      {
-         let sites = calls.sites(start).count();
-         if modal_new.is_none_or(|(most, _)| sites > most) {
-            modal_new = Some((sites, start));
-         }
-      }
+      ranked.extend(
+         funcs
+            .into_iter()
+            .filter(|&(start, end)| end - start <= 0x800)
+            .map(|(start, _)| (calls.sites(start).count(), start)),
+      );
    }
-   let (_, modal_new) = modal_new.ok_or("Modal::new not found via mana-modal")?;
+   ranked.sort_unstable_by(|a, b| b.cmp(a));
+   ranked.dedup();
+   let modal_new = clear_winner("Modal::new", &ranked, 4)?;
 
    let (modal_into_any, modal_size) = find_into_any(image, &leas, MODAL_TYPE)?;
    let (button_into_any, _) = find_into_any(image, &leas, BUTTON_TYPE)?;
@@ -2744,12 +2774,13 @@ pub fn text_fields(image: &Image<'_>) -> Found<TextFields> {
          }
       }
    }
-   let text_get = caller_counts
+   let mut ranked: Vec<(usize, usize)> = caller_counts
       .into_iter()
       .filter(|&(_, count)| count >= 3)
-      .max_by_key(|&(_, count)| count)
-      .ok_or("FieldState text_get not found in RichTextState readers")?
-      .0;
+      .map(|(func, count)| (count, func))
+      .collect();
+   ranked.sort_unstable_by(|a, b| b.cmp(a));
+   let text_get = clear_winner("FieldState text_get", &ranked, 2)?;
 
    let text_get_calls = &c_calls
       .iter()
@@ -2950,10 +2981,16 @@ pub fn text_fields(image: &Image<'_>) -> Found<TextFields> {
 /// `settings-layer`. It draws above `Workspace::render_overlays`, so plugin
 /// modals opened over Settings go inside it.
 pub fn settings_layer(image: &Image<'_>) -> Found<usize> {
+   /// How far before a match a merged string literal can start.
+   const LITERAL_REACH: usize = 512;
    let trap = one("layer-trap- literal", &image.find_bytes(b"layer-trap-"))?;
-   let mut funcs: Vec<usize> = phoenix_hook::x86::literal_loads(image, trap)
+   // Rust merges literals, so code loads the closest literal start before it.
+   let loads = lea_index(image).range(trap.saturating_sub(LITERAL_REACH)..=trap);
+   let start = loads.iter().map(|&(_, target)| target).max();
+   let mut funcs: Vec<usize> = loads
       .into_iter()
-      .map(|load| load.function)
+      .filter(|&(_, target)| Some(target) == start)
+      .filter_map(|(site, _)| Some(image.function_bounds(site)?.0))
       .filter(|&func| {
          image
             .function_bounds(func)
@@ -2964,6 +3001,7 @@ pub fn settings_layer(image: &Image<'_>) -> Found<usize> {
             })
       })
       .collect();
+   funcs.sort_unstable();
    funcs.dedup();
    let func = one("settings layer render", &funcs)?;
    if !prologues(image).frame.at(image, func) {
@@ -3011,10 +3049,9 @@ pub fn media_fetch(image: &Image<'_>) -> Found<usize> {
    }
    let callsite = one("media_fetch callsite", &callsites)?;
 
-   let mut funcs: Vec<usize> = image
-      .rip_refs(callsite..callsite + 1)
+   let mut funcs: Vec<usize> = lea_refs(image, callsite)
       .into_iter()
-      .filter_map(|(field, _)| Some(image.function_bounds(field)?.0))
+      .filter_map(|site| Some(image.function_bounds(site)?.0))
       .collect();
    funcs.sort_unstable();
    funcs.dedup();
@@ -3048,18 +3085,13 @@ pub fn message_json(image: &Image<'_>) -> Found<MessageJson> {
       "48 8B ?? 48 B9 00 00 00 00 00 00 00 80 48 31 C1 48 85 C0 B8 05 00 00 00 48 0F 48 C1 48 83 \
        F8 03",
    );
-   let mut names = image.find_bytes(b"mention_everyone");
-   names.sort_unstable();
-   let mut funcs = Vec::new();
-   for segment in image.segments.iter().filter(|segment| segment.executable) {
-      for (at, target) in rip_leas(&segment.bytes, segment.addr) {
-         if names.binary_search(&target).is_ok()
-            && let Some(bounds) = image.function_bounds(at)
-         {
-            funcs.push(bounds);
-         }
-      }
-   }
+   let leas = lea_index(image);
+   let mut funcs: Vec<(usize, usize)> = image
+      .find_bytes(b"mention_everyone")
+      .into_iter()
+      .flat_map(|name| leas.sites(name))
+      .filter_map(|site| image.function_bounds(site))
+      .collect();
    funcs.sort_unstable();
    funcs.dedup();
    let starts = |s: &[u8], prefix: &[u8]| s.starts_with(prefix);

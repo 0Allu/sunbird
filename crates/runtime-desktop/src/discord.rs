@@ -376,9 +376,12 @@ unsafe extern "C" fn owned_bytes_drop(data: *mut (), _ptr: *const u8, _len: usiz
 /// Locates Desktop Phoenix's `ReqwestTransport` and `SendFuture` vtable slots
 /// and installs request/response interception.
 pub fn install(image: &Image<'static>) {
-   let Some(found) = DesktopHttpTransport::locate(image) else {
-      log::warn!("discord desktop: HTTP transport vtable not found");
-      return;
+   let found = match DesktopHttpTransport::locate(image) {
+      Ok(found) => found,
+      Err(err) => {
+         log::warn!("discord desktop: HTTP transport: {err}");
+         return;
+      },
    };
    // Discord's API client calls `send` directly rather than through the
    // vtable, so `send` is hooked in place and the detour calls the trampoline.
