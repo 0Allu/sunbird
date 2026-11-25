@@ -262,7 +262,15 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
          report("media fetch", desktop::media_fetch(image).map(at));
       },
       Machine::Aarch64 if macho => {
-         report("guest bridge", ios::bridge(image).map(at));
+         report(
+            "guest bridge",
+            ios::bridge(image).map(|bridge| {
+               format!(
+                  "{:#x}, vtable {:#x}, dispatch at +{:#x}",
+                  bridge.call, bridge.vtable, bridge.dispatch
+               )
+            }),
+         );
          report("host table", ios::host_table(image).map(at));
          report(
             "access gate",

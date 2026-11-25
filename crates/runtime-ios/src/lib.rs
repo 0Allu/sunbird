@@ -92,12 +92,12 @@ impl Platform for Ios {
 
    fn gateway(&self, _store: *mut c_void) {
       bridge::tap();
-      bridge::arm();
    }
 
    fn started(&self, _first_run: bool, _plugins: &[String]) {
       if let Some(state) = phoenix_runtime::state() {
          bridge::locate_host_table(&state.image);
+         bridge::arm(&state.image);
       }
    }
 
