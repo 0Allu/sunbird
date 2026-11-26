@@ -351,6 +351,7 @@ fn add_decoration<'js>(
    };
    decorations.set_active_count(count);
    decorations.clear_cache();
+   accessories::invalidate_discord_windows();
 
    let remove = Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
       if let Some(registry) = ctx.userdata::<Desktop<'js>>() {
@@ -434,6 +435,13 @@ fn add_message_accessory<'js>(
       })?,
    )?;
    Ok(remove)
+}
+
+/// The author of `message_id` in Phoenix's message store.
+pub fn cached_author(message_id: u64) -> Option<u64> {
+   let json = cached_message_and_me(0, message_id).0?;
+   let message = serde_json::from_str::<serde_json::Value>(&json).ok()?;
+   message.get("author")?.get("id")?.as_str()?.parse().ok()
 }
 
 fn cached_message_and_me(channel_id: u64, message_id: u64) -> (Option<String>, Option<String>) {

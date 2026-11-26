@@ -75,8 +75,17 @@ let selfId: string | undefined;
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 const isStatus = (v: unknown): v is Status => v === "online" || v === "idle" || v === "dnd";
-const svg = (d: Platform) =>
-  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${PLATFORMS[d].box ?? "0 0 24 24"}"><path d="${PLATFORMS[d].icon}"/></svg>`;
+// The shape fills `size` of the icon's box, its top `top` of the way down, so
+// header icons (a 24px box) can sit level with the name.
+type Place = { size: number; top: number };
+const svg = (d: Platform, place: Place = { size: 1, top: 0 }) => {
+  const [x, y, w, h] = (PLATFORMS[d].box ?? "0 0 24 24").split(" ").map(Number);
+  const view = h / place.size;
+  const box = `${x - (view - w) / 2} ${y - place.top * view} ${view} ${view}`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${box}"><path d="${PLATFORMS[d].icon}"/></svg>`;
+};
+// 20px of the 24px box, raised from the middle.
+const HEADER: Place = { size: 20 / 24, top: 0.04 };
 const devices = (p: Presence) => (Object.keys(PLATFORMS) as Platform[]).filter((d) => p.platforms[d]);
 const key = (p?: Presence) => (p ? devices(p).map((d) => d + p.platforms[d]).join() : "");
 
@@ -149,7 +158,7 @@ function shown(userId: string, bot: boolean) {
 const removers: Partial<Record<"members" | "headers", Phoenix.Remover>> = {};
 const update = (userId?: string) => Object.values(removers).forEach((r) => r.update?.(userId));
 
-function render({ userId }: { userId: string }) {
+const render = (place?: Place) => ({ userId }: { userId: string }) => {
   if (drawn.size > 2_000) drawn.clear();
   drawn.add(userId);
   const p = shown(userId, bots.has(userId));
@@ -157,16 +166,16 @@ function render({ userId }: { userId: string }) {
   return {
     text: devices(p).map((d) => PLATFORMS[d].emoji).join(" "),
     color: STATUS[p.status].color,
-    icons: devices(p).map((d) => ({ svg: svg(d), color: STATUS[p.platforms[d]!].color })),
+    icons: devices(p).map((d) => ({ svg: svg(d, place), color: STATUS[p.platforms[d]!].color })),
   };
-}
+};
 
 function sync(where: "members" | "headers", enabled: boolean) {
   const current = removers[where];
   if (enabled && !current) {
     // Runtimes before these decorations have no such calls.
     const add = where === "members" ? phoenix.ui.addMemberDecoration : phoenix.ui.addMessageHeaderDecoration;
-    removers[where] = add?.({ render });
+    removers[where] = add?.({ render: render(where === "headers" ? HEADER : undefined) });
   } else if (!enabled && current) {
     current();
     delete removers[where];

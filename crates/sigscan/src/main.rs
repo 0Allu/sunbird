@@ -388,27 +388,6 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
                   )
                }),
          );
-         let author = json
-            .as_ref()
-            .map_err(|_| "needs the message json".to_owned())
-            .and_then(|json| desktop::message_author(image, json.to_value));
-         report(
-            "message author",
-            author
-               .as_ref()
-               .map(|found| format!("{found:x?}"))
-               .map_err(Clone::clone),
-         );
-         report(
-            "row author",
-            row.as_ref()
-               .map_err(|_| "needs the message row".to_owned())
-               .and_then(|row| {
-                  let author = author.as_ref().map_err(|_| "needs the message author")?;
-                  desktop::row_author(image, row, author)
-               })
-               .map(|field| format!("+{field:#x}")),
-         );
       },
       Machine::Aarch64 if macho => {
          report(

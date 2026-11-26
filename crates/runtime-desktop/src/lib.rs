@@ -112,9 +112,12 @@ pub fn prepare() -> Result<(), Error> {
    staff::prepare(&image);
    settings::install(&image);
    modal::install(&image);
+   // Before accessories hooks `MessageRow::render`, whose prologue the header
+   // locators check.
+   let header = headers::locate(&image);
    accessories::install(&image);
    members::install(&image);
-   headers::install(&image);
+   headers::install(&image, header);
    icons::install(&image);
    context_menu::install(&image);
    message::install(&image);

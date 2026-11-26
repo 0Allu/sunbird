@@ -6,19 +6,17 @@
 //! [`desktop::message_header`]; those calls are pointed at [`name_detour`],
 //! which adds the decorations' icons as Discord's node SVG leaves right after.
 //!
-//! The header only knows the message id. `MessageRow::render`, hooked in
-//! [`crate::accessories`], hands the row it renders through [`enter`], and the
-//! row holds the message with its author.
+//! The header only knows the message id, so a worker looks its author up in
+//! Phoenix's message store once per message.
 
 use std::{
-   cell::Cell,
+   collections::HashMap,
    ffi::c_void,
    sync::{
+      LazyLock,
       OnceLock,
-      atomic::{
-         AtomicBool,
-         Ordering,
-      },
+      RwLock,
+      mpsc,
    },
 };
 
@@ -26,7 +24,10 @@ use phoenix_hook::image::Image;
 use phoenix_sigs::desktop;
 
 use crate::{
-   accessories,
+   accessories::{
+      self,
+      invalidate_discord_windows,
+   },
    members::{
       HEADERS,
       MIN_SNOWFLAKE,
@@ -43,56 +44,26 @@ type PushSvgFn = unsafe extern "C" fn(*mut c_void, *mut u8) -> *mut c_void;
 /// Room for the leaf, which is 0x38 bytes on builds so far; a larger one turns
 /// the feature off.
 const LEAF_WORDS: usize = 32;
-/// The name's line height in Discord's headers, in px.
-const ICON_SIZE: f32 = 16.0;
+/// The box each header icon gets, in px. Plugins place the shape inside it
+/// with their SVG's viewBox.
+const ICON_SIZE: f32 = 24.0;
 /// One detour per header builder.
-const SITES: usize = 2;
+pub(crate) const SITES: usize = 2;
 
-struct Symbols {
+pub(crate) struct Symbols {
    child_node: ChildNodeFn,
    svg_new:    SvgNewFn,
    push_svg:   PushSvgFn,
    svg_color:  usize,
    /// `[rbp+slot]` holds the message id at each site.
    slots:      [usize; SITES],
-   /// `MessageRow` keeps the author's `Arc<User>` here.
-   row_author: usize,
-   /// The `User` in the `Arc`, and its id in the `User`.
-   user_id:    usize,
 }
 
 static SYMBOLS: OnceLock<Symbols> = OnceLock::new();
-static READY: AtomicBool = AtomicBool::new(false);
 
-thread_local! {
-   /// The message id and `MessageRow` being rendered on this thread.
-   static ROW: Cell<(u64, usize)> = const { Cell::new((0, 0)) };
-}
-
-/// Marks `row` as rendering on this thread, returning what it replaces for
-/// [`leave`].
-pub fn enter(row: *const u8, message_id: u64) -> (u64, usize) {
-   if !READY.load(Ordering::Relaxed) {
-      return (0, 0);
-   }
-   ROW.try_with(|cell| cell.replace((message_id, row as usize)))
-      .unwrap_or_default()
-}
-
-pub fn leave(outer: (u64, usize)) {
-   if READY.load(Ordering::Relaxed) {
-      let _ = ROW.try_with(|cell| cell.set(outer));
-   }
-}
-
-/// Locates the header builders and hooks their name calls, from `DllMain`,
-/// after [`accessories::install`].
-pub fn install(image: &Image<'static>) {
-   if !accessories::row_hooked() {
-      log::warn!("desktop headers: MessageRow is not hooked, skipping");
-      return;
-   }
-   let (symbols, sites) = match locate(image) {
+/// Hooks the header builders' name calls, from `DllMain`.
+pub fn install(image: &Image<'static>, found: Result<(Symbols, [usize; SITES]), String>) {
+   let (symbols, sites) = match found {
       Ok(found) => found,
       Err(err) => {
          log::warn!("desktop headers: {err}, skipping");
@@ -119,7 +90,6 @@ pub fn install(image: &Image<'static>) {
          )
       } {
          Ok(target) if target == child_node => {
-            READY.store(true, Ordering::Release);
             log::info!("desktop headers: hooked the header name @ {site:#x}");
          },
          Ok(target) => log::warn!("desktop headers: {site:#x} called {target:#x}"),
@@ -128,14 +98,12 @@ pub fn install(image: &Image<'static>) {
    }
 }
 
-/// The symbols, and the call adding the name in each header builder.
-fn locate(image: &Image<'_>) -> Result<(Symbols, [usize; SITES]), String> {
+/// The symbols, and the call adding the name in each header builder. Runs
+/// before any hook goes in.
+pub fn locate(image: &Image<'_>) -> Result<(Symbols, [usize; SITES]), String> {
    let row = desktop::message_row(image)?;
    let body = desktop::message_body(image, row.func)?;
    let header = desktop::message_header(image, body.func)?;
-   let json = desktop::message_json(image)?;
-   let author = desktop::message_author(image, json.to_value)?;
-   let row_author = desktop::row_author(image, &row, &author)?;
    let [first, second] = header.sites.as_slice() else {
       return Err(format!("{} header name calls", header.sites.len()));
    };
@@ -153,57 +121,69 @@ fn locate(image: &Image<'_>) -> Result<(Symbols, [usize; SITES]), String> {
          push_svg: std::mem::transmute::<usize, PushSvgFn>(svg.push),
          svg_color: svg.color,
          slots: [first.slot, second.slot],
-         row_author,
-         user_id: author.arc_data + author.user_id,
       }
    };
    Ok((symbols, [first.site, second.site]))
 }
 
-/// The author of the message `frame`'s header is for, when it is the row this
-/// thread is rendering.
-///
-/// # Safety
-///
-/// `frame` is the header builder's `rbp` at a decoded site.
-unsafe fn author(symbols: &Symbols, site: usize, frame: *const u8) -> Option<u64> {
-   let (current, row) = ROW.try_with(Cell::get).ok()?;
-   let slot = *symbols.slots.get(site)?;
-   // SAFETY: the builder keeps the message id at `[rbp+slot]` at the call.
-   let message_id = unsafe { frame.add(slot).cast::<u64>().read_unaligned() };
-   if row == 0 || message_id != current || message_id < MIN_SNOWFLAKE {
-      return None;
+/// Message id to author id, `0` while the lookup is pending or found nothing.
+static AUTHORS: LazyLock<RwLock<HashMap<u64, u64>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
+static RESOLVER: OnceLock<mpsc::Sender<u64>> = OnceLock::new();
+const MAX_AUTHORS: usize = 8192;
+
+/// The author of `message_id`, queueing the store lookup when unknown.
+fn author_of(message_id: u64) -> Option<u64> {
+   if let Some(&author) = AUTHORS.read().ok()?.get(&message_id) {
+      return (author != 0).then_some(author);
    }
-   // SAFETY: `row` is the live `MessageRow` whose render called this header,
-   // which keeps an `Arc<User>` at the decoded offset.
-   let user = unsafe {
-      (row as *const u8)
-         .add(symbols.row_author)
-         .cast::<usize>()
-         .read_unaligned()
-   };
-   if user == 0 || user % 8 != 0 {
-      return None;
+   let queue = AUTHORS.write().is_ok_and(|mut map| {
+      if map.len() > MAX_AUTHORS {
+         map.clear();
+      }
+      map.insert(message_id, 0).is_none()
+   });
+   if queue {
+      let _ = resolver().send(message_id);
    }
-   // SAFETY: a live `Arc<User>`, its id at the decoded offset.
-   let id = unsafe {
-      (user as *const u8)
-         .add(symbols.user_id)
-         .cast::<u64>()
-         .read_unaligned()
-   };
-   (id >= MIN_SNOWFLAKE).then_some(id)
+   None
 }
 
-/// The icons the header decorations drew for the author at `frame`, queueing
-/// them when unknown.
+fn resolver() -> &'static mpsc::Sender<u64> {
+   RESOLVER.get_or_init(|| {
+      let (tx, rx) = mpsc::channel::<u64>();
+      let _ = std::thread::Builder::new()
+         .name("sunbird-authors".to_owned())
+         .spawn(move || {
+            while let Ok(message_id) = rx.recv() {
+               let Some(author) = crate::js::ui::cached_author(message_id) else {
+                  continue;
+               };
+               if let Ok(mut map) = AUTHORS.write() {
+                  map.insert(message_id, author);
+               }
+               // Queues the decorations, or redraws with ones already known.
+               if HEADERS.lookup(author).is_some() {
+                  invalidate_discord_windows();
+               }
+            }
+         });
+      tx
+   })
+}
+
+/// The icons the header decorations drew for the author of the message at
+/// `frame`, queueing what is unknown.
 fn icons(symbols: &Symbols, site: usize, frame: *const u8) -> Vec<(&'static str, Option<u32>)> {
-   // SAFETY: forwarded from the detour, whose `frame` is the builder's `rbp`.
-   let Some(user_id) = (unsafe { author(symbols, site, frame) }) else {
+   let Some(&slot) = symbols.slots.get(site) else {
       return Vec::new();
    };
-   HEADERS
-      .lookup(user_id)
+   // SAFETY: the builder keeps the message id at `[rbp+slot]` at the call.
+   let message_id = unsafe { frame.add(slot).cast::<u64>().read_unaligned() };
+   if message_id < MIN_SNOWFLAKE {
+      return Vec::new();
+   }
+   author_of(message_id)
+      .and_then(|author| HEADERS.lookup(author))
       .unwrap_or_default()
       .into_iter()
       .flat_map(|item| item.icons)
