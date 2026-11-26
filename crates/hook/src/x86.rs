@@ -1,12 +1,12 @@
-//! x86-64 disassembly, and on Windows live entry hooks that report a call's
-//! argument registers, for the debug tools.
+//! x86-64 disassembly, and on Windows and Linux live entry hooks that report a
+//! call's argument registers, for the debug tools.
 
 #[cfg(any(windows, target_os = "linux"))]
 use std::ffi::c_void;
 use std::ops::Range;
 
 pub use iced_x86::Register;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 use iced_x86::{
    BlockEncoder,
    BlockEncoderOptions,
@@ -22,14 +22,14 @@ use iced_x86::{
 };
 
 use crate::image::Image;
-#[cfg(windows)]
+#[cfg(windows)] use crate::image::win32;
+#[cfg(any(windows, target_os = "linux"))]
 use crate::{
    Error,
    image::{
       ABSOLUTE_JUMP_LEN,
       absolute_jump,
       alloc_exec,
-      win32,
    },
 };
 
@@ -1029,24 +1029,49 @@ impl Regs {
    }
 }
 
+/// The registers at a hooked function's entry, as the stub saved them. `rax`
+/// carries the vector register count into variadic functions.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+pub struct Regs {
+   pub r9:  u64,
+   pub r8:  u64,
+   pub rcx: u64,
+   pub rdx: u64,
+   pub rsi: u64,
+   pub rdi: u64,
+   pub rax: u64,
+   /// The caller's return address.
+   pub ret: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl Regs {
+   /// The first four integer arguments, `rdi`, `rsi`, `rdx` and `rcx`.
+   #[must_use]
+   pub const fn args(&self) -> [u64; 4] {
+      [self.rdi, self.rsi, self.rdx, self.rcx]
+   }
+}
+
 /// Called on every entry of an observed function, on the caller's thread,
 /// with the context passed to [`observe`]. It must not unwind.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub type Observer = extern "C" fn(ctx: usize, regs: &Regs);
 
 /// A function [`observe`] redirects through its stub.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub struct Observed {
    addr:     usize,
    original: [u8; ABSOLUTE_JUMP_LEN],
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 const STUB_PAGE: usize = 0x1000;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 const TRAMPOLINE_AT: usize = 0x100;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 impl Observed {
    #[must_use]
    pub const fn addr(&self) -> usize {
@@ -1077,7 +1102,7 @@ impl Observed {
 ///
 /// `addr` starts a function of `image` that nothing branches back into within
 /// its first 14 bytes, and no thread is paused inside those bytes.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub unsafe fn observe(
    image: &Image<'static>,
    addr: usize,
@@ -1155,7 +1180,7 @@ pub unsafe fn observe(
 
 /// Writes 14 bytes at a function entry other threads may be calling: first a
 /// `jmp $` that parks them, then the tail, then the head.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 unsafe fn hot_patch(
    image: &Image<'static>,
    addr: usize,
@@ -1168,6 +1193,28 @@ unsafe fn hot_patch(
       image.write_code(addr + 2, &bytes[2..])?;
       image.write_code(addr, &bytes[..2])
    }
+}
+
+/// A fresh executable page within reach of RIP-relative operands at `addr`.
+/// The kernel takes the address as a hint, so a page it put elsewhere goes
+/// back.
+#[cfg(target_os = "linux")]
+fn alloc_near(addr: usize) -> Option<usize> {
+   const STEP: usize = 0x1_0000;
+   const REACH: usize = 0x7000_0000;
+   let home = addr & !(STEP - 1);
+   (1..REACH / STEP)
+      .flat_map(|step| [home.checked_sub(step * STEP), home.checked_add(step * STEP)])
+      .flatten()
+      .find_map(|candidate| {
+         let got = alloc_exec(candidate, STUB_PAGE)?;
+         if got.abs_diff(addr) < REACH {
+            return Some(got);
+         }
+         // SAFETY: the fresh mapping nothing else uses.
+         unsafe { libc::munmap(got as *mut c_void, STUB_PAGE) };
+         None
+      })
 }
 
 /// A fresh executable page within reach of RIP-relative operands at `addr`.
@@ -1185,6 +1232,36 @@ fn alloc_near(addr: usize) -> Option<usize> {
       })
       .flatten()
       .find_map(|candidate| alloc_exec(candidate, STUB_PAGE))
+}
+
+/// Saves the argument registers and `rax`, calls `observer(ctx, &regs)` on a
+/// 16-byte aligned stack, restores them and jumps to `trampoline`.
+#[cfg(target_os = "linux")]
+fn stub(observer: Observer, ctx: usize, trampoline: usize) -> Vec<u8> {
+   // push rax, rdi, rsi, rdx, rcx, r8, r9; sub rsp, 0x80
+   let mut code = vec![
+      0x50, 0x57, 0x56, 0x52, 0x51, 0x41, 0x50, 0x41, 0x51, 0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00,
+   ];
+   for xmm in 0..8u8 {
+      // movdqu [rsp + xmm * 16], xmmN
+      code.extend([0xF3, 0x0F, 0x7F, 0x44 | xmm << 3, 0x24, xmm * 16]);
+   }
+   code.extend([0x48, 0x8D, 0xB4, 0x24, 0x80, 0x00, 0x00, 0x00]); // lea rsi, [rsp+0x80]
+   code.extend([0x48, 0xBF]); // mov rdi, imm64
+   code.extend(ctx.to_le_bytes());
+   code.extend([0x48, 0xB8]); // mov rax, imm64
+   code.extend((observer as usize).to_le_bytes());
+   code.extend([0xFF, 0xD0]); // call rax
+   for xmm in 0..8u8 {
+      // movdqu xmmN, [rsp + xmm * 16]
+      code.extend([0xF3, 0x0F, 0x6F, 0x44 | xmm << 3, 0x24, xmm * 16]);
+   }
+   // add rsp, 0x80; pop r9, r8, rcx, rdx, rsi, rdi, rax
+   code.extend([
+      0x48, 0x81, 0xC4, 0x80, 0x00, 0x00, 0x00, 0x41, 0x59, 0x41, 0x58, 0x59, 0x5A, 0x5E, 0x5F, 0x58,
+   ]);
+   code.extend(absolute_jump(trampoline));
+   code
 }
 
 /// Saves the argument registers, calls `observer(ctx, &regs)` on a 16-byte
