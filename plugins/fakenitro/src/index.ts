@@ -1,5 +1,5 @@
 // @description Sends custom and animated emojis as links, and renders fake emojis, stickers, and GIFs as real ones
-// @version 0.4.1
+// @version 0.4.2
 // @author mantikafasi
 
 const { gateway } = phoenix;
@@ -109,11 +109,21 @@ const addStickers = (list: Phoenix.Sticker[] | undefined) => {
 // Phoenix loads guilds lazily and never hands READY to plugins: guilds and their
 // emojis/stickers live in its cache. Ids in keys are zero-padded to 20 digits.
 const unpad = (id: string) => id.replace(/^0+/, "");
+// Desktop writes servers to its cache for minutes after READY_SUPPLEMENTAL
+// (26 of 100 at first on build 2233), so reads repeat for the 5 minutes after
+// it, and after that while each read finds more servers.
+const SETTLE_MS = 300_000;
+let settleBy = Date.now() + SETTLE_MS;
+let loadedGuilds = -1;
+let loadedAt = 0;
+let growing = true;
 const load = async () => {
   const guilds = await phoenix.stores.sql<{ g: string; e: string | null; s: string | null }>(
     "SELECT k AS g, json_extract(CAST(v AS TEXT), '$.emojis') AS e," +
       " json_extract(CAST(v AS TEXT), '$.stickers') AS s FROM guilds",
   );
+  growing = guilds.length > loadedGuilds;
+  loadedGuilds = guilds.length;
   for (const { g, e, s } of guilds) {
     if (e) addEmojis(unpad(g), JSON.parse(e));
     if (s) addStickers(JSON.parse(s));
@@ -129,11 +139,18 @@ const load = async () => {
       .catch(() => []);
     for (const { g, c } of channels) for (const id of c.split(",")) channelGuild.set(unpad(id), unpad(g));
   }
-  phoenix.log.info(
+  if (growing) phoenix.log.info(
     `${emojis.size} emojis, ${stickers.size} stickers in ${guilds.length} servers, ${channelGuild.size} channels`,
   );
 };
-const reload = () => load().catch((err) => phoenix.log.warn(`reading the cache: ${err}`));
+const reload = () => {
+  loadedAt = Date.now();
+  return load().catch((err) => phoenix.log.warn(`reading the cache: ${err}`));
+};
+const refresh = () => {
+  const now = Date.now();
+  if ((growing || now < settleBy) && now - loadedAt > 15_000) reload();
+};
 reload();
 
 if (gateway.guildCreate) {
@@ -162,6 +179,8 @@ const readTier = () =>
       // Desktop switches accounts without reloading plugins.
       if (currentUserId !== null && currentUserId !== user.id) {
         for (const map of [emojis, byName, stickers, channelGuild, picked] as Map<string, unknown>[]) map.clear();
+        loadedGuilds = -1;
+        settleBy = Date.now() + SETTLE_MS;
         reload();
       }
       currentUserId = user.id;
@@ -172,6 +191,7 @@ readTier();
 // ponytail: a tier bought or lost mid-session shows on the next sync.
 if (gateway.readySupplemental) {
   phoenix.on(gateway.readySupplemental, () => {
+    settleBy = Date.now() + SETTLE_MS;
     readTier();
     reload();
   });
@@ -236,6 +256,7 @@ phoenix.messages.onEmojiPick((id, ctx) => {
 // send after an account switch still uses the last one's.
 phoenix.messages.onSend((text, ctx) => {
   readTier();
+  refresh();
   if (!text.includes(":")) return;
   const result = rewrite(text, guildOf(ctx));
   return result === text ? undefined : result;
@@ -430,6 +451,7 @@ const transformMessage = (message: TransformableMessage | null | undefined): boo
 for (const event of [gateway.messageCreate, gateway.messageUpdate]) {
   phoenix.hook(event, {
     before(message) {
+      refresh();
       transformMessage(message);
     },
   });
