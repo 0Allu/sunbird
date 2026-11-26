@@ -309,6 +309,9 @@ fn open_access_gate(image: &Image<'static>) {
       Ok(()) => log::info!("access gate: open"),
       Err(err) => log::error!("access gate: {err}"),
    }
+   if X86_CODE {
+      open_notification_gate(image);
+   }
 }
 
 /// Makes macOS's `client_access::enforced` answer false. `push_access` asks it
@@ -368,6 +371,29 @@ fn route_direct_calls(image: &Image<'static>) {
       "desktop: {hooked} of {} gateway handlers hooked for direct calls",
       handlers.len()
    );
+}
+
+/// Makes the `surfaces` notification provider decline message alerts, which it
+/// claims and returns empty on a gated client, so the planner's fallback builds
+/// the real one. The x86 counterpart of macOS's [`close_enforced`].
+fn open_notification_gate(image: &Image<'static>) {
+   let decline: &[u8] = match phoenix_hook::x86::Abi::of(image) {
+      phoenix_hook::x86::Abi::SysV => &[0x31, 0xC0, 0xC3],
+      phoenix_hook::x86::Abi::Win64 => &[0x31, 0xC0, 0x90],
+   };
+   let gate = match phoenix_sigs::desktop::notification_gate(image) {
+      Ok(gate) => gate,
+      Err(err) => {
+         log::warn!("notification gate: {err}, leaving it");
+         return;
+      },
+   };
+   // SAFETY: Discord's own code, written from `DllMain` or the constructor
+   // before it runs.
+   match unsafe { image.write_code(gate, decline) } {
+      Ok(()) => log::info!("notification gate: open"),
+      Err(err) => log::error!("notification gate: {err}"),
+   }
 }
 
 impl Platform for Desktop {
