@@ -192,10 +192,26 @@ pub struct SettingField {
    pub kind:    FieldKind,
 }
 
-/// The one-line field modal: a plugin URL to install, or a setting.
+/// A one-line field a plugin asks for, like `phoenix.ui.addProfileTab`'s
+/// input block.
+#[derive(Clone)]
+pub struct Prompt {
+   pub title:     String,
+   pub on_submit: Arc<dyn Fn(String) + Send + Sync>,
+}
+
+/// What the one-line field modal's text goes to.
+#[derive(Clone)]
+enum FieldTarget {
+   Install,
+   Setting(SettingField),
+   Prompt(Prompt),
+}
+
+/// The one-line field modal: a plugin URL to install, a setting, or a prompt.
 #[derive(Clone)]
 struct InstallUrlModal {
-   setting:      Option<SettingField>,
+   target:       FieldTarget,
    pending_init: Option<String>,
    status:       Option<(String, bool)>,
    busy:         bool,
@@ -207,9 +223,11 @@ enum ActiveModal {
       id:   u64,
       spec: PageModalSpec,
    },
+   /// A choose dialog, over the page it returns to when answered.
    Choice {
       spec:   PageModalSpec,
       choice: Arc<Choice>,
+      under:  Option<(u64, PageModalSpec)>,
    },
    CodeEditor(CodeEditorModal),
    InstallUrl(InstallUrlModal),
@@ -678,17 +696,33 @@ unsafe extern "C" fn modal_button_callback(
             }
          },
          ModalAction::SubmitInstallUrl => {
-            let setting = match ACTIVE_MODAL
+            let target = match ACTIVE_MODAL
                .lock()
                .unwrap_or_else(PoisonError::into_inner)
                .as_ref()
             {
-               Some(ActiveModal::InstallUrl(inst)) => inst.setting.clone(),
+               Some(ActiveModal::InstallUrl(inst)) => inst.target.clone(),
                _ => return,
             };
-            if let Some(field) = setting {
-               save_setting(app, &field);
-               return;
+            match target {
+               FieldTarget::Install => {},
+               FieldTarget::Setting(field) => {
+                  save_setting(app, &field);
+                  return;
+               },
+               FieldTarget::Prompt(prompt) => {
+                  let Some(raw) = read_url_field(app) else {
+                     set_install_status("Could not read the text field", true, false);
+                     return;
+                  };
+                  let text = raw.trim().to_owned();
+                  if text.is_empty() {
+                     return;
+                  }
+                  close_active();
+                  std::thread::spawn(move || (prompt.on_submit)(text));
+                  return;
+               },
             }
             let Some(raw) = read_url_field(app) else {
                set_install_status("Could not read URL field", true, false);
@@ -754,6 +788,15 @@ pub fn open_choice(
       return choice;
    }
    resolve_pending_choice();
+   let under = match ACTIVE_MODAL
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .as_ref()
+   {
+      Some(ActiveModal::Page { id, spec }) => Some((*id, spec.clone())),
+      Some(ActiveModal::Choice { under, .. }) => under.clone(),
+      _ => None,
+   };
 
    let mut sections = Vec::with_capacity(2);
    if let Some(body) = body {
@@ -780,8 +823,9 @@ pub fn open_choice(
       });
    }
    set_active(Some(ActiveModal::Choice {
-      spec:   PageModalSpec { title, sections },
+      spec: PageModalSpec { title, sections },
       choice: Arc::clone(&choice),
+      under,
    }));
    choice
 }
@@ -813,8 +857,8 @@ fn finish_choice(choice: &Arc<Choice>, index: i32) {
    let current = matches!(guard.as_ref(), Some(ActiveModal::Choice { choice: active, .. }) if Arc::ptr_eq(active, choice));
    choice.pick(index);
    if current {
-      *guard = None;
-      MODAL_OPEN.store(false, Ordering::Release);
+      *guard = uncover(guard.take());
+      MODAL_OPEN.store(guard.is_some(), Ordering::Release);
    }
    drop(guard);
    if current {
@@ -828,6 +872,37 @@ fn resolve_pending_choice() {
    if let Some(ActiveModal::Choice { choice, .. }) = guard.as_ref() {
       choice.pick(-1);
    }
+}
+
+/// The page a closing modal leaves on screen.
+fn uncover(closing: Option<ActiveModal>) -> Option<ActiveModal> {
+   match closing {
+      Some(ActiveModal::Choice {
+         under: Some((id, spec)),
+         ..
+      }) => Some(ActiveModal::Page { id, spec }),
+      _ => None,
+   }
+}
+
+/// Swaps the sections of page `id`, on screen or under a choose dialog.
+/// False when that page is gone.
+pub fn replace_page(id: u64, spec: PageModalSpec) -> bool {
+   let mut guard = ACTIVE_MODAL.lock().unwrap_or_else(PoisonError::into_inner);
+   let slot = match guard.as_mut() {
+      Some(
+         ActiveModal::Page { id: cur, spec }
+         | ActiveModal::Choice {
+            under: Some((cur, spec)),
+            ..
+         },
+      ) if *cur == id => spec,
+      _ => return false,
+   };
+   *slot = spec;
+   drop(guard);
+   force_redraw();
+   true
 }
 
 /// Closes an open page modal if its id still matches `id`.
@@ -855,7 +930,7 @@ pub fn open_code_editor(plugin: String, initial_source: String) {
 pub fn open_install_url() {
    resolve_pending_choice();
    set_active(Some(ActiveModal::InstallUrl(InstallUrlModal {
-      setting:      None,
+      target:       FieldTarget::Install,
       pending_init: Some(String::new()),
       status:       None,
       busy:         false,
@@ -867,7 +942,19 @@ pub fn open_setting_editor(field: SettingField) {
    resolve_pending_choice();
    set_active(Some(ActiveModal::InstallUrl(InstallUrlModal {
       pending_init: Some(field.initial.clone()),
-      setting:      Some(field),
+      target:       FieldTarget::Setting(field),
+      status:       None,
+      busy:         false,
+   })));
+}
+
+/// Opens the one-line field for `prompt`, which gets the text when it is
+/// submitted.
+pub fn open_prompt(prompt: Prompt) {
+   resolve_pending_choice();
+   set_active(Some(ActiveModal::InstallUrl(InstallUrlModal {
+      target:       FieldTarget::Prompt(prompt),
+      pending_init: Some(String::new()),
       status:       None,
       busy:         false,
    })));
@@ -903,7 +990,11 @@ fn save_setting(app: *mut c_void, field: &SettingField) {
 
 fn close_active() {
    resolve_pending_choice();
-   set_active(None);
+   let mut guard = ACTIVE_MODAL.lock().unwrap_or_else(PoisonError::into_inner);
+   *guard = uncover(guard.take());
+   MODAL_OPEN.store(guard.is_some(), Ordering::Release);
+   drop(guard);
+   force_redraw();
 }
 
 fn set_editor_status(msg: &str, is_error: bool) {
@@ -1663,7 +1754,7 @@ fn build_overlay(window: *mut c_void, app: *mut c_void) -> Option<RawDiv> {
          },
          ActiveModal::InstallUrl(inst) => {
             Snapshot::InstallUrl(InstallUrlModal {
-               setting:      inst.setting.clone(),
+               target:       inst.target.clone(),
                pending_init: inst.pending_init.take(),
                status:       inst.status.clone(),
                busy:         inst.busy,
@@ -1786,25 +1877,20 @@ fn build_overlay(window: *mut c_void, app: *mut c_void) -> Option<RawDiv> {
          )
       },
       Snapshot::InstallUrl(inst) => {
-         let lines = inst
-            .setting
-            .as_ref()
-            .is_some_and(|field| field.kind == FieldKind::Lines);
+         let lines =
+            matches!(&inst.target, FieldTarget::Setting(field) if field.kind == FieldKind::Lines);
          let mut body = gpui::v_stack(10.0);
          if let Some(ref mut b) = body {
             gpui::style_div(b, |s| s.length(s.at.size[0], W_FULL));
             if let Some(tf) = FIELD_SYM.get()
                && let Some(ent) = unsafe {
-                  ensure_field_entity(
-                     app,
-                     window,
-                     lines,
-                     match &inst.setting {
-                        None => "https://example.com/plugin.js",
-                        Some(field) if field.kind == FieldKind::Secret => "Leave empty to clear",
-                        Some(_) => "",
+                  ensure_field_entity(app, window, lines, match &inst.target {
+                     FieldTarget::Install => "https://example.com/plugin.js",
+                     FieldTarget::Setting(field) if field.kind == FieldKind::Secret => {
+                        "Leave empty to clear"
                      },
-                  )
+                     FieldTarget::Setting(_) | FieldTarget::Prompt(_) => "",
+                  })
                }
             {
                if let Some(init) = &inst.pending_init {
@@ -1862,10 +1948,10 @@ fn build_overlay(window: *mut c_void, app: *mut c_void) -> Option<RawDiv> {
          if !inst.busy
             && let Some(btn) = make_modal_button(
                "sunbird-url-install",
-               if inst.setting.is_some() {
-                  "Save"
-               } else {
-                  "Install Plugin"
+               match inst.target {
+                  FieldTarget::Install => "Install Plugin",
+                  FieldTarget::Setting(_) => "Save",
+                  FieldTarget::Prompt(_) => "Send",
                },
                BtnVariant::Primary,
                BtnSize::Medium,
@@ -1874,9 +1960,10 @@ fn build_overlay(window: *mut c_void, app: *mut c_void) -> Option<RawDiv> {
          {
             footer.push(btn);
          }
-         let (title, subtitle) = match &inst.setting {
-            Some(field) => (field.title.clone(), Some(field.plugin.clone())),
-            None => {
+         let (title, subtitle) = match &inst.target {
+            FieldTarget::Setting(field) => (field.title.clone(), Some(field.plugin.clone())),
+            FieldTarget::Prompt(prompt) => (prompt.title.clone(), None),
+            FieldTarget::Install => {
                (
                   "Install Plugin from URL".to_owned(),
                   Some("Paste an https:// URL pointing to a Sunbird .js plugin bundle.".to_owned()),

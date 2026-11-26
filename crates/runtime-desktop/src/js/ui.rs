@@ -6,6 +6,8 @@
 //! no-op removers so cross-platform plugins load cleanly without throwing.
 
 use std::{
+   cell::RefCell,
+   rc::Rc,
    sync::{
       Arc,
       atomic::{
@@ -39,7 +41,10 @@ use rquickjs::{
    Function,
    Object,
    Value,
-   function::Opt,
+   function::{
+      Opt,
+      This,
+   },
 };
 
 use crate::{
@@ -60,6 +65,7 @@ use crate::{
       ModalButton,
       ModalSection,
       PageModalSpec,
+      Prompt,
    },
 };
 
@@ -564,53 +570,58 @@ pub fn invoke_message_action(engine: &Engine, action_id: u64, message_id: u64, c
    });
 }
 
+static NEXT_ACTION: AtomicU64 = AtomicU64::new(1);
+
+fn register_action<'js>(ctx: &Ctx<'js>, action: DesktopAction<'js>) -> rquickjs::Result<()> {
+   let registry = ctx
+      .userdata::<Desktop<'js>>()
+      .ok_or_else(|| Exception::throw_internal(ctx, "no registry"))?;
+   let mut list = registry.actions.borrow_mut();
+   list.push(action);
+   context_menu::sync_actions(list.iter().map(DesktopAction::meta).collect());
+   Ok(())
+}
+
+fn remove_action(ctx: &Ctx<'_>, id: u64) {
+   if let Some(registry) = ctx.userdata::<Desktop<'_>>() {
+      let mut list = registry.actions.borrow_mut();
+      list.retain(|entry| entry.id != id);
+      context_menu::sync_actions(list.iter().map(DesktopAction::meta).collect());
+   }
+}
+
 fn add_message_action<'js>(
    ctx: &Ctx<'js>,
    plugin: &str,
    options: &Object<'js>,
 ) -> rquickjs::Result<Function<'js>> {
-   static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
    let label = options.get::<_, String>("label")?;
    let icon = options.get::<_, Option<String>>("icon")?;
    let danger = options.get::<_, Option<bool>>("danger")?.unwrap_or(false);
    let priority = options.get::<_, Option<i32>>("priority")?.unwrap_or(0);
    let visible = options.get::<_, Option<Function<'js>>>("visible")?;
    let on_press = options.get::<_, Function<'js>>("onPress")?;
-   let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-
-   let meta = {
-      let registry = ctx
-         .userdata::<Desktop<'js>>()
-         .ok_or_else(|| Exception::throw_internal(ctx, "no registry"))?;
-      let mut list = registry.actions.borrow_mut();
-      list.push(DesktopAction {
-         id,
-         plugin: plugin.to_owned(),
-         label,
-         icon,
-         danger,
-         priority,
-         visible,
-         on_press,
-      });
-      list.iter().map(DesktopAction::meta).collect()
-   };
-   context_menu::sync_actions(meta);
-
-   let remove = Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
-      if let Some(registry) = ctx.userdata::<Desktop<'js>>() {
-         let mut list = registry.actions.borrow_mut();
-         list.retain(|entry| entry.id != id);
-         let meta = list.iter().map(DesktopAction::meta).collect();
-         context_menu::sync_actions(meta);
-      }
+   let id = NEXT_ACTION.fetch_add(1, Ordering::Relaxed);
+   register_action(ctx, DesktopAction {
+      id,
+      plugin: plugin.to_owned(),
+      label,
+      icon,
+      danger,
+      priority,
+      visible,
+      on_press,
    })?;
+   let remove = Function::new(ctx.clone(), move |ctx: Ctx<'js>| remove_action(&ctx, id))?;
    remove.set("update", Function::new(ctx.clone(), || {})?)?;
    Ok(remove)
 }
 
-fn invoke_page_button(button_id: u64) {
+static NEXT_PAGE: AtomicU64 = AtomicU64::new(1);
+static NEXT_BTN: AtomicU64 = AtomicU64::new(1);
+
+/// Runs a page button's callback, with the submitted text for an input.
+fn invoke_page_button(button_id: u64, text: Option<String>) {
    let Some(engine) = phoenix_runtime::engine() else {
       return;
    };
@@ -622,7 +633,7 @@ fn invoke_page_button(button_id: u64) {
       }) else {
          return;
       };
-      if let Err(err) = on_press.call::<_, Value<'_>>(()).catch(&ctx) {
+      if let Err(err) = on_press.call::<_, Value<'_>>((text,)).catch(&ctx) {
          log::error!("[{plugin}] openPage button onPress: {err}");
       }
    });
@@ -633,9 +644,6 @@ fn open_page<'js>(
    plugin: &str,
    options: &Object<'js>,
 ) -> rquickjs::Result<Object<'js>> {
-   static NEXT_PAGE: AtomicU64 = AtomicU64::new(1);
-   static NEXT_BTN: AtomicU64 = AtomicU64::new(1);
-
    let page_id = NEXT_PAGE.fetch_add(1, Ordering::Relaxed);
    let title = options
       .get::<_, Option<String>>("title")?
@@ -671,7 +679,7 @@ fn open_page<'js>(
                      buttons.push(ModalButton {
                         label,
                         danger,
-                        on_press: Arc::new(move || invoke_page_button(btn_id)),
+                        on_press: Arc::new(move || invoke_page_button(btn_id, None)),
                      });
                   }
                }
@@ -727,6 +735,352 @@ fn open_page<'js>(
    Ok(obj)
 }
 
+/// A `phoenix.ui.addProfileTab`. Desktop has no profile tabs, so it is a
+/// message action that shows the tab for the message's author in a page.
+struct ProfileTab<'js> {
+   plugin: String,
+   title:  String,
+   render: Function<'js>,
+   shown:  RefCell<Option<ShownTab>>,
+}
+
+/// The page a [`ProfileTab`] is on, the key its page buttons are under, and
+/// whose profile it shows.
+#[derive(Clone)]
+struct ShownTab {
+   page:  u64,
+   owner: u64,
+   user:  String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TabShow {
+   Open,
+   /// Redraws the page on screen, and leaves a closed one closed.
+   Refresh,
+}
+
+fn add_profile_tab<'js>(
+   ctx: &Ctx<'js>,
+   plugin: &str,
+   options: &Object<'js>,
+) -> rquickjs::Result<Function<'js>> {
+   let tab = Rc::new(ProfileTab {
+      plugin: plugin.to_owned(),
+      title:  options.get("title")?,
+      render: options.get("render")?,
+      shown:  RefCell::new(None),
+   });
+   let priority = options.get::<_, Option<i32>>("priority")?.unwrap_or(0);
+   let id = NEXT_ACTION.fetch_add(1, Ordering::Relaxed);
+
+   let opener = Rc::clone(&tab);
+   let on_press = Function::new(ctx.clone(), move |ctx: Ctx<'js>, arg: Object<'js>| {
+      let author = arg
+         .get::<_, Option<Object<'js>>>("message")
+         .ok()
+         .flatten()
+         .and_then(|message| message.get::<_, Object<'js>>("author").ok())
+         .and_then(|author| author.get::<_, String>("id").ok());
+      match author {
+         Some(user) => show_tab(&ctx, &opener, user, TabShow::Open),
+         None => phoenix_ui_desktop::toast("This message has no author to show"),
+      }
+   })?;
+   register_action(ctx, DesktopAction {
+      id,
+      plugin: plugin.to_owned(),
+      label: tab.title.clone(),
+      icon: None,
+      danger: false,
+      priority,
+      visible: None,
+      on_press,
+   })?;
+
+   let closer = Rc::clone(&tab);
+   let remove = Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
+      remove_action(&ctx, id);
+      if let Some(shown) = closer.shown.borrow_mut().take() {
+         modal::close_page(shown.page);
+         drop_page_buttons(&ctx, shown.owner);
+      }
+   })?;
+   remove.set(
+      "update",
+      Function::new(ctx.clone(), move |ctx: Ctx<'js>, user: Opt<String>| {
+         let Some(shown) = tab.shown.borrow().clone() else {
+            return;
+         };
+         if user.0.is_none_or(|user| user == shown.user) {
+            show_tab(&ctx, &tab, shown.user, TabShow::Refresh);
+         }
+      })?,
+   )?;
+   Ok(remove)
+}
+
+fn show_tab<'js>(ctx: &Ctx<'js>, tab: &Rc<ProfileTab<'js>>, user: String, how: TabShow) {
+   let rendered = Object::new(ctx.clone())
+      .and_then(|arg| {
+         arg.set("userId", user.as_str())?;
+         tab.render.call::<_, Value<'js>>((arg,))
+      })
+      .catch(ctx);
+   let blocks = match rendered {
+      Ok(blocks) => blocks,
+      Err(err) => {
+         log::error!("[{}] addProfileTab render: {err}", tab.plugin);
+         return;
+      },
+   };
+   let Some(promise) = blocks.as_promise() else {
+      present_tab(ctx, tab, user, how, &blocks);
+      return;
+   };
+   let owner = Rc::clone(tab);
+   let plugin = tab.plugin.clone();
+   let settled = Function::new(ctx.clone(), move |ctx: Ctx<'js>, blocks: Value<'js>| {
+      present_tab(&ctx, &owner, user.clone(), how, &blocks);
+   })
+   .and_then(|on_resolve| {
+      let on_reject = Function::new(ctx.clone(), move |err: Value<'js>| {
+         log::error!("[{plugin}] addProfileTab render: {err:?}");
+      })?;
+      promise
+         .then()?
+         .call::<_, Value<'js>>((This(promise.clone()), on_resolve, on_reject))
+   });
+   if let Err(err) = settled.catch(ctx) {
+      log::error!("[{}] addProfileTab render: {err}", tab.plugin);
+   }
+}
+
+fn present_tab<'js>(
+   ctx: &Ctx<'js>,
+   tab: &Rc<ProfileTab<'js>>,
+   user: String,
+   how: TabShow,
+   blocks: &Value<'js>,
+) {
+   let owner = NEXT_PAGE.fetch_add(1, Ordering::Relaxed);
+   let mut buttons = Vec::new();
+   let sections = match profile_sections(ctx, tab, &user, blocks, &mut buttons) {
+      Ok(sections) => sections,
+      Err(err) => {
+         log::error!("[{}] addProfileTab blocks: {}", tab.plugin, err);
+         return;
+      },
+   };
+   let spec = PageModalSpec {
+      title: tab.title.clone(),
+      sections,
+   };
+
+   let previous = tab.shown.borrow().clone();
+   let page = match (how, &previous) {
+      (TabShow::Refresh, Some(shown)) if shown.user == user => {
+         if !modal::replace_page(shown.page, spec) {
+            drop_page_buttons(ctx, shown.owner);
+            *tab.shown.borrow_mut() = None;
+            return;
+         }
+         shown.page
+      },
+      (TabShow::Refresh, _) => return,
+      (TabShow::Open, _) => modal::open_page(spec),
+   };
+   if let Some(shown) = previous {
+      drop_page_buttons(ctx, shown.owner);
+   }
+   if let Some(registry) = ctx.userdata::<Desktop<'js>>() {
+      let mut map = registry.page_buttons.borrow_mut();
+      for (btn_id, func) in buttons {
+         map.insert(btn_id, (owner, tab.plugin.clone(), func));
+      }
+   }
+   *tab.shown.borrow_mut() = Some(ShownTab { page, owner, user });
+}
+
+/// A page button that runs `func`.
+fn page_button<'js>(
+   label: String,
+   danger: bool,
+   func: Function<'js>,
+   buttons: &mut Vec<(u64, Function<'js>)>,
+) -> ModalButton {
+   let btn_id = NEXT_BTN.fetch_add(1, Ordering::Relaxed);
+   buttons.push((btn_id, func));
+   ModalButton {
+      label,
+      danger,
+      on_press: Arc::new(move || invoke_page_button(btn_id, None)),
+   }
+}
+
+/// A `ProfileAction` list as page buttons. Actions without `onPress` are
+/// labels, returned joined.
+fn profile_actions<'js>(
+   list: Option<&Array<'js>>,
+   out: &mut Vec<ModalButton>,
+   buttons: &mut Vec<(u64, Function<'js>)>,
+) -> rquickjs::Result<Vec<String>> {
+   let mut labels = Vec::new();
+   for action in list.into_iter().flat_map(Array::iter::<Object<'js>>) {
+      let action = action?;
+      let label = action.get::<_, String>("label")?;
+      match action.get::<_, Option<Function<'js>>>("onPress")? {
+         Some(func) => {
+            let danger = action.get::<_, Option<bool>>("danger")?.unwrap_or(false);
+            out.push(page_button(label, danger, func, buttons));
+         },
+         None => labels.push(label),
+      }
+   }
+   Ok(labels)
+}
+
+/// Lays out a profile tab's blocks as page sections. An entry is a text
+/// section and a row of its actions, and an input is a button that asks for
+/// the text, then opens the tab again.
+#[expect(clippy::too_many_lines, reason = "one arm per block type")]
+fn profile_sections<'js>(
+   ctx: &Ctx<'js>,
+   tab: &Rc<ProfileTab<'js>>,
+   user: &str,
+   blocks: &Value<'js>,
+   buttons: &mut Vec<(u64, Function<'js>)>,
+) -> rquickjs::Result<Vec<ModalSection>> {
+   let Some(blocks) = blocks.as_array() else {
+      return Err(Exception::throw_type(
+         ctx,
+         "render must return an array of blocks",
+      ));
+   };
+   let mut sections = Vec::new();
+   for block in blocks.iter::<Object<'js>>() {
+      let block = block?;
+      let kind = block.get::<_, String>("type")?;
+      match kind.as_str() {
+         "text" => {
+            sections.push(ModalSection::Text {
+               title: block.get("title")?,
+               text:  block.get("text")?,
+            });
+         },
+         "entry" => {
+            let mut row = Vec::new();
+            let side = profile_actions(
+               block.get::<_, Option<Array<'js>>>("side")?.as_ref(),
+               &mut row,
+               buttons,
+            )?;
+            let actions = profile_actions(
+               block.get::<_, Option<Array<'js>>>("actions")?.as_ref(),
+               &mut row,
+               buttons,
+            )?;
+            if let Some(func) = block.get::<_, Option<Function<'js>>>("onLongPress")? {
+               row.push(page_button("More".to_owned(), false, func, buttons));
+            }
+            let mut title = block.get::<_, String>("title")?;
+            for part in block
+               .get::<_, Option<String>>("subtitle")?
+               .into_iter()
+               .chain(side)
+               .chain(actions)
+            {
+               title.push_str(" · ");
+               title.push_str(&part);
+            }
+            let mut text = block.get::<_, String>("text")?;
+            for image in block
+               .get::<_, Option<Vec<String>>>("images")?
+               .into_iter()
+               .flatten()
+            {
+               if !text.is_empty() {
+                  text.push('\n');
+               }
+               text.push_str(&image);
+            }
+            sections.push(ModalSection::Text {
+               title: Some(title),
+               text,
+            });
+            if !row.is_empty() {
+               sections.push(ModalSection::Buttons {
+                  title:   None,
+                  buttons: row,
+               });
+            }
+         },
+         "input" => {
+            let on_submit = block.get::<_, Function<'js>>("onSubmit")?;
+            let label = block
+               .get::<_, Option<String>>("placeholder")?
+               .unwrap_or_else(|| "Write".to_owned());
+            let reopen = Rc::clone(tab);
+            let user = user.to_owned();
+            let submit = Function::new(ctx.clone(), move |ctx: Ctx<'js>, text: String| {
+               if let Err(err) = on_submit.call::<_, Value<'js>>((text,)).catch(&ctx) {
+                  log::error!("[{}] addProfileTab onSubmit: {err}", reopen.plugin);
+               }
+               show_tab(&ctx, &reopen, user.clone(), TabShow::Open);
+            })?;
+            let btn_id = NEXT_BTN.fetch_add(1, Ordering::Relaxed);
+            buttons.push((btn_id, submit));
+            let title = label.clone();
+            sections.push(ModalSection::Buttons {
+               title:   None,
+               buttons: vec![ModalButton {
+                  label,
+                  danger: false,
+                  on_press: Arc::new(move || {
+                     modal::open_prompt(Prompt {
+                        title:     title.clone(),
+                        on_submit: Arc::new(move |text| invoke_page_button(btn_id, Some(text))),
+                     });
+                  }),
+               }],
+            });
+         },
+         "button" => {
+            let label = block.get::<_, String>("label")?;
+            let danger = block.get::<_, Option<bool>>("danger")?.unwrap_or(false);
+            let func = block.get::<_, Function<'js>>("onPress")?;
+            sections.push(ModalSection::Buttons {
+               title:   None,
+               buttons: vec![page_button(label, danger, func, buttons)],
+            });
+         },
+         "buttons" => {
+            let mut row = Vec::new();
+            profile_actions(
+               block.get::<_, Option<Array<'js>>>("buttons")?.as_ref(),
+               &mut row,
+               buttons,
+            )?;
+            sections.push(ModalSection::Buttons {
+               title:   None,
+               buttons: row,
+            });
+         },
+         _ => {},
+      }
+   }
+   Ok(sections)
+}
+
+fn drop_page_buttons(ctx: &Ctx<'_>, owner: u64) {
+   if let Some(registry) = ctx.userdata::<Desktop<'_>>() {
+      registry
+         .page_buttons
+         .borrow_mut()
+         .retain(|_, (key, ..)| *key != owner);
+   }
+}
+
 /// Wires desktop `phoenix.ui`, `phoenix.messages.onSend` / `onEmojiPick`, and
 /// `phoenix.commands` onto the plugin's API objects.
 pub fn desktop_patch_api<'js>(
@@ -766,6 +1120,7 @@ pub fn desktop_patch_api<'js>(
    api.set("ui", desktop_ui_object(ctx, plugin)?)
 }
 
+#[expect(clippy::too_many_lines, reason = "one binding per `phoenix.ui` function")]
 pub fn desktop_ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
    let ui = Object::new(ctx.clone())?;
    ui.set(
@@ -827,13 +1182,20 @@ pub fn desktop_ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<
       })?,
    )?;
 
+   let tab_owner = plugin.to_owned();
+   ui.set(
+      "addProfileTab",
+      Function::new(ctx.clone(), move |ctx: Ctx<'js>, options: Object<'js>| {
+         add_profile_tab(&ctx, &tab_owner, &options)
+      })?,
+   )?;
+
    // Graceful no-op shims for remaining mobile UI-op surfaces so cross-platform
    // plugins load without throwing on desktop.
    for slot_fn in [
       "addHeaderButton",
       "addComposerButton",
       "addProfileSection",
-      "addProfileTab",
       "hide",
       "patchProps",
       "onEvent",
