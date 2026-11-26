@@ -1329,43 +1329,31 @@ fn inline_row(b: &Builder, pieces: &[Piece], font_px: f32) -> RawDiv {
    row
 }
 
-/// Lays `pieces` over the right end of a rendered row `RawAnyElement`, in
-/// place: `top` pixels from its top, or centered vertically without one. The
-/// row keeps its own layout, so nothing in it moves or truncates differently.
-pub fn wrap_with_overlay(sret: *mut RawAnyElement, lines: &[Piece], top: Option<f32>) -> bool {
-   const POSITION_ABSOLUTE: u8 = 1;
-
+/// Adds `pieces` as one more child of a `Div` Discord built by value, like the
+/// member name's row right after the name.
+pub fn append_pieces(div: *mut c_void, pieces: &[Piece]) -> bool {
    let Some(sym) = SYMBOLS.get() else {
       return false;
    };
-   if sym.div_push_any.is_none() || sym.str_into_any.is_none() {
+   let Some(push) = sym.div_push_any else {
+      return false;
+   };
+   if div.is_null() || sym.str_into_any.is_none() {
       return false;
    }
    let b = Builder { sym };
-   // SAFETY: takes the rendered `AnyElement` out of `sret`, which gets the
-   // replacement before returning.
-   let mut orig = unsafe { ptr::read(sret) };
-   let mut outer = b.raw_div();
-   b.style_div(&mut outer, |s| s.length(s.at.size[0], W_FULL));
-   if !b.push_any(&mut outer, &mut orig) {
-      // SAFETY: puts the original element back.
-      unsafe { ptr::write(sret, orig) };
-      return false;
+   let row = inline_row(&b, pieces, 13.0);
+   let mut any = MaybeUninit::<RawAnyElement>::uninit();
+   b.write_any(row, any.as_mut_ptr());
+   // SAFETY: `div` is a live `Div` that `Div::child` just returned, whose
+   // children sit at the decoded offset; `push` moves the element into them.
+   unsafe {
+      let children = div
+         .cast::<u8>()
+         .add(sym.layout.div.children)
+         .cast::<c_void>();
+      push(children, any.as_mut_ptr());
    }
-   let mut overlay = inline_row(&b, lines, 13.0);
-   b.style_div(&mut overlay, |s| {
-      let [top_at, right_at, bottom_at, _] = s.at.inset;
-      s.set(s.at.position, POSITION_ABSOLUTE);
-      s.length(right_at, gpui_px(10.0));
-      if let Some(top) = top {
-         s.length(top_at, gpui_px(top));
-      } else {
-         s.length(top_at, gpui_px(0.0));
-         s.length(bottom_at, gpui_px(0.0));
-      }
-   });
-   outer = b.push_div(outer, overlay);
-   b.write_any(outer, sret);
    true
 }
 

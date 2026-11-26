@@ -1592,17 +1592,115 @@ fn hex_disp(text: &str) -> Option<usize> {
    usize::from_str_radix(text.strip_suffix('h')?, 16).ok()
 }
 
-/// The member list's row renderer, and where its list item keeps the user id.
+/// The member list's row renderer, and where its name joins the row.
 pub struct MemberRow {
-   pub func:           usize,
-   /// The item's enum tag for a member row, the others being section headers.
-   pub member_tag:     u8,
-   /// Where a member item keeps the user id.
-   pub user_id_offset: usize,
+   pub func: usize,
+   pub name: MemberName,
 }
 
+/// The `call rel32`s adding a member's name to its row, one per branch.
+///
+/// They are `Div::child` by value, `(sret, div, &name) -> Div`. The row's
+/// function keeps its closure's environment pointer in a frame slot, and the
+/// environment a pointer to the member's user id.
+#[derive(Clone, Debug)]
+pub struct MemberName {
+   pub sites:        Vec<usize>,
+   /// `[rbp+closure_slot]` holds the environment pointer at the calls.
+   pub closure_slot: usize,
+   /// `[environment+env]` holds the pointer to the user id.
+   pub env:          usize,
+}
+
+/// `mov r9, register`, how a call island hands a caller's register to a
+/// three-argument detour as its fourth.
+#[must_use]
+pub fn mov_r9_from(register: Register) -> [u8; 3] {
+   let (number, ext) = reg(register);
+   [0x49 | ext << 2, 0x89, 0xC0 | number << 3 | 1]
+}
+
+/// The member row hands its name to a closure building the name's row: the
+/// closure's environment holds the name and, at `+env`, a pointer to the id
+/// slot (`lea rax, [slot]; mov [r8+env], rax`). The closure's function saves
+/// the environment pointer (`mov [rbp+closure_slot], r8`) and adds the name
+/// with calls taking a freshly copied `AnyElement` in `r8`.
+fn member_name(
+   image: &Image<'_>,
+   lines: &[phoenix_hook::x86::Line],
+   slot: &str,
+) -> Option<MemberName> {
+   let (store, env) = lines.iter().enumerate().find_map(|(at, line)| {
+      let field = line.text.strip_prefix("mov [r8+")?.strip_suffix("],rax")?;
+      (lines.get(at.checked_sub(1)?)?.text == format!("lea rax,{slot}"))
+         .then_some((at, hex_disp(field)?))
+   })?;
+   let closure = lines[store..].iter().take(40).find_map(|line| {
+      line
+         .text
+         .starts_with("call ")
+         .then_some(line.target)
+         .flatten()
+   })?;
+   let code = function_code(image, closure, "member name row").ok()?;
+   let body = phoenix_hook::x86::disasm(code, closure, usize::MAX);
+   let closure_slot = body
+      .iter()
+      .take(16)
+      .find_map(|line| hex_disp(line.text.strip_prefix("mov [rbp+")?.strip_suffix("],r8")?))?;
+   // The element copied into `r8`: `movups xmm0, [source]` then `movaps [r8],
+   // xmm0` and `movaps [r8+10h], xmm1`.
+   let copied_from = |at: usize| {
+      let args = &body[at.saturating_sub(12)..at];
+      let copies = args.iter().any(|line| line.text == "movaps [r8],xmm0")
+         && args.iter().any(|line| line.text == "movaps [r8+10h],xmm1");
+      copies
+         .then(|| {
+            args
+               .iter()
+               .rev()
+               .find_map(|line| line.text.strip_prefix("movups xmm0,"))
+         })
+         .flatten()
+   };
+   let calls = body
+      .iter()
+      .enumerate()
+      .filter(|(_, line)| line.text.starts_with("call "))
+      .filter_map(|(at, line)| Some((line.addr, line.target?, line.len, copied_from(at)?)))
+      .collect::<Vec<_>>();
+   let child = calls.first()?.1;
+   // Styled names are first wrapped with the name taken straight from the
+   // environment; the row then gets the name from the copy the function keeps
+   // in its frame, in every branch. Only those calls add to the row itself.
+   let mut frame_sources = calls
+      .iter()
+      .filter(|call| call.1 == child)
+      .filter_map(|call| call.3.starts_with("[rbp+").then_some(call.3))
+      .collect::<Vec<_>>();
+   frame_sources.sort_unstable();
+   let source = frame_sources
+      .chunk_by(|a, b| a == b)
+      .max_by_key(|run| run.len())?
+      .first()
+      .copied()?;
+   let sites = calls
+      .iter()
+      .filter(|&&(site, target, len, from)| {
+         target == child && from == source && len == 5 && image.read(site, 1) == Some(&[0xE8])
+      })
+      .map(|&(site, ..)| site)
+      .collect::<Vec<_>>();
+   (!sites.is_empty()).then_some(MemberName {
+      sites,
+      closure_slot,
+      env,
+   })
+}
+
+
 /// The function formatting `member-{}-{}`, a member row's element id from the
-/// member's user id. It takes `(sret, &item, ..)` and returns an `AnyElement`.
+/// member's user id, and the calls in it adding the member's name to its row.
 pub fn member_row(image: &Image<'_>) -> Found<MemberRow> {
    if !matches!(Abi::of(image), Abi::Win64) {
       return Err("the member row is only decoded on Win64".to_owned());
@@ -1633,28 +1731,9 @@ pub fn member_row(image: &Image<'_>) -> Found<MemberRow> {
       .find_map(|line| line.text.strip_prefix("mov r9,"))
       .filter(|slot| slot.starts_with("[rbp+"))
       .ok_or("member row id slot not found")?;
-   // That slot is filled once, from the item: `mov rax, [rax+offset]` after the
-   // item's tag is compared.
-   let store = lines
-      .iter()
-      .position(|line| line.text == format!("mov {slot},rax"))
-      .ok_or("member row id store not found")?;
-   let user_id_offset = lines[store.saturating_sub(1)]
-      .text
-      .strip_prefix("mov rax,[rax+")
-      .and_then(|rest| hex_disp(rest.strip_suffix(']')?))
-      .filter(|&offset| offset < 0x100)
-      .ok_or("member row id load not found")?;
-   let member_tag = lines[store.saturating_sub(8)..store]
-      .iter()
-      .rev()
-      .find_map(|line| line.text.strip_prefix("cmp eax,"))
-      .and_then(|tag| tag.parse::<u8>().ok())
-      .ok_or("member row tag check not found")?;
    Ok(MemberRow {
       func,
-      member_tag,
-      user_id_offset,
+      name: member_name(image, &lines, slot).ok_or("member name row not decoded")?,
    })
 }
 

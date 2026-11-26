@@ -237,10 +237,11 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
             "member row",
             desktop::member_row(image).map(|row| {
                format!(
-                  "{} (tag {}, user id +{:#x})",
+                  "{} (name calls {:x?}, frame +{:#x}, env +{:#x})",
                   at(row.func),
-                  row.member_tag,
-                  row.user_id_offset
+                  row.name.sites,
+                  row.name.closure_slot,
+                  row.name.env
                )
             }),
          );

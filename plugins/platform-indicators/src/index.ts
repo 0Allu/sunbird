@@ -1,7 +1,7 @@
 // @description Shows which devices people are online from: desktop, mobile, web or console
 // @version 1.0.0
 // @author yuax
-// @warning Profile badges load their icons from cdn.jsdelivr.net (Twemoji)
+// @warning On Android and iOS, profile badges load their icons from cdn.jsdelivr.net (Twemoji)
 
 type Status = "online" | "idle" | "dnd";
 type Platform = "desktop" | "mobile" | "web" | "embedded" | "vr";
@@ -183,7 +183,11 @@ phoenix.discord.onResponse({ method: "GET", pathPrefix: "/users/", pathSuffix: "
   if (!p) return;
   const badges = devices(p).map((d) => {
     const status = p.platforms[d]!;
-    const uri = `https://cdn.jsdelivr.net/gh/jdecked/twemoji@15.1.0/assets/72x72/${PLATFORMS[d].twemoji}.png`;
+    // Desktop draws the icon in the status color, as web/plugins/platform-indicators serves it;
+    // mobile gets Twemoji.
+    const uri = phoenix.ui.addMemberDecoration
+      ? `https://assets.sunbird.tools/plugins/platform-indicators/${d}-${status}.svg`
+      : `https://cdn.jsdelivr.net/gh/jdecked/twemoji@15.1.0/assets/72x72/${PLATFORMS[d].twemoji}.png`;
     return {
       id: badgeId(`platform-indicators:${d}:${status}`),
       description: `${PLATFORMS[d].label} · ${STATUS[status].label}`,
