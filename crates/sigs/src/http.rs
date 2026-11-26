@@ -29,9 +29,14 @@ pub const HEADER_MAP_SIZE: usize = 0x60;
 pub const BODY_SIZE: usize = 0x38;
 /// The size of a `String`, and of an `http::Method`.
 pub const STRING_SIZE: usize = 0x18;
-/// The size of the `Poll<Result<Response>>` the runtime reads `poll`'s result
-/// as.
-pub const POLL_RESULT_SIZE: usize = 0x80;
+/// The size of `poll`'s result while it carries the body in a `Vec`.
+pub const BUFFERED_RESULT_SIZE: usize = 0x80;
+/// The size of `poll`'s result once it carries the body as a stream, on
+/// build 2233.
+pub const STREAMED_RESULT_SIZE: usize = 0x1C8;
+/// Where a streamed result keeps its body's kind, then the boxed
+/// `dyn Stream`.
+pub const STREAMED_BODY: usize = 0x178;
 
 /// Where `send`'s request keeps the fields the runtime reads, after the
 /// `http::HeaderMap` it starts with. Builds move them as fields are added.
@@ -43,6 +48,18 @@ pub struct RequestLayout {
    pub url:    usize,
    /// The `http::Method`.
    pub method: usize,
+}
+
+/// How `poll` hands back a response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseLayout {
+   /// The whole body in a `Vec`, in a [`BUFFERED_RESULT_SIZE`] result.
+   Buffered,
+   /// The body as a stream at [`STREAMED_BODY`], read after `poll` returns.
+   Streamed {
+      /// The `u16` status.
+      status: usize,
+   },
 }
 
 /// Located vtable slots and host allocator entry points for Desktop Phoenix's
@@ -60,9 +77,8 @@ pub struct DesktopHttpTransport {
    pub poll_slots:   Vec<usize>,
    /// Original `SendFuture::poll` function address.
    pub poll_fn:      usize,
-   /// How many bytes of its result `poll` writes, as far as it can be
-   /// followed. A build past [`POLL_RESULT_SIZE`] changed the response.
-   pub poll_result:  usize,
+   /// How `poll`'s result holds the response.
+   pub response:     Found<ResponseLayout>,
    /// Host's `__rust_alloc(size, align)` if located.
    pub host_alloc:   Option<usize>,
    /// Host's `__rust_dealloc(ptr, size, align)` if located.
@@ -105,15 +121,11 @@ impl DesktopHttpTransport {
       //    poll_vtable)`, from `send_fn` itself or a small helper it calls.
       let (poll_fn, poll_vtable, box_future) = find_poll_vtable(image, send_fn, send_end)?;
       let mut poll_slots = find_vtable_method_slots(image, poll_fn, 0x100..=0x4000);
-      // shortcut: a result pointer `poll` keeps on the stack is not
-      // followed, so this only catches a build that writes past the layout
-      // through a register, as the one from 2026-11-23 does.
-      let poll_result = image
+      let response = image
          .function_bounds(poll_fn)
          .and_then(|(start, end)| image.read(start, end - start).map(|code| (start, code)))
-         .map_or(0, |(start, code)| {
-            phoenix_hook::x86::arg_use(abi, 0, code, start).extent
-         });
+         .ok_or_else(|| "SendFuture::poll is unreadable".to_owned())
+         .and_then(|(start, code)| response_layout(abi, code, start));
       let direct_slot = poll_vtable + 24;
       if !poll_slots.contains(&direct_slot) {
          poll_slots.push(direct_slot);
@@ -141,7 +153,7 @@ impl DesktopHttpTransport {
          request,
          poll_slots,
          poll_fn,
-         poll_result,
+         response,
          host_alloc,
          host_dealloc,
       })
@@ -193,6 +205,31 @@ fn request_layout(abi: Abi, code: &[u8], ip: usize) -> Found<RequestLayout> {
       ));
    }
    Ok(RequestLayout { body, url, method })
+}
+
+/// Reads how `poll` at `ip` returns its response from the stores through its
+/// result pointer.
+fn response_layout(abi: Abi, code: &[u8], ip: usize) -> Found<ResponseLayout> {
+   // shortcut: a result pointer `poll` keeps on the stack is not followed, so
+   // this only catches a build that writes past the layout through a register,
+   // as 2233 does.
+   let extent = phoenix_hook::x86::arg_use(abi, 0, code, ip).extent;
+   if extent <= BUFFERED_RESULT_SIZE {
+      return Ok(ResponseLayout::Buffered);
+   }
+   let stores = phoenix_hook::x86::sret_stores(abi, code, ip);
+   let body = [STREAMED_BODY, STREAMED_BODY + 8, STREAMED_BODY + 16]
+      .iter()
+      .all(|&offset| stores.contains(&(offset, 8)));
+   let statuses = stores
+      .iter()
+      .filter(|&&(_, size)| size == 2)
+      .map(|&(offset, _)| offset)
+      .collect::<Vec<_>>();
+   match statuses[..] {
+      [status] if body && extent <= STREAMED_RESULT_SIZE => Ok(ResponseLayout::Streamed { status }),
+      _ => Err(format!("poll writes {extent:#x} bytes of its result")),
+   }
 }
 
 /// Finds all `.rdata` vtable method-0 slots (`vtable + 24`) holding `method_fn`

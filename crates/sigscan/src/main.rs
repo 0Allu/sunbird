@@ -140,9 +140,10 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
          report(
             "http responses",
             http.as_ref().map_err(Clone::clone).and_then(|http| {
-               (http.poll_result <= phoenix_sigs::http::POLL_RESULT_SIZE)
-                  .then(|| at(http.poll_fn))
-                  .ok_or_else(|| format!("poll writes {:#x} bytes of its result", http.poll_result))
+               http
+                  .response
+                  .clone()
+                  .map(|layout| format!("{} {layout:x?}", at(http.poll_fn)))
             }),
          );
          report(

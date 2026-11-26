@@ -166,7 +166,7 @@ struct RawVec {
 struct RawBytesVtable {
    clone:     unsafe extern "C" fn(&AtomicPtr<()>, *const u8, usize) -> RawBytes,
    to_vec:    unsafe extern "C" fn(*mut (), *const u8, usize) -> RawVec,
-   to_mut:    unsafe extern "C" fn(*mut (), *const u8, usize) -> RawBytes,
+   to_mut:    unsafe extern "C" fn(*mut (), *const u8, usize) -> RawBytesMut,
    is_unique: unsafe extern "C" fn(&AtomicPtr<()>) -> bool,
    drop:      unsafe extern "C" fn(*mut (), *const u8, usize),
 }
@@ -252,15 +252,15 @@ struct RawPinnedFuture {
 }
 
 #[repr(C)]
-struct RawPollResult {
+struct BufferedResult {
    headers: [u64; 12],
    body:    RawVec,
    status:  u16,
    _pad:    [u8; 6],
 }
-const _: () = assert!(size_of::<RawPollResult>() == http::POLL_RESULT_SIZE);
+const _: () = assert!(size_of::<BufferedResult>() == http::BUFFERED_RESULT_SIZE);
 
-impl RawPollResult {
+impl BufferedResult {
    const PENDING_TAG: u64 = u64::MAX - 1;
    const ERR_TAG: u64 = u64::MAX;
 
@@ -273,21 +273,48 @@ impl RawPollResult {
    }
 }
 
+/// `poll`'s result on builds that stream the body: `u64::MAX` pending, 2 an
+/// error, and the response otherwise, whose status sits at the offset
+/// [`http::ResponseLayout::Streamed`] gives.
+#[repr(C)]
+struct StreamedResult {
+   tag:       u64,
+   _response: [u64; 46],
+   /// 1 for the boxed stream that follows.
+   body_kind: u64,
+   body:      RawPinnedFuture,
+   _tail:     [u64; 7],
+}
+const _: () = assert!(
+   size_of::<StreamedResult>() == http::STREAMED_RESULT_SIZE
+      && std::mem::offset_of!(StreamedResult, body_kind) == http::STREAMED_BODY
+);
+
 // `send` and `poll` are Rust-ABI trait methods, declared Rust ABI here so the
 // same lowering applies on Win64 and SysV: `send` returns its pointer pair
-// (`Pin<Box<dyn Future>>`) in RAX:RDX, and `poll` returns the 128-byte
-// `RawPollResult` through a hidden sret pointer in the first argument register.
+// (`Pin<Box<dyn Future>>`) in RAX:RDX, and `poll` returns its result through a
+// hidden sret pointer in the first argument register.
 type SendFn = unsafe fn(*const c_void, *mut c_void) -> RawPinnedFuture;
-type PollFn = unsafe fn(*mut c_void, *mut c_void) -> RawPollResult;
+type BufferedPollFn = unsafe fn(*mut c_void, *mut c_void) -> BufferedResult;
+type StreamedPollFn = unsafe fn(*mut c_void, *mut c_void) -> StreamedResult;
 type HostAllocFn = unsafe extern "C" fn(usize, usize) -> *mut u8;
 type HostDeallocFn = unsafe extern "C" fn(*mut u8, usize, usize);
 
+/// The original `poll`, by how it returns the response.
+#[derive(Clone, Copy)]
+enum Poll {
+   Buffered(BufferedPollFn),
+   Streamed {
+      poll:   StreamedPollFn,
+      status: usize,
+   },
+}
+
 struct Installed {
    send:         SendFn,
-   /// Whether `poll` is hooked, so responses reach the plugins.
-   responses:    bool,
    request:      http::RequestLayout,
-   poll:         PollFn,
+   /// `None` when `poll` is left alone, so responses never reach the plugins.
+   poll:         Option<Poll>,
    host_alloc:   Option<HostAllocFn>,
    host_dealloc: Option<HostDeallocFn>,
 }
@@ -337,49 +364,62 @@ unsafe extern "C" fn owned_bytes_clone(
    }
 }
 
-unsafe extern "C" fn owned_bytes_to_vec(data: *mut (), ptr: *const u8, len: usize) -> RawVec {
-   let out = if len > 0
-      && !ptr.is_null()
-      && let Some(alloc) = INSTALLED.get().and_then(|inst| inst.host_alloc)
-   {
-      // SAFETY: allocate using the host's own `__rust_alloc(len, 1)`.
-      let dst = unsafe { alloc(len, 1) };
-      if dst.is_null() {
-         RawVec {
-            cap: 0,
-            ptr: ptr::null_mut(),
-            len: 0,
-         }
-      } else {
-         // SAFETY: `ptr` is valid for `len` bytes and `dst` is freshly
-         // allocated.
-         unsafe { ptr::copy_nonoverlapping(ptr, dst, len) };
-         RawVec {
-            cap: len,
-            ptr: dst,
-            len,
-         }
-      }
-   } else {
-      RawVec {
+/// A copy of `len` bytes at `ptr` in a `Vec` from Discord's allocator, which
+/// frees it.
+fn host_vec(ptr: *const u8, len: usize) -> RawVec {
+   let dst = INSTALLED
+      .get()
+      .and_then(|inst| inst.host_alloc)
+      .filter(|_| len > 0 && !ptr.is_null())
+      // SAFETY: the host's own `__rust_alloc(len, 1)`.
+      .map(|alloc| unsafe { alloc(len, 1) })
+      .filter(|dst| !dst.is_null());
+   let Some(dst) = dst else {
+      return RawVec {
          cap: 0,
-         ptr: ptr::null_mut(),
+         ptr: ptr::dangling_mut(),
          len: 0,
-      }
+      };
    };
+   // SAFETY: `ptr` is valid for `len` bytes and `dst` is freshly allocated.
+   unsafe { ptr::copy_nonoverlapping(ptr, dst, len) };
+   RawVec {
+      cap: len,
+      ptr: dst,
+      len,
+   }
+}
+
+unsafe extern "C" fn owned_bytes_to_vec(data: *mut (), ptr: *const u8, len: usize) -> RawVec {
+   let out = host_vec(ptr, len);
    // SAFETY: `to_vec` consumes the `Bytes` instance.
    unsafe { owned_bytes_drop(data, ptr, len) };
    out
 }
 
-unsafe extern "C" fn owned_bytes_to_mut(data: *mut (), ptr: *const u8, len: usize) -> RawBytes {
-   // Fallback: keep our owned bytes intact; callers only invoke `to_mut` if
-   // they try to mutate a request body after `send`, which `reqwest` does not.
-   RawBytes {
-      vtable: &raw const OWNED_BYTES_VTABLE,
-      ptr,
-      len,
-      data: AtomicPtr::new(data),
+/// `bytes::BytesMut`, which `into_mut` returns.
+#[repr(C)]
+struct RawBytesMut {
+   ptr:  *mut u8,
+   len:  usize,
+   cap:  usize,
+   data: usize,
+}
+
+/// `BytesMut::from(Vec<u8>)`: a `KIND_VEC` buffer that remembers its
+/// capacity's order of magnitude, as `bytes` 1.x encodes it.
+unsafe extern "C" fn owned_bytes_to_mut(data: *mut (), ptr: *const u8, len: usize) -> RawBytesMut {
+   const KIND_VEC: usize = 1;
+   const ORIGINAL_CAPACITY_OFFSET: usize = 2;
+   let vec = host_vec(ptr, len);
+   // SAFETY: `into_mut` consumes the `Bytes` instance.
+   unsafe { owned_bytes_drop(data, ptr, len) };
+   let repr = (vec.cap >> 10).bit_width().min(7) as usize;
+   RawBytesMut {
+      ptr:  vec.ptr,
+      len:  vec.len,
+      cap:  vec.cap,
+      data: repr << ORIGINAL_CAPACITY_OFFSET | KIND_VEC,
    }
 }
 
@@ -430,38 +470,52 @@ pub fn install(image: &Image<'static>) {
    };
    // SAFETY: `DesktopHttpTransport::locate` verified every target against
    // `.pdata`, and the trampoline replays `send`'s prologue.
+   let poll = match found.response {
+      // SAFETY: `poll_fn` returns the result `layout` describes.
+      Ok(http::ResponseLayout::Buffered) => {
+         Some(Poll::Buffered(unsafe {
+            std::mem::transmute::<usize, BufferedPollFn>(found.poll_fn)
+         }))
+      },
+      // SAFETY: as above.
+      Ok(http::ResponseLayout::Streamed { status }) => {
+         Some(Poll::Streamed {
+            poll: unsafe { std::mem::transmute::<usize, StreamedPollFn>(found.poll_fn) },
+            status,
+         })
+      },
+      Err(ref err) => {
+         log::warn!("discord desktop: responses are left alone: {err}");
+         None
+      },
+   };
    let installed = Installed {
-      send:         unsafe { std::mem::transmute::<usize, SendFn>(trampoline) },
-      responses:    found.poll_result <= http::POLL_RESULT_SIZE,
-      request:      found.request,
-      poll:         unsafe { std::mem::transmute::<usize, PollFn>(found.poll_fn) },
-      host_alloc:   found
+      send: unsafe { std::mem::transmute::<usize, SendFn>(trampoline) },
+      request: found.request,
+      poll,
+      host_alloc: found
          .host_alloc
          .map(|addr| unsafe { std::mem::transmute::<usize, HostAllocFn>(addr) }),
       host_dealloc: found
          .host_dealloc
          .map(|addr| unsafe { std::mem::transmute::<usize, HostDeallocFn>(addr) }),
    };
-   let responses = installed.responses;
    if INSTALLED.set(installed).is_err() {
       return;
    }
-   if !responses {
-      log::warn!(
-         "discord desktop: hooked HTTP send, but poll writes {:#x} bytes of its result, so \
-          responses are left alone",
-         found.poll_result
-      );
-      return;
-   }
+   let detour = match poll {
+      None => return,
+      Some(Poll::Buffered(_)) => buffered_poll_detour as *const () as usize,
+      Some(Poll::Streamed { .. }) => streamed_poll_detour as *const () as usize,
+   };
 
    let polls = found
       .poll_slots
       .iter()
-      .map(|&slot| (slot, poll_detour as *const () as usize))
+      .map(|&slot| (slot, detour))
       .collect::<Vec<_>>();
    // SAFETY: every poll slot is an aligned `.rdata` vtable entry pointing to
-   // `poll_fn`, and `poll_detour` matches its Rust ABI.
+   // `poll_fn`, and the detour matches its Rust ABI and result.
    match unsafe { image.swap_words(&polls) } {
       Ok(_) => {
          log::info!(
@@ -612,7 +666,7 @@ unsafe fn send_detour(self_ptr: *const c_void, req: *mut c_void) -> RawPinnedFut
             },
          }
 
-         if installed.responses {
+         if installed.poll.is_some() {
             watched = watch_response(&method, &url);
          }
       }))
@@ -633,12 +687,15 @@ unsafe fn send_detour(self_ptr: *const c_void, req: *mut c_void) -> RawPinnedFut
    future
 }
 
-unsafe fn poll_detour(future: *mut c_void, cx: *mut c_void) -> RawPollResult {
+unsafe fn buffered_poll_detour(future: *mut c_void, cx: *mut c_void) -> BufferedResult {
    let installed = INSTALLED
       .get()
-      .expect("poll_detour only runs after INSTALLED is set");
+      .expect("poll detours only run after INSTALLED is set");
+   let Some(Poll::Buffered(poll)) = installed.poll else {
+      unreachable!("the buffered detour is only swapped in for a buffered poll");
+   };
    // SAFETY: forward to original `SendFuture::poll`.
-   let mut result = unsafe { (installed.poll)(future, cx) };
+   let mut result = unsafe { poll(future, cx) };
 
    if result.is_pending() {
       return result;
@@ -670,6 +727,224 @@ unsafe fn poll_detour(future: *mut c_void, cx: *mut c_void) -> RawPollResult {
    }
 
    result
+}
+
+unsafe fn streamed_poll_detour(future: *mut c_void, cx: *mut c_void) -> StreamedResult {
+   const PENDING: u64 = u64::MAX;
+   const ERR: u64 = 2;
+   const STREAM_BODY: u64 = 1;
+
+   let installed = INSTALLED
+      .get()
+      .expect("poll detours only run after INSTALLED is set");
+   let Some(Poll::Streamed { poll, status }) = installed.poll else {
+      unreachable!("the streamed detour is only swapped in for a streamed poll");
+   };
+   // SAFETY: forward to original `SendFuture::poll`.
+   let mut result = unsafe { poll(future, cx) };
+   if result.tag == PENDING {
+      return result;
+   }
+   let Some(in_flight) = take_response(future.addr() as u64).filter(|_| result.tag != ERR) else {
+      return result;
+   };
+   // SAFETY: `locate` saw `poll` store the `u16` status at `status`, inside the
+   // result.
+   let status = i32::from(unsafe { ptr::from_ref(&result).byte_add(status).cast::<u16>().read() });
+   if result.body_kind == STREAM_BODY && !result.body.vtable.is_null() {
+      result.body = body_stream::wrap(result.body, in_flight, status);
+   } else if panic::catch_unwind(AssertUnwindSafe(|| {
+      run_response_hooks(in_flight, status, Vec::new())
+   }))
+   .is_err()
+   {
+      log::error!("discord desktop: streamed_poll_detour panicked");
+   }
+   result
+}
+
+/// A response body stream that collects Discord's chunks, runs the response
+/// hooks on the whole body when it ends, and yields that as one chunk. The
+/// status is already Discord's by then, so hooks change only the body.
+mod body_stream {
+   use std::{
+      ffi::c_void,
+      mem,
+      panic::{
+         self,
+         AssertUnwindSafe,
+      },
+      ptr,
+      slice,
+      sync::atomic::{
+         AtomicPtr,
+         Ordering,
+      },
+   };
+
+   use phoenix_runtime::discord::{
+      InFlight,
+      run_response_hooks,
+   };
+
+   use crate::discord::{
+      INSTALLED,
+      RawBytes,
+      RawPinnedFuture,
+      make_owned_bytes,
+   };
+
+   /// `Poll<Option<Result<Bytes, Error>>>`.
+   #[repr(C)]
+   struct Item {
+      tag:   u64,
+      bytes: RawBytes,
+   }
+   const CHUNK: u64 = 0;
+   const END: u64 = 2;
+   const PENDING: u64 = u64::MAX;
+
+   /// A `dyn Stream` vtable, whose methods are Rust ABI like `poll`.
+   #[repr(C)]
+   struct Vtable {
+      drop:      unsafe fn(*mut c_void),
+      size:      usize,
+      align:     usize,
+      poll_next: unsafe fn(*mut c_void, *mut c_void) -> Item,
+      size_hint: unsafe fn(*const c_void) -> (usize, Option<usize>),
+   }
+
+   struct Wrapped {
+      inner:     RawPinnedFuture,
+      body:      Vec<u8>,
+      in_flight: Option<InFlight>,
+      status:    i32,
+      done:      bool,
+   }
+
+   // Size 0 keeps Discord from freeing the box with its allocator, `drop`
+   // frees it with ours.
+   static VTABLE: Vtable = Vtable {
+      drop,
+      size: 0,
+      align: 1,
+      poll_next,
+      size_hint,
+   };
+
+   pub fn wrap(inner: RawPinnedFuture, in_flight: InFlight, status: i32) -> RawPinnedFuture {
+      let wrapped = Box::new(Wrapped {
+         inner,
+         body: Vec::new(),
+         in_flight: Some(in_flight),
+         status,
+         done: false,
+      });
+      RawPinnedFuture {
+         data:   Box::into_raw(wrapped).cast(),
+         vtable: (&raw const VTABLE).cast(),
+      }
+   }
+
+   const fn inner_vtable(wrapped: &Wrapped) -> &'static Vtable {
+      // SAFETY: `inner` is Discord's own body stream, whose vtable has this
+      // layout.
+      unsafe { &*wrapped.inner.vtable.cast::<Vtable>() }
+   }
+
+   fn drop_chunk(item: &Item) {
+      let bytes = &item.bytes;
+      // SAFETY: the chunk is ours to drop, once, through its own vtable.
+      unsafe { ((*bytes.vtable).drop)(bytes.data.load(Ordering::Relaxed), bytes.ptr, bytes.len) };
+   }
+
+   const fn end() -> Item {
+      Item {
+         tag:   END,
+         bytes: RawBytes {
+            vtable: ptr::null(),
+            ptr:    ptr::null(),
+            len:    0,
+            data:   AtomicPtr::new(ptr::null_mut()),
+         },
+      }
+   }
+
+   unsafe fn poll_next(this: *mut c_void, cx: *mut c_void) -> Item {
+      // SAFETY: Discord polls the box `wrap` made.
+      let wrapped = unsafe { &mut *this.cast::<Wrapped>() };
+      if wrapped.done {
+         return end();
+      }
+      loop {
+         // SAFETY: the inner stream is polled with Discord's own context.
+         let item = unsafe { (inner_vtable(wrapped).poll_next)(wrapped.inner.data, cx) };
+         match item.tag {
+            CHUNK => {
+               let bytes = &item.bytes;
+               if bytes.len > 0 && !bytes.ptr.is_null() {
+                  // SAFETY: a chunk's `Bytes` holds `len` bytes at `ptr`.
+                  wrapped
+                     .body
+                     .extend_from_slice(unsafe { slice::from_raw_parts(bytes.ptr, bytes.len) });
+               }
+               drop_chunk(&item);
+            },
+            END => {
+               wrapped.done = true;
+               let original = mem::take(&mut wrapped.body);
+               let status = wrapped.status;
+               let hooked = wrapped.in_flight.take().and_then(|in_flight| {
+                  let body = original.clone();
+                  panic::catch_unwind(AssertUnwindSafe(|| {
+                     run_response_hooks(in_flight, status, body).1
+                  }))
+                  .ok()
+               });
+               let body = hooked.unwrap_or(original);
+               if body.is_empty() {
+                  return item;
+               }
+               return Item {
+                  tag:   CHUNK,
+                  bytes: make_owned_bytes(body),
+               };
+            },
+            PENDING => return item,
+            _ => {
+               wrapped.done = true;
+               return item;
+            },
+         }
+      }
+   }
+
+   const unsafe fn size_hint(_this: *const c_void) -> (usize, Option<usize>) {
+      (0, None)
+   }
+
+   unsafe fn drop(this: *mut c_void) {
+      // SAFETY: `this` is the box `wrap` leaked, dropped once.
+      let mut wrapped = unsafe { Box::from_raw(this.cast::<Wrapped>()) };
+      // Discord drops bodies it never reads, like a DELETE's 204, so the hooks
+      // still see the response, with what arrived of its body.
+      if let Some(in_flight) = wrapped.in_flight.take() {
+         let (status, body) = (wrapped.status, mem::take(&mut wrapped.body));
+         let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+            run_response_hooks(in_flight, status, body)
+         }));
+      }
+      let vtable = inner_vtable(&wrapped);
+      // SAFETY: drops Discord's stream in place, once.
+      unsafe { (vtable.drop)(wrapped.inner.data) };
+      if vtable.size > 0
+         && let Some(dealloc) = INSTALLED.get().and_then(|inst| inst.host_dealloc)
+      {
+         // SAFETY: Discord boxed the stream with its own allocator at this
+         // size and alignment.
+         unsafe { dealloc(wrapped.inner.data.cast(), vtable.size, vtable.align) };
+      }
+   }
 }
 
 /// Replaces `vec`'s contents with `new_body` while staying 100% compatible
