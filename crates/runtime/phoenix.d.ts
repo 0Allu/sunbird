@@ -933,7 +933,13 @@ declare namespace Phoenix {
 
   type SettingSpec =
     | (SpecBase & { type: "switch"; default?: boolean; onChange?(value: boolean): void })
-    | (SpecBase & { type: "text"; default?: string; onChange?(value: string): void })
+    | (SpecBase & {
+        type: "text";
+        default?: string;
+        /// Edited over several lines, for lists like one rule per line. Desktop only for now.
+        multiline?: boolean;
+        onChange?(value: string): void;
+      })
     /// Text shown masked, and replaced with `[redacted]` in the plugin's log lines.
     | (SpecBase & { type: "secret"; default?: string; onChange?(value: string): void })
     /// One of a fixed list, shown as rows with a checkmark. Defaults to the first option.

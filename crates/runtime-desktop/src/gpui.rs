@@ -1690,12 +1690,19 @@ fn render_plugins_tab(
                   );
                },
                Control::Text(val) => {
-                  let shown = if val.is_empty() {
-                     "empty"
-                  } else {
-                     val.as_str()
+                  let count = val.lines().filter(|line| !line.trim().is_empty()).count();
+                  let shown = match (setting.multiline, count) {
+                     (_, 0) => "empty".to_owned(),
+                     (true, 1) => "1 line".to_owned(),
+                     (true, n) => format!("{n} lines"),
+                     (false, _) => val.clone(),
                   };
-                  drawer = b.push_div(drawer, edit_row(shown, val.clone(), FieldKind::Text));
+                  let kind = if setting.multiline {
+                     FieldKind::Lines
+                  } else {
+                     FieldKind::Text
+                  };
+                  drawer = b.push_div(drawer, edit_row(&shown, val.clone(), kind));
                },
                Control::Secret(val) => {
                   let shown = if val.is_empty() { "not set" } else { "set" };
