@@ -169,19 +169,7 @@ impl Target {
                Some(user) => Place::User(Some(user.to_owned())),
                None => Place::Channel(aids::snowflake(aid, aids::DM_ROW_PREFIX)?.to_owned()),
             };
-            // `row > [avatar, column > [names > [name, tags…], …]]`, with a user
-            // DM's names one row further down. The name is the first leaf.
-            let mut name = *mirror.kids(id).get(1)?;
-            for _ in 0..4 {
-               let Some(first) = mirror.kids(name).first() else {
-                  break;
-               };
-               name = *first;
-            }
-            if !mirror.kids(name).is_empty() {
-               return None;
-            }
-            after(mirror, name, place)
+            after(mirror, member_name(mirror, id)?.0, place)
          },
          Self::Author => after(mirror, id, Place::Message(message_part(aid)?.1.to_owned())),
       }
@@ -200,11 +188,38 @@ impl Target {
       )
    }
 
+   /// The name in DM row `id` when it stretches across its row, as it does
+   /// without tags, which would leave decorations at the row's far end.
+   pub fn stretched_name(mirror: &Mirror, id: i32, aid: &str) -> Option<i32> {
+      aids::snowflake(aid, aids::DM_ROW_PREFIX)?;
+      match member_name(mirror, id)? {
+         (name, 2) => Some(name),
+         _ => None,
+      }
+   }
+
    /// Whether this target's places are about a user, which its plugins get
    /// as `userId`.
    pub const fn decorates(self) -> bool {
       matches!(self, Self::Member | Self::Author)
    }
+}
+
+/// The name in member or DM row `id`, the first leaf of its name column,
+/// and how deep it is there.
+///
+/// `row > [avatar, column > [names > [name, tags…], …]]`, where a DM with
+/// tags has its names one row further down, and one without has the name
+/// right in the row with the time.
+fn member_name(mirror: &Mirror, id: i32) -> Option<(i32, usize)> {
+   let mut name = *mirror.kids(id).get(1)?;
+   for depth in 0..4 {
+      let Some(first) = mirror.kids(name).first() else {
+         return Some((name, depth));
+      };
+      name = *first;
+   }
+   None
 }
 
 /// Right after `node`, among its siblings.

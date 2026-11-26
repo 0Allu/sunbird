@@ -58,6 +58,7 @@ use std::{
 
 use phoenix_ui_mobile::{
    Node,
+   Op,
    Prop,
    Props,
    ViewKind,
@@ -403,6 +404,10 @@ struct Patches {
    /// The user a member or header decoration's place is about, once the
    /// worker read it from Phoenix's cache.
    users:                  HashMap<Place, Option<String>>,
+   /// Member slots that take the room a stretched name had, by parent.
+   grown:                  HashSet<i32>,
+   /// Ops for Phoenix's own nodes, sent after the batch that creates them.
+   late:                   Vec<Op>,
    /// Message text color plugins asked for, by message id.
    tints:                  HashMap<String, i64>,
    /// Phoenix's author and content text nodes: their message and props as
