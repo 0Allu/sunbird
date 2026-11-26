@@ -25,9 +25,9 @@ jobs:
         cargo clippy --locked --workspace --all-targets -- -D warnings
         sysroot=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot
         env "BINDGEN_EXTRA_CLANG_ARGS_aarch64-linux-android=--target=aarch64-linux-android28 --sysroot=$sysroot" \
-          cargo ndk -t arm64-v8a -P 28 clippy --locked --workspace -- -D warnings
+          cargo ndk -t arm64-v8a -P 28 clippy --locked --workspace --exclude sigscan -- -D warnings
         env "BINDGEN_EXTRA_CLANG_ARGS_armv7-linux-androideabi=--target=armv7-linux-androideabi28 --sysroot=$sysroot" \
-          cargo ndk -t armeabi-v7a -P 28 clippy --locked --workspace -- -D warnings
+          cargo ndk -t armeabi-v7a -P 28 clippy --locked --workspace --exclude sigscan -- -D warnings
       test: true
       test-command: cargo test --locked --workspace
 
