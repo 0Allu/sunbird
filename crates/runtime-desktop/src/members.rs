@@ -1,5 +1,5 @@
 //! Plugin decorations keyed by user id for Desktop Phoenix: the member list
-//! (`phoenix.ui.addMemberDecoration`) and message headers
+//! and DM list (`phoenix.ui.addMemberDecoration`) and message headers
 //! (`phoenix.ui.addMessageHeaderDecoration`, drawn by [`crate::headers`]).
 //!
 //! In the member list's row renderer, the function formatting `member-{}-{}`
@@ -194,6 +194,76 @@ pub fn install(image: &Image<'static>) {
       Ok(row) => install_name(image, &row.name),
       Err(err) => log::warn!("desktop members: {err}, skipping"),
    }
+   match desktop::dm_row(image) {
+      Ok(row) => install_dm(image, &row),
+      Err(err) => log::warn!("desktop members: {err}, skipping the DM list"),
+   }
+}
+
+static ORIG_DM_CHILD: OnceLock<NameChildFn> = OnceLock::new();
+static DM_SOME: AtomicUsize = AtomicUsize::new(0);
+static DM_USER: AtomicUsize = AtomicUsize::new(0);
+
+/// Points the call adding the recipient's name to a DM row at
+/// [`dm_child_detour`], so member decorations follow the name there too, as
+/// Vencord's member list setting covers the DM list.
+fn install_dm(image: &Image<'static>, row: &desktop::DmRow) {
+   let Some(target) = image
+      .read(row.site + 1, 4)
+      .and_then(|rel| rel.try_into().ok())
+      .map(i32::from_le_bytes)
+      .map(|rel| (row.site + 5).wrapping_add_signed(rel as isize))
+   else {
+      return;
+   };
+   DM_SOME.store(row.some, Ordering::Release);
+   DM_USER.store(row.user, Ordering::Release);
+   // SAFETY: `target` is the call's own `Div::child`, stored before the call
+   // can reach the detour.
+   let _ = ORIG_DM_CHILD.set(unsafe { std::mem::transmute::<usize, NameChildFn>(target) });
+   // SAFETY: as in `install_name`.
+   match unsafe {
+      image.hook_call(
+         row.site,
+         &desktop::mov_r9_from(phoenix_hook::x86::Register::RBP),
+         dm_child_detour as *const () as usize,
+      )
+   } {
+      Ok(_) => log::info!("desktop members: hooked the DM name @ {:#x}", row.site),
+      Err(err) => log::warn!("desktop members: DM name hook failed: {err}"),
+   }
+}
+
+unsafe extern "C" fn dm_child_detour(
+   out: *mut c_void,
+   div: *mut c_void,
+   child: *mut c_void,
+   frame: *const u8,
+) -> *mut c_void {
+   let Some(orig) = ORIG_DM_CHILD.get().copied() else {
+      return out;
+   };
+   // SAFETY: forwards `Div::child`'s own arguments.
+   let row = unsafe { orig(out, div, child) };
+   if !MEMBERS.active() || row.is_null() || frame.is_null() {
+      return row;
+   }
+   // SAFETY: `frame` is the DM row's `rbp`, whose decoded slots hold the
+   // recipient's `Option<UserId>`, unset for group DMs.
+   let user_id = unsafe {
+      let slot = |at: &AtomicUsize| {
+         frame
+            .add(at.load(Ordering::Relaxed))
+            .cast::<u64>()
+            .read_unaligned()
+      };
+      if slot(&DM_SOME) == 0 {
+         return row;
+      }
+      slot(&DM_USER)
+   };
+   decorate(row, user_id);
+   row
 }
 
 /// Points the calls adding the member's name to its row at
@@ -263,13 +333,18 @@ unsafe extern "C" fn name_child_detour(
       }
       id.read_unaligned()
    };
+   decorate(row, user_id);
+   row
+}
+
+/// Appends what the member decorations drew for `user_id` to `row`.
+fn decorate(row: *mut c_void, user_id: u64) {
    if user_id < MIN_SNOWFLAKE {
-      return row;
+      return;
    }
    if let Some(lines) = lines_for(user_id) {
       let _ = std::panic::catch_unwind(|| gpui::append_pieces(row, &lines));
    }
-   row
 }
 
 /// The text decorations drew for `user_id`, queueing them when unknown.

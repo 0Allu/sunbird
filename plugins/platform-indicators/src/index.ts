@@ -52,7 +52,7 @@ const settings = phoenix.settings.define({
   memberList: {
     type: "switch",
     title: "Show in the member list",
-    description: "Next to each member's name (desktop only)",
+    description: "Next to each member's name, and in the DM list (desktop only)",
     default: true,
     onChange: (on) => sync("members", on),
   },

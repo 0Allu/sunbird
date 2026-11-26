@@ -1736,6 +1736,134 @@ pub fn member_row(image: &Image<'_>) -> Found<MemberRow> {
    })
 }
 
+/// The DM list's row renderer, and where its recipient's name joins the row.
+///
+/// The row adds the box built around the name (`dm-name-bounds`) to a flex row
+/// with `Div::child` by value, `(sret, div, &name) -> Div`. One-to-one DMs keep
+/// their recipient as an `Option<UserId>` copied into two frame slots, the
+/// one the row's presence dot (`dm-status`) is keyed by; group DMs have none.
+#[derive(Clone, Debug)]
+pub struct DmRow {
+   pub func: usize,
+   /// The `call rel32` adding the name box.
+   pub site: usize,
+   /// `[rbp+some]` is the recipient's `Option` tag, zero for none.
+   pub some: usize,
+   /// `[rbp+user]` is the recipient's user id when `some` is set.
+   pub user: usize,
+}
+
+/// The single function loading `text`, as it is laid out in the string pool.
+fn loader_of(image: &Image<'_>, what: &str, text: &[u8]) -> Found<usize> {
+   let mut funcs = image
+      .find_bytes(text)
+      .iter()
+      .flat_map(|&anchor| lea_refs(image, anchor))
+      .filter_map(|lea| Some(image.function_bounds(lea)?.0))
+      .collect::<Vec<_>>();
+   funcs.sort_unstable();
+   funcs.dedup();
+   one(what, &funcs)
+}
+
+/// `[rbp+slot]` as `disasm` prints a frame operand, like `[rbp+0DB0h]`.
+fn frame_slot(operand: &str) -> Option<usize> {
+   hex_disp(operand.strip_prefix("[rbp+")?.strip_suffix(']')?)
+}
+
+/// The `Option<UserId>` slots read after `anchor`'s `lea`: the id is the first
+/// `mov rax, [rbp+user]` after it, and the row copies the option there from
+/// its props, `mov rax, [r]; mov [rbp+some], rax; mov rax, [r+8]; mov
+/// [rbp+user], rax`, then tests `cmp qword ptr [rbp+some], 0`.
+fn option_user_slots(lines: &[phoenix_hook::x86::Line], anchor: usize) -> Option<(usize, usize)> {
+   let user = lines
+      .get(anchor..)?
+      .iter()
+      .take(8)
+      .find_map(|line| frame_slot(line.text.strip_prefix("mov rax,")?))?;
+   let stored = |line: &phoenix_hook::x86::Line| {
+      frame_slot(line.text.strip_prefix("mov ")?.strip_suffix(",rax")?)
+   };
+   let at = lines.iter().position(|line| stored(line) == Some(user))?;
+   let [load_some, store_some, load_user] = lines.get(at.checked_sub(3)?..at)? else {
+      return None;
+   };
+   let props = load_user
+      .text
+      .strip_prefix("mov rax,[")?
+      .strip_suffix("+8]")?;
+   let some = stored(store_some)?;
+   let tested = lines.iter().any(|line| {
+      line
+         .text
+         .strip_prefix("cmp qword ptr ")
+         .and_then(|rest| rest.strip_suffix(",0"))
+         .and_then(frame_slot)
+         == Some(some)
+   });
+   (load_some.text == format!("mov rax,[{props}]") && tested).then_some((some, user))
+}
+
+/// The DM row: the one caller of the function building the box around the
+/// recipient's name, and the call adding that box's element to the row.
+pub fn dm_row(image: &Image<'_>) -> Found<DmRow> {
+   if !matches!(Abi::of(image), Abi::Win64) {
+      return Err("the DM row is only decoded on Win64".to_owned());
+   }
+   let name_box = loader_of(image, "DM name box", b"dm-name-bounds")?;
+   let funcs = callers(image, name_box).into_iter().collect::<Vec<_>>();
+   let func = one("DM row", &funcs)?;
+   let lines = phoenix_hook::x86::disasm(function_code(image, func, "DM row")?, func, usize::MAX);
+   let built = lines
+      .iter()
+      .position(|line| line.text.starts_with("call ") && line.target == Some(name_box))
+      .ok_or("DM name box call not found")?;
+   let out = lines[built.saturating_sub(8)..built]
+      .iter()
+      .rev()
+      .find_map(|line| frame_slot(line.text.strip_prefix("lea rcx,")?))
+      .ok_or("DM name box result not found")?;
+   // The element moves into `r8` as `movups xmm0, [out]` then `movaps [r8],
+   // xmm0` and `movaps [r8+10h], xmm1`.
+   let call = (built + 1..lines.len().min(built + 80))
+      .filter(|&at| lines[at].text.starts_with("call "))
+      .find(|&at| {
+         let args = &lines[at.saturating_sub(12)..at];
+         args
+            .iter()
+            .any(|line| line.text.strip_prefix("movups xmm0,").and_then(frame_slot) == Some(out))
+            && args.iter().any(|line| line.text == "movaps [r8],xmm0")
+            && args.iter().any(|line| line.text == "movaps [r8+10h],xmm1")
+      })
+      .map(|at| &lines[at])
+      .ok_or("DM name child call not found")?;
+   let child = call.target.ok_or("DM name child call is indirect")?;
+   // The name box adds the name itself with the same `Div::child`.
+   let inner = phoenix_hook::x86::disasm(
+      function_code(image, name_box, "DM name box")?,
+      name_box,
+      usize::MAX,
+   );
+   if call.len != 5
+      || image.read(call.addr, 1) != Some(&[0xE8])
+      || !inner.iter().any(|line| line.target == Some(child))
+   {
+      return Err("DM name child is not Div::child".to_owned());
+   }
+   let status = image.find_bytes(b"dm-status");
+   let anchor = lines
+      .iter()
+      .position(|line| line.target.is_some_and(|target| status.contains(&target)))
+      .ok_or("DM status id not found")?;
+   let (some, user) = option_user_slots(&lines, anchor).ok_or("DM recipient slots not decoded")?;
+   Ok(DmRow {
+      func,
+      site: call.addr,
+      some,
+      user,
+   })
+}
+
 /// The message header's node API, and where each header row adds the author's
 /// name.
 ///

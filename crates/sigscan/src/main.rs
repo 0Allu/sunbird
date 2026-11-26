@@ -246,6 +246,18 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
             }),
          );
          report(
+            "dm row",
+            desktop::dm_row(image).map(|row| {
+               format!(
+                  "{} (name call {}, recipient [rbp+{:#x}] if [rbp+{:#x}])",
+                  at(row.func),
+                  at(row.site),
+                  row.user,
+                  row.some
+               )
+            }),
+         );
+         report(
             "svg builders",
             desktop::svg_builders(image).map(|svg| format!("{svg:x?}")),
          );

@@ -1339,8 +1339,9 @@ declare namespace Phoenix {
       priority?: number;
       render(ctx: MessageContext): Rendered | Promise<Rendered>;
     }): Remover;
-    /// Text or icons at the end of a user's row in the member list. Desktop only, so absent
-    /// elsewhere. It runs once per user, and the result is kept until `update(userId)`.
+    /// Text or icons after a user's name in the member list and on their DM in the DM list.
+    /// Desktop only, so absent elsewhere. It runs once per user, and the result is kept until
+    /// `update(userId)`.
     addMemberDecoration?(options: {
       priority?: number;
       render(ctx: { userId: string }): Rendered;
