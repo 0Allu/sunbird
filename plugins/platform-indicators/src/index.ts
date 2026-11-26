@@ -142,7 +142,8 @@ let members: Phoenix.Remover | undefined;
 
 function syncMembers(enabled: boolean) {
   if (enabled && !members) {
-    members = phoenix.ui.addMemberDecoration({
+    // Runtimes before member decorations have no such call.
+    members = phoenix.ui.addMemberDecoration?.({
       render: ({ userId }) => {
         if (drawn.size > 2_000) drawn.clear();
         drawn.add(userId);
