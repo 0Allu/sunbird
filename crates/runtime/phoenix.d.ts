@@ -1209,14 +1209,17 @@ declare namespace Phoenix {
   }
 
   /// An SVG icon: its shape is filled with `color` (32-bit ARGB), whatever fills the source has.
+  /// Android and iOS draw no SVG and show the image at `uri` (PNG, WebP or a `data:` URI) as it is,
+  /// so it carries its own color there.
   interface RenderedIcon {
     svg: string;
     color?: number;
+    uri?: string;
   }
 
   /// Text a `render` returns: plain, colored (32-bit ARGB), or nothing. Under a message's content,
   /// `tint` also colors the message's author and text (32-bit ARGB); `text` may then be empty.
-  /// `icons` are drawn in place of `text` where the client can draw them (desktop's member
+  /// `icons` are drawn in place of `text` where the client can draw them (member and header
   /// decorations), and `text` shows everywhere else.
   type Rendered =
     | string
@@ -1346,15 +1349,15 @@ declare namespace Phoenix {
       render(ctx: MessageContext): Rendered | Promise<Rendered>;
     }): Remover;
     /// Text or icons after a user's name in the member list and on their DM in the DM list.
-    /// Desktop only, so absent elsewhere. It runs once per user, and the result is kept until
+    /// Absent on runtimes from before it. It runs once per user, and the result is kept until
     /// `update(userId)`.
     addMemberDecoration?(options: {
       priority?: number;
       render(ctx: { userId: string }): Rendered;
     }): Remover;
-    /// Icons right after the author's name in message headers. Desktop only, so absent
-    /// elsewhere. Only `icons` are drawn. Like `addMemberDecoration`, it runs once per author and
-    /// the result is kept until `update(userId)`.
+    /// Icons right after the author's name in message headers. Absent on runtimes from before it.
+    /// Only `icons` are drawn. Like `addMemberDecoration`, it runs once per author and the result
+    /// is kept until `update(userId)`.
     addMessageHeaderDecoration?(options: {
       priority?: number;
       render(ctx: { userId: string }): Rendered;
