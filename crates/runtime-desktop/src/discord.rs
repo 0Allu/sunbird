@@ -33,7 +33,9 @@ use std::{
 
 use phoenix_hook::image::Image;
 use phoenix_runtime::{
+   console::url_encoded,
    discord::{
+      AUTHORIZE_TIMEOUT,
       Authorization,
       DiscordError,
       RequestAction,
@@ -57,6 +59,13 @@ use phoenix_sigs::{
       self,
       DesktopHttpTransport,
    },
+};
+use serde::Deserialize;
+
+use crate::modal::{
+   self,
+   ChoiceOption,
+   ModalSection,
 };
 
 /// Standard HTTP/1.x `http::header::StandardHeader` names in discriminant
@@ -1056,8 +1065,82 @@ pub fn send(
    })
 }
 
-pub const fn authorize(_request: &Authorization) -> Result<String, DiscordError> {
-   Err(DiscordError::NoBridge)
+/// The app an authorize GET describes.
+#[derive(Deserialize)]
+struct AuthorizeInfo {
+   application: AuthorizeApp,
+}
+
+#[derive(Deserialize)]
+struct AuthorizeApp {
+   name: String,
+}
+
+/// Discord's answer to an authorize POST. Phoenix's own authorize gets
+/// `location` back on Android, docs.discord.food names it `url`.
+#[derive(Deserialize)]
+struct Authorized {
+   #[serde(alias = "url")]
+   location: String,
+}
+
+/// Asks the user in a native dialog, then authorizes with Phoenix's session.
+/// Desktop has no authorize screen a link can open. The location holds a
+/// credential and is never logged.
+pub fn authorize(request: &Authorization) -> Result<String, DiscordError> {
+   let path = format!(
+      "/oauth2/authorize?client_id={}&response_type={}&redirect_uri={}&scope={}",
+      url_encoded(&request.client_id),
+      url_encoded(&request.response_type),
+      url_encoded(&request.redirect_uri),
+      url_encoded(&request.scopes.join(" ")),
+   );
+   let unexpected = |response: &Response| {
+      DiscordError::Network {
+         path:    "/oauth2/authorize".to_owned(),
+         message: format!("unexpected answer, status {}", response.status),
+      }
+   };
+   let info = send("GET", &path, Vec::new(), Vec::new())?;
+   let name = serde_json::from_slice::<AuthorizeInfo>(&info.body)
+      .map_err(|_| unexpected(&info))?
+      .application
+      .name;
+   let body = format!(
+      "{name} asks for: {}. Discord sends you back to {}.",
+      request.scopes.join(", "),
+      request.redirect_uri,
+   );
+   let picked = modal::ask(
+      format!("Authorize {name}?"),
+      Some(ModalSection::Text {
+         title: None,
+         text:  body,
+      }),
+      vec![
+         ChoiceOption {
+            label:  "Authorize".to_owned(),
+            danger: false,
+         },
+         ChoiceOption {
+            label:  "Cancel".to_owned(),
+            danger: false,
+         },
+      ],
+      AUTHORIZE_TIMEOUT,
+   );
+   if picked != 0 {
+      return Err(DiscordError::Declined);
+   }
+   let reply = send(
+      "POST",
+      &path,
+      vec![("content-type".to_owned(), "application/json".to_owned())],
+      br#"{"authorize":true}"#.to_vec(),
+   )?;
+   serde_json::from_slice::<Authorized>(&reply.body)
+      .map(|authorized| authorized.location)
+      .map_err(|_| unexpected(&reply))
 }
 
 #[cfg(test)]
