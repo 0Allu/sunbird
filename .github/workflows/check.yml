@@ -6,7 +6,7 @@ name: check
 # the DISCORD_EXE_URL repository variable points at a copy of its Discord.exe.
 on:
   push:
-    paths: ['crates/hook/**', 'crates/sigs/**', 'crates/sigscan/**', 'Cargo.*', 'flake.*', '.github/workflows/check.yml']
+    paths: ['crates/hook/**', 'crates/sigs/**', 'crates/sigscan/**', 'crates/loader/**', 'Cargo.*', 'flake.*', '.github/workflows/check.yml']
   schedule:
     - cron: '17 6 * * *'
   workflow_dispatch:
@@ -45,3 +45,11 @@ jobs:
             echo "::notice::DISCORD_EXE_URL is unset, desktop skipped"
           fi
           exit $missed
+  # The macOS loader opens Desktop Phoenix's access gate by rewriting signed
+  # code, which only a Mac can build and test.
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --locked --release -p phoenix-hook -p phoenix-sigs -p phoenix-loader
+      - run: cargo build --locked --release -p phoenix-loader

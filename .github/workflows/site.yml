@@ -2,7 +2,7 @@ name: site
 on:
   push:
     branches: [main]
-    paths: ['web/**', 'plugins/**', 'crates/**', 'frida/**', 'Cargo.*', 'flake.*', 'nix/**', 'scripts/site.nu', 'scripts/sunbird-linux.sh', '.github/workflows/site.yml']
+    paths: ['web/**', 'plugins/**', 'crates/**', 'frida/**', 'Cargo.*', 'flake.*', 'nix/**', 'scripts/site.nu', 'scripts/sunbird-linux.sh', 'scripts/sunbird-macos.sh', '.github/workflows/site.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -29,6 +29,10 @@ jobs:
           - os: ubuntu-22.04
             toolchain: stable
             files: target/release/libphoenix.so
+          # Apple silicon, where Desktop Phoenix only runs; it opens the access gate.
+          - os: macos-15
+            toolchain: stable
+            files: target/release/libphoenix.dylib
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -62,6 +66,8 @@ jobs:
           mv desktop/desktop-Windows/phoenix-inject.exe web/plugins/sunbird-windows-x86_64.exe
           mv desktop/desktop-Linux/libphoenix.so web/plugins/libphoenix-linux-x86_64.so
           cp scripts/sunbird-linux.sh web/plugins/sunbird-linux.sh
+          mv desktop/desktop-macOS/libphoenix.dylib web/plugins/libphoenix-macos-arm64.dylib
+          cp scripts/sunbird-macos.sh web/plugins/sunbird-macos.sh
       - uses: actions/setup-node@v4
         with:
           node-version: 24
