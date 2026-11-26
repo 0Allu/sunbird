@@ -491,8 +491,8 @@ static CARD_PRESS_VTBL: RcFnVtbl = RcFnVtbl {
    extra:         ptr::null(),
 };
 
-const PHASE_BUBBLE: u8 = 0;
-const PHASE_CAPTURE: u8 = 1;
+pub const PHASE_BUBBLE: u8 = 0;
+pub const PHASE_CAPTURE: u8 = 1;
 
 const unsafe extern "C" fn noop_drop(_data: *mut u8) {}
 
@@ -555,6 +555,21 @@ unsafe fn card_press(
 /// Pushes a zero-sized listener into `div`'s `Interactivity` mouse-down list,
 /// which also makes GPUI give `div` a hitbox.
 fn on_mouse_down(div: &mut RawDiv, vtbl: &'static RcFnVtbl) -> bool {
+   listen_mouse_down(div, ptr::dangling_mut::<u8>(), vtbl)
+}
+
+/// Whether the pointer is over `hitbox`, for a mouse-down listener.
+pub fn hovered(hitbox: *const c_void, window: *const c_void) -> bool {
+   // SAFETY: GPUI passes listeners the live `&Hitbox` and `&Window`.
+   DISMISS_SYM
+      .get()
+      .is_some_and(|sym| unsafe { (sym.is_hovered)(hitbox, window) })
+}
+
+/// [`on_mouse_down`] with `data` as the listener's `self`. A zero-sized
+/// `vtbl` keeps GPUI from reading or freeing `data`, so it may be any
+/// non-null value.
+pub fn listen_mouse_down(div: &mut RawDiv, data: *mut u8, vtbl: &'static RcFnVtbl) -> bool {
    let Some(sym) = DISMISS_SYM.get() else {
       return false;
    };
@@ -571,7 +586,7 @@ fn on_mouse_down(div: &mut RawDiv, vtbl: &'static RcFnVtbl) -> bool {
       }
       (sym.push)(
          interactivity.add(sym.mouse_down_listeners).cast::<c_void>(),
-         ptr::dangling_mut::<u8>(),
+         data,
          vtbl,
       );
    }

@@ -17,7 +17,9 @@ use rquickjs::{
 
 use crate::{
    accessories,
+   composer,
    context_menu,
+   double_click,
    emoji,
    js::ui::{
       DesktopAccessory,
@@ -44,6 +46,10 @@ pub struct Desktop<'js> {
    /// `phoenix.messages.onEmojiPick` handlers by id and plugin. Desktop has
    /// no picker presses to give them, only the unlock they turn on.
    pub emoji_pickers: RefCell<Vec<(u64, String)>>,
+   /// `phoenix.ui.onEvent("rowDoubleTap")` handlers by id and plugin.
+   pub double_taps:   RefCell<Vec<(u64, String, Function<'js>)>>,
+   /// `phoenix.ui.hide` holds by id and plugin.
+   pub hides:         RefCell<Vec<(u64, String)>>,
 }
 
 impl<'js> Desktop<'js> {
@@ -106,4 +112,18 @@ pub fn unload(ctx: &Ctx<'_>, name: &str) {
    let mut pickers = registry.emoji_pickers.borrow_mut();
    pickers.retain(|(_, plugin)| plugin != name);
    emoji::unlock(!pickers.is_empty());
+   drop(pickers);
+
+   let mut taps = registry.double_taps.borrow_mut();
+   taps.retain(|(_, plugin, _)| plugin != name);
+   double_click::set_active(!taps.is_empty());
+   drop(taps);
+
+   registry.hides.borrow_mut().retain(|(_, plugin)| {
+      let held = plugin == name;
+      if held {
+         composer::hide_gift(false);
+      }
+      !held
+   });
 }

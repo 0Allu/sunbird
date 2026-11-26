@@ -9,6 +9,7 @@ mod badges;
 mod composer;
 mod context_menu;
 mod discord;
+mod double_click;
 mod emoji;
 mod fetch;
 mod gpui;

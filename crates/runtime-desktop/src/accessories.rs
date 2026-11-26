@@ -34,9 +34,12 @@ use std::{
 use phoenix_hook::image::Image;
 use phoenix_sigs::desktop;
 
-use crate::gpui::{
-   self,
-   RawAnyElement,
+use crate::{
+   double_click,
+   gpui::{
+      self,
+      RawAnyElement,
+   },
 };
 
 /// Offset of the pending/sending message text color inside `RowColors`
@@ -301,7 +304,8 @@ fn install_body_tint(image: &Image<'static>, render_row: usize) {
 
    let pro = desktop::Prologues::of(phoenix_hook::x86::Abi::of(image)).row;
    // SAFETY: runs from `prepare` before Discord threads execute;
-   // `build_body_detour` matches `build_message_body`'s verified 6-argument ABI.
+   // `build_body_detour` matches `build_message_body`'s verified 6-argument
+   // ABI.
    let trampoline = match unsafe {
       image.hook_entry(
          body_fn,
@@ -395,7 +399,7 @@ unsafe extern "C" fn render_row_detour(
    // `MessageRow::render`.
    let out = unsafe { orig(sret, row, a2, a3, s0, s1, s2, s3, s4, s5, s6) };
 
-   if ACTIVE_COUNT.load(Ordering::Relaxed) == 0 || row.is_null() || sret.is_null() {
+   if row.is_null() || sret.is_null() {
       return out;
    }
 
@@ -404,6 +408,10 @@ unsafe extern "C" fn render_row_detour(
    // from its `message-content-{id}` formatting read.
    let message_id = unsafe { row.cast::<u8>().add(offset).cast::<u64>().read_unaligned() };
    if message_id == 0 {
+      return out;
+   }
+   double_click::wrap_row(sret, message_id);
+   if ACTIVE_COUNT.load(Ordering::Relaxed) == 0 {
       return out;
    }
 

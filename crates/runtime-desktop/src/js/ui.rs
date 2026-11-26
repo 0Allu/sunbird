@@ -11,7 +11,6 @@ use std::{
    sync::{
       Arc,
       atomic::{
-         AtomicBool,
          AtomicU64,
          Ordering,
       },
@@ -58,6 +57,7 @@ use crate::{
       self,
       ActionMeta,
    },
+   double_click,
    emoji,
    icons,
    js::Desktop,
@@ -1075,15 +1075,88 @@ fn profile_sections<'js>(
 }
 
 /// `phoenix.ui.hide`. Desktop knows one id, the composer's gift button.
-fn hide<'js>(ctx: &Ctx<'js>, id: &str) -> rquickjs::Result<Function<'js>> {
+fn hide<'js>(ctx: &Ctx<'js>, plugin: &str, id: &str) -> rquickjs::Result<Function<'js>> {
+   static NEXT_HIDE: AtomicU64 = AtomicU64::new(1);
+
+   let Some(registry) = ctx.userdata::<Desktop<'js>>() else {
+      return noop_handle(ctx);
+   };
    if id != "composer.gift" || !composer::hide_gift(true) {
       return noop_handle(ctx);
    }
-   let shown = AtomicBool::new(false);
-   Function::new(ctx.clone(), move || {
-      if !shown.swap(true, Ordering::Relaxed) {
+   let hold = NEXT_HIDE.fetch_add(1, Ordering::Relaxed);
+   registry.hides.borrow_mut().push((hold, plugin.to_owned()));
+   Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
+      let Some(registry) = ctx.userdata::<Desktop<'js>>() else {
+         return;
+      };
+      let mut hides = registry.hides.borrow_mut();
+      let before = hides.len();
+      hides.retain(|(held, _)| *held != hold);
+      if hides.len() != before {
          composer::hide_gift(false);
       }
+   })
+}
+
+/// `phoenix.ui.onEvent`. Desktop sends `rowDoubleTap`, on message rows.
+fn on_event<'js>(
+   ctx: &Ctx<'js>,
+   plugin: &str,
+   event: &str,
+   handler: Function<'js>,
+) -> rquickjs::Result<Function<'js>> {
+   static NEXT_TAP: AtomicU64 = AtomicU64::new(1);
+
+   let Some(registry) = ctx.userdata::<Desktop<'js>>() else {
+      return noop_handle(ctx);
+   };
+   if event != "rowDoubleTap" {
+      return noop_handle(ctx);
+   }
+   let id = NEXT_TAP.fetch_add(1, Ordering::Relaxed);
+   let mut taps = registry.double_taps.borrow_mut();
+   taps.push((id, plugin.to_owned(), handler));
+   double_click::set_active(true);
+   drop(taps);
+   Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
+      if let Some(registry) = ctx.userdata::<Desktop<'js>>() {
+         let mut taps = registry.double_taps.borrow_mut();
+         taps.retain(|(held, ..)| *held != id);
+         double_click::set_active(!taps.is_empty());
+      }
+   })
+}
+
+/// Runs the `rowDoubleTap` handlers for a double click on `message_id`, and
+/// returns the message menu item one pressed with `ev.press`.
+pub fn double_tap(engine: &Engine, message_id: u64) -> Option<String> {
+   engine.with(|ctx| {
+      let handlers = ctx
+         .userdata::<Desktop<'_>>()?
+         .double_taps
+         .borrow()
+         .iter()
+         .map(|(_, plugin, handler)| (plugin.clone(), handler.clone()))
+         .collect::<Vec<_>>();
+      let pressed = Rc::new(RefCell::new(None::<String>));
+      for (plugin, handler) in handlers {
+         let ev = build_message_context(&ctx, message_id, 0, true).ok()?;
+         let into = Rc::clone(&pressed);
+         let press = Function::new(ctx.clone(), move |action: String| {
+            let item = action.strip_prefix("message.actions.").unwrap_or(&action);
+            *into.borrow_mut() = Some(item.to_owned());
+         })
+         .ok()?;
+         ev.set("press", press).ok()?;
+         if let Err(err) = handler.call::<_, Value<'_>>((ev,)).catch(&ctx) {
+            log::error!("[{plugin}] onEvent rowDoubleTap: {err}");
+         }
+         if pressed.borrow().is_some() {
+            break;
+         }
+      }
+      pressed.take()
    })
 }
 
@@ -1135,7 +1208,10 @@ pub fn desktop_patch_api<'js>(
    api.set("ui", desktop_ui_object(ctx, plugin)?)
 }
 
-#[expect(clippy::too_many_lines, reason = "one binding per `phoenix.ui` function")]
+#[expect(
+   clippy::too_many_lines,
+   reason = "one binding per `phoenix.ui` function"
+)]
 pub fn desktop_ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'js>> {
    let ui = Object::new(ctx.clone())?;
    ui.set(
@@ -1205,9 +1281,22 @@ pub fn desktop_ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<
       })?,
    )?;
 
+   let hide_owner = plugin.to_owned();
    ui.set(
       "hide",
-      Function::new(ctx.clone(), |ctx: Ctx<'js>, id: String| hide(&ctx, &id))?,
+      Function::new(ctx.clone(), move |ctx: Ctx<'js>, id: String| {
+         hide(&ctx, &hide_owner, &id)
+      })?,
+   )?;
+   let event_owner = plugin.to_owned();
+   ui.set(
+      "onEvent",
+      Function::new(
+         ctx.clone(),
+         move |ctx: Ctx<'js>, event: String, handler: Function<'js>| {
+            on_event(&ctx, &event_owner, &event, handler)
+         },
+      )?,
    )?;
 
    // Graceful no-op shims for remaining mobile UI-op surfaces so cross-platform
@@ -1217,7 +1306,6 @@ pub fn desktop_ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<
       "addComposerButton",
       "addProfileSection",
       "patchProps",
-      "onEvent",
       "onNode",
       "mount",
       "dispatch",

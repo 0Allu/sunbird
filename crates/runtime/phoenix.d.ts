@@ -1191,6 +1191,9 @@ declare namespace Phoenix {
     readonly channelId?: string | null;
     readonly currentUserId?: string | null;
     readonly message?: Message;
+    /// Desktop, on `rowDoubleTap`: presses the row's message menu item `action`, like
+    /// `"message.actions.reply"`, without showing the menu.
+    readonly press?: (action: string) => void;
   }
 
   interface PropPatchOptions {
