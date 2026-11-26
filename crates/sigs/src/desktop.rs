@@ -816,6 +816,27 @@ pub fn access_gate(image: &Image<'_>) -> Found<usize> {
    }
 }
 
+/// Where the runtime makes the `surfaces` notification provider decline.
+///
+/// On System V, `client_access::enforced`'s start, to return false. On Win64,
+/// where that leaf is not confirmed, the `movzx eax, cl` in the predicate's
+/// kind mapping, to zero; the `cmove eax, esi` after it moves an `esi` zeroed
+/// on entry.
+pub fn notification_gate(image: &Image<'_>) -> Found<usize> {
+   /// `client_access::enforced`: `push rax; mov eax, state; add rax, [rdi];
+   /// mov rdi, rax; call read; mov al, [rax + flag]; xor al, 1; pop rcx; ret`.
+   const ENFORCED: Pattern = Pattern::new(
+      "50 B8 ?? ?? ?? ?? 48 03 07 48 89 C7 FF 15 ?? ?? ?? ?? 8A 80 ?? ?? ?? ?? 34 01 59 C3",
+   );
+   /// The predicate's kind-mapping; its `movzx eax, cl` is at offset 9.
+   const MAP: Pattern = Pattern::new("3C 01 B1 02 80 D9 00 3C 02 0F B6 C1 0F 44 C6");
+
+   match Abi::of(image) {
+      Abi::Win64 => Ok(one("notification gate", &image.scan(MAP))? + 9),
+      Abi::SysV => one("notification gate", &image.scan(ENFORCED)),
+   }
+}
+
 /// Phoenix's `getEmojiUnavailableReason`, `u8 f(&Emoji, &EmojiContext)`,
 /// where 0xFF is usable and 2 premium locked.
 #[derive(Clone, Copy, Debug)]
