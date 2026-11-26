@@ -1,5 +1,5 @@
 // @description Sends custom and animated emojis as links, and renders fake emojis, stickers, and GIFs as real ones
-// @version 0.4.2
+// @version 0.4.3
 // @author mantikafasi
 
 const { gateway } = phoenix;
