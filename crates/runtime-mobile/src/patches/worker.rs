@@ -307,25 +307,32 @@ fn callback(call: impl FnOnce(&Engine)) -> Vec<Op> {
 }
 
 fn evaluate(contribution: ContributionId, place: Place) -> Vec<Op> {
-   let decorates = patches()
+   let target = patches()
       .contributions
       .iter()
-      .any(|known| known.id == contribution && known.target.decorates());
-   if decorates {
+      .find(|known| known.id == contribution)
+      .map(|known| known.target);
+   if target.is_some_and(Target::decorates) {
       return decorate(contribution, place);
    }
-   let context = UiContext {
-      channel_id:      patches().channel.clone(),
-      message_id:      match &place {
-         Place::Message(id) => Some(id.clone()),
-         _ => None,
-      },
-      user_id:         match &place {
-         Place::User(id) => id.clone(),
-         _ => None,
-      },
-      current_user_id: None,
-      message:         None,
+   // A message action's `visible` decides on the message, so it gets the
+   // same context as the press.
+   let context = if target == Some(Target::Action) {
+      press_context(&place)
+   } else {
+      UiContext {
+         channel_id:      patches().channel.clone(),
+         message_id:      match &place {
+            Place::Message(id) => Some(id.clone()),
+            _ => None,
+         },
+         user_id:         match &place {
+            Place::User(id) => id.clone(),
+            _ => None,
+         },
+         current_user_id: None,
+         message:         None,
+      }
    };
    let outcome = phoenix_runtime::engine()
       .and_then(|engine| ui_evaluate(&engine, contribution, &place, &context));
