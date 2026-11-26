@@ -120,6 +120,12 @@ pub trait Platform: Sync {
       None
    }
 
+   /// Answers a `GET` without the shell's token: only public, read-only
+   /// assets, like plugin icons the client's own image loading fetches.
+   fn public(&self, _request: &remote::Request) -> Option<remote::Reply> {
+      None
+   }
+
    /// The endpoints [`Self::route`] answers, for the debug shell's help.
    fn routes(&self) -> &'static str {
       ""

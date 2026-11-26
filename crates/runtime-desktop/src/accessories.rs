@@ -76,6 +76,19 @@ pub struct RenderedAccessory {
    pub text:     String,
    pub color:    Option<u32>,
    pub tint:     Option<u32>,
+   /// Registered SVG icons with their colors, drawn in place of `text` where
+   /// icons can be drawn.
+   pub icons:    Vec<(&'static str, Option<u32>)>,
+}
+
+impl RenderedAccessory {
+   pub fn piece(&self) -> gpui::Piece {
+      gpui::Piece {
+         text:  self.text.clone(),
+         color: self.color,
+         icons: self.icons.clone(),
+      }
+   }
 }
 
 enum CacheEntry {
@@ -288,7 +301,8 @@ fn install_body_tint(image: &Image<'static>, render_row: usize) {
 
    let pro = desktop::Prologues::of(phoenix_hook::x86::Abi::of(image)).row;
    // SAFETY: runs from `prepare` before Discord threads execute;
-   // `build_body_detour` matches `build_message_body`'s verified 6-argument ABI.
+   // `build_body_detour` matches `build_message_body`'s verified 6-argument
+   // ABI.
    let trampoline = match unsafe {
       image.hook_entry(
          body_fn,

@@ -52,7 +52,9 @@ use crate::{
       ActionMeta,
    },
    emoji,
+   icons,
    js::Desktop,
+   members,
    modal::{
       self,
       ModalButton,
@@ -63,6 +65,15 @@ use crate::{
 
 #[derive(Clone)]
 pub struct DesktopAccessory<'js> {
+   pub id:       u64,
+   pub plugin:   String,
+   pub priority: i32,
+   pub render:   Function<'js>,
+}
+
+/// A `phoenix.ui.addMemberDecoration` callback.
+#[derive(Clone)]
+pub struct DesktopMember<'js> {
    pub id:       u64,
    pub plugin:   String,
    pub priority: i32,
@@ -115,6 +126,7 @@ fn parse_rendered(value: &Value<'_>, priority: i32) -> Option<RenderedAccessory>
          text,
          color: None,
          tint: None,
+         icons: Vec::new(),
       });
    }
    if let Some(obj) = value.as_object() {
@@ -133,7 +145,8 @@ fn parse_rendered(value: &Value<'_>, priority: i32) -> Option<RenderedAccessory>
          .ok()
          .flatten()
          .map(to_argb);
-      if text.is_empty() && tint.is_none() {
+      let icons = parse_icons(obj);
+      if text.is_empty() && tint.is_none() && icons.is_empty() {
          return None;
       }
       return Some(RenderedAccessory {
@@ -141,9 +154,35 @@ fn parse_rendered(value: &Value<'_>, priority: i32) -> Option<RenderedAccessory>
          text,
          color,
          tint,
+         icons,
       });
    }
    None
+}
+
+/// `icons: [{ svg, color }]`, registered for drawing. Empty where icons cannot
+/// be drawn, which leaves the text.
+fn parse_icons(obj: &Object<'_>) -> Vec<(&'static str, Option<u32>)> {
+   let Ok(Some(list)) = obj.get::<_, Option<Array<'_>>>("icons") else {
+      return Vec::new();
+   };
+   if !icons::ready() {
+      return Vec::new();
+   }
+   list
+      .iter::<Object<'_>>()
+      .filter_map(Result::ok)
+      .take(8)
+      .filter_map(|icon| {
+         let svg = icon.get::<_, String>("svg").ok()?;
+         let color = icon
+            .get::<_, Option<f64>>("color")
+            .ok()
+            .flatten()
+            .map(to_argb);
+         Some((icons::register(&svg)?, color))
+      })
+      .collect()
 }
 
 fn evaluate_accessories_in_ctx<'js>(ctx: &Ctx<'js>, message_id: u64) -> Vec<RenderedAccessory> {
@@ -242,6 +281,108 @@ pub fn render_accessories(engine: &Engine, message_id: u64) -> Vec<RenderedAcces
    engine.with(|ctx| evaluate_accessories_in_ctx(&ctx, message_id))
 }
 
+/// Calls every `addMemberDecoration` for `user_id`. Promises land through
+/// [`members::set_rendered`] once they settle.
+fn evaluate_members_in_ctx<'js>(ctx: &Ctx<'js>, user_id: u64) -> Vec<RenderedAccessory> {
+   let Some(registry) = ctx.userdata::<Desktop<'js>>() else {
+      return Vec::new();
+   };
+   let snapshot: Vec<DesktopMember<'js>> = registry.members.borrow().clone();
+   drop(registry);
+   let Ok(arg) = Object::new(ctx.clone()) else {
+      return Vec::new();
+   };
+   let _ = arg.set("userId", user_id.to_string());
+
+   let mut out = Vec::new();
+   let mut pending = Vec::new();
+   for decoration in &snapshot {
+      match decoration
+         .render
+         .call::<_, Value<'_>>((arg.clone(),))
+         .catch(ctx)
+      {
+         Ok(val) if val.is_promise() => pending.push((decoration.priority, val)),
+         Ok(val) => out.extend(parse_rendered(&val, decoration.priority)),
+         Err(err) => log::error!("[{}] addMemberDecoration render: {err}", decoration.plugin),
+      }
+   }
+   // Each settled promise redraws the row with everything known by then.
+   let settled = std::rc::Rc::new(std::cell::RefCell::new(out.clone()));
+   for (priority, promise) in pending {
+      let Some(then) = promise
+         .as_object()
+         .and_then(|promise| promise.get::<_, Function<'_>>("then").ok())
+      else {
+         continue;
+      };
+      let settled = settled.clone();
+      if let Ok(on_resolve) = Function::new(ctx.clone(), move |resolved: Value<'js>| {
+         let mut all = settled.borrow_mut();
+         all.extend(parse_rendered(&resolved, priority));
+         members::set_rendered(user_id, all.clone());
+      }) {
+         let _ = then.call::<_, Value<'_>>((on_resolve,));
+      }
+   }
+   out
+}
+
+/// Evaluates every registered `addMemberDecoration` for `user_id`.
+pub fn render_members(engine: &Engine, user_id: u64) -> Vec<RenderedAccessory> {
+   engine.with(|ctx| evaluate_members_in_ctx(&ctx, user_id))
+}
+
+fn add_member_decoration<'js>(
+   ctx: &Ctx<'js>,
+   plugin: &str,
+   options: &Object<'js>,
+) -> rquickjs::Result<Function<'js>> {
+   static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+   let render = options.get::<_, Function<'js>>("render")?;
+   let priority = options.get::<_, Option<i32>>("priority")?.unwrap_or(0);
+   let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+   let count = {
+      let registry = ctx
+         .userdata::<Desktop<'js>>()
+         .ok_or_else(|| Exception::throw_internal(ctx, "no registry"))?;
+      let mut list = registry.members.borrow_mut();
+      list.push(DesktopMember {
+         id,
+         plugin: plugin.to_owned(),
+         priority,
+         render,
+      });
+      list.len()
+   };
+   members::set_active_count(count);
+   members::clear_cache();
+
+   let remove = Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
+      if let Some(registry) = ctx.userdata::<Desktop<'js>>() {
+         let mut list = registry.members.borrow_mut();
+         list.retain(|entry| entry.id != id);
+         members::set_active_count(list.len());
+         members::clear_cache();
+         accessories::invalidate_discord_windows();
+      }
+   })?;
+   remove.set(
+      "update",
+      Function::new(ctx.clone(), |ctx: Ctx<'js>, user_id: Opt<String>| {
+         if let Some(uid) = user_id.0.and_then(|s| s.parse::<u64>().ok()) {
+            let items = evaluate_members_in_ctx(&ctx, uid);
+            members::set_rendered(uid, items);
+         } else {
+            members::clear_cache();
+            accessories::invalidate_discord_windows();
+         }
+      })?,
+   )?;
+   Ok(remove)
+}
+
 #[expect(
    clippy::cast_possible_truncation,
    clippy::cast_sign_loss,
@@ -309,7 +450,8 @@ fn cached_message_and_me(channel_id: u64, message_id: u64) -> (Option<String>, O
    let Ok(db) = store::database(&state.files_dir()) else {
       return (None, None);
    };
-   // Phoenix keys messages `<channel>:<message>`, each zero-padded to 20 digits.
+   // Phoenix keys messages `<channel>:<message>`, each zero-padded to 20
+   // digits.
    let rows = if channel_id != 0 {
       store::query(&db, "SELECT v FROM messages WHERE k = ?", &[format!(
          "{channel_id:020}:{message_id:020}"
@@ -656,6 +798,19 @@ pub fn desktop_ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<
       "addMessageAccessory",
       Function::new(ctx.clone(), move |ctx: Ctx<'js>, options: Object<'js>| {
          add_message_accessory(&ctx, &owner, &options)
+      })?,
+   )?;
+
+   ui.set(
+      "iconUrl",
+      Function::new(ctx.clone(), |svg: String| icons::url(&svg))?,
+   )?;
+
+   let member_owner = plugin.to_owned();
+   ui.set(
+      "addMemberDecoration",
+      Function::new(ctx.clone(), move |ctx: Ctx<'js>, options: Object<'js>| {
+         add_member_decoration(&ctx, &member_owner, &options)
       })?,
    )?;
 
