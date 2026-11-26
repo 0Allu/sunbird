@@ -275,6 +275,9 @@ pub mod layout {
    /// Bytes reserved for each other Mana struct (`Switch`, `Button`, `Modal`,
    /// `TextInput`, `TextArea`, `MenuItem`).
    pub const SCRATCH_CAP: usize = 0x800;
+   /// Bytes reserved for a `gpui::Svg`: its `Interactivity`, paths and
+   /// transformation.
+   pub const SVG_CAP: usize = 0x800;
    /// `gpui::AnyElement`, a boxed element and its vtable.
    pub const ANY_ELEMENT: usize = 0x20;
    /// `gpui::Entity<T>`: id, `Weak` and `TypeId`.
@@ -1475,14 +1478,18 @@ pub struct MessageRow {
 }
 
 /// The one function calling every helper that formats `message-content-{id}`.
+/// Builds since November 2026 keep two copies of the template, one per helper.
 pub fn message_row(image: &Image<'_>) -> Found<MessageRow> {
    /// `lea rax, [rcx + disp32]`, the id the template formats.
    const MSG_ID_LEA: Pattern = Pattern::new("48 8D 81 ?? ?? ?? ??");
-   let anchor = one(
-      "message-content template",
-      &image.find_bytes(b"\x10message-content-\xc0\x00"),
-   )?;
-   let leas = lea_refs(image, anchor);
+   let anchors = image.find_bytes(b"\x10message-content-\xc0\x00");
+   if anchors.is_empty() {
+      return Err("message-content template not found".to_owned());
+   }
+   let leas = anchors
+      .into_iter()
+      .flat_map(|anchor| lea_refs(image, anchor))
+      .collect::<Vec<_>>();
    if leas.is_empty() {
       return Err("nothing loads the message-content template".to_owned());
    }
@@ -1578,6 +1585,668 @@ pub fn message_body(image: &Image<'_>, render_row: usize) -> Found<MessageBody> 
       msg_id_offset,
       row_colors_offset,
    })
+}
+
+/// A hex displacement as `disasm` prints it, like `1F8h`.
+fn hex_disp(text: &str) -> Option<usize> {
+   usize::from_str_radix(text.strip_suffix('h')?, 16).ok()
+}
+
+/// The member list's row renderer, and where its name joins the row.
+pub struct MemberRow {
+   pub func: usize,
+   pub name: MemberName,
+}
+
+/// The `call rel32`s adding a member's name to its row, one per branch.
+///
+/// They are `Div::child` by value, `(sret, div, &name) -> Div`. The row's
+/// function keeps its closure's environment pointer in a frame slot, and the
+/// environment a pointer to the member's user id.
+#[derive(Clone, Debug)]
+pub struct MemberName {
+   pub sites:        Vec<usize>,
+   /// `[rbp+closure_slot]` holds the environment pointer at the calls.
+   pub closure_slot: usize,
+   /// `[environment+env]` holds the pointer to the user id.
+   pub env:          usize,
+}
+
+/// `mov r9, register`, how a call island hands a caller's register to a
+/// three-argument detour as its fourth.
+#[must_use]
+pub fn mov_r9_from(register: Register) -> [u8; 3] {
+   let (number, ext) = reg(register);
+   [0x49 | ext << 2, 0x89, 0xC0 | number << 3 | 1]
+}
+
+/// The member row hands its name to a closure building the name's row: the
+/// closure's environment holds the name and, at `+env`, a pointer to the id
+/// slot (`lea rax, [slot]; mov [r8+env], rax`). The closure's function saves
+/// the environment pointer (`mov [rbp+closure_slot], r8`) and adds the name
+/// with calls taking a freshly copied `AnyElement` in `r8`.
+fn member_name(
+   image: &Image<'_>,
+   lines: &[phoenix_hook::x86::Line],
+   slot: &str,
+) -> Option<MemberName> {
+   let (store, env) = lines.iter().enumerate().find_map(|(at, line)| {
+      let field = line.text.strip_prefix("mov [r8+")?.strip_suffix("],rax")?;
+      (lines.get(at.checked_sub(1)?)?.text == format!("lea rax,{slot}"))
+         .then_some((at, hex_disp(field)?))
+   })?;
+   let closure = lines[store..].iter().take(40).find_map(|line| {
+      line
+         .text
+         .starts_with("call ")
+         .then_some(line.target)
+         .flatten()
+   })?;
+   let code = function_code(image, closure, "member name row").ok()?;
+   let body = phoenix_hook::x86::disasm(code, closure, usize::MAX);
+   let closure_slot = body
+      .iter()
+      .take(16)
+      .find_map(|line| hex_disp(line.text.strip_prefix("mov [rbp+")?.strip_suffix("],r8")?))?;
+   // The element copied into `r8`: `movups xmm0, [source]` then `movaps [r8],
+   // xmm0` and `movaps [r8+10h], xmm1`.
+   let copied_from = |at: usize| {
+      let args = &body[at.saturating_sub(12)..at];
+      let copies = args.iter().any(|line| line.text == "movaps [r8],xmm0")
+         && args.iter().any(|line| line.text == "movaps [r8+10h],xmm1");
+      copies
+         .then(|| {
+            args
+               .iter()
+               .rev()
+               .find_map(|line| line.text.strip_prefix("movups xmm0,"))
+         })
+         .flatten()
+   };
+   let calls = body
+      .iter()
+      .enumerate()
+      .filter(|(_, line)| line.text.starts_with("call "))
+      .filter_map(|(at, line)| Some((line.addr, line.target?, line.len, copied_from(at)?)))
+      .collect::<Vec<_>>();
+   let child = calls.first()?.1;
+   // Styled names are first wrapped with the name taken straight from the
+   // environment; the row then gets the name from the copy the function keeps
+   // in its frame, in every branch. Only those calls add to the row itself.
+   let mut frame_sources = calls
+      .iter()
+      .filter(|call| call.1 == child)
+      .filter_map(|call| call.3.starts_with("[rbp+").then_some(call.3))
+      .collect::<Vec<_>>();
+   frame_sources.sort_unstable();
+   let source = frame_sources
+      .chunk_by(|a, b| a == b)
+      .max_by_key(|run| run.len())?
+      .first()
+      .copied()?;
+   let sites = calls
+      .iter()
+      .filter(|&&(site, target, len, from)| {
+         target == child && from == source && len == 5 && image.read(site, 1) == Some(&[0xE8])
+      })
+      .map(|&(site, ..)| site)
+      .collect::<Vec<_>>();
+   (!sites.is_empty()).then_some(MemberName {
+      sites,
+      closure_slot,
+      env,
+   })
+}
+
+/// The function formatting `member-{}-{}`, a member row's element id from the
+/// member's user id, and the calls in it adding the member's name to its row.
+pub fn member_row(image: &Image<'_>) -> Found<MemberRow> {
+   if !matches!(Abi::of(image), Abi::Win64) {
+      return Err("the member row is only decoded on Win64".to_owned());
+   }
+   let anchors = image.find_bytes(b"member-{}-{}");
+   let mut funcs = anchors
+      .iter()
+      .flat_map(|&anchor| lea_refs(image, anchor))
+      .filter_map(|lea| Some(image.function_bounds(lea)?.0))
+      .collect::<Vec<_>>();
+   funcs.sort_unstable();
+   funcs.dedup();
+   let func = one("member row", &funcs)?;
+   if !prologues(image).row.at(image, func) {
+      return Err("member row prologue changed".to_owned());
+   }
+   let lines =
+      phoenix_hook::x86::disasm(function_code(image, func, "member row")?, func, usize::MAX);
+   // The id is formatted from a frame slot: `mov r9, [rbp+slot]` before the
+   // template's `lea`.
+   let template = lines
+      .iter()
+      .position(|line| line.target.is_some_and(|target| anchors.contains(&target)))
+      .ok_or("member row template load not found")?;
+   let slot = lines[template.saturating_sub(12)..template]
+      .iter()
+      .rev()
+      .find_map(|line| line.text.strip_prefix("mov r9,"))
+      .filter(|slot| slot.starts_with("[rbp+"))
+      .ok_or("member row id slot not found")?;
+   Ok(MemberRow {
+      func,
+      name: member_name(image, &lines, slot).ok_or("member name row not decoded")?,
+   })
+}
+
+/// The DM list's row renderer, and where its recipient's name joins the row.
+///
+/// The row adds the box built around the name (`dm-name-bounds`) to a flex row
+/// with `Div::child` by value, `(sret, div, &name) -> Div`. One-to-one DMs keep
+/// their recipient as an `Option<UserId>` copied into two frame slots, the
+/// one the row's presence dot (`dm-status`) is keyed by; group DMs have none.
+#[derive(Clone, Debug)]
+pub struct DmRow {
+   pub func: usize,
+   /// The `call rel32` adding the name box.
+   pub site: usize,
+   /// `[rbp+some]` is the recipient's `Option` tag, zero for none.
+   pub some: usize,
+   /// `[rbp+user]` is the recipient's user id when `some` is set.
+   pub user: usize,
+}
+
+/// The single function loading `text`, as it is laid out in the string pool.
+fn loader_of(image: &Image<'_>, what: &str, text: &[u8]) -> Found<usize> {
+   let mut funcs = image
+      .find_bytes(text)
+      .iter()
+      .flat_map(|&anchor| lea_refs(image, anchor))
+      .filter_map(|lea| Some(image.function_bounds(lea)?.0))
+      .collect::<Vec<_>>();
+   funcs.sort_unstable();
+   funcs.dedup();
+   one(what, &funcs)
+}
+
+/// `[rbp+slot]` as `disasm` prints a frame operand, like `[rbp+0DB0h]`.
+fn frame_slot(operand: &str) -> Option<usize> {
+   hex_disp(operand.strip_prefix("[rbp+")?.strip_suffix(']')?)
+}
+
+/// The `Option<UserId>` slots read after `anchor`'s `lea`: the id is the first
+/// `mov rax, [rbp+user]` after it, and the row copies the option there from
+/// its props, `mov rax, [r]; mov [rbp+some], rax; mov rax, [r+8]; mov
+/// [rbp+user], rax`, then tests `cmp qword ptr [rbp+some], 0`.
+fn option_user_slots(lines: &[phoenix_hook::x86::Line], anchor: usize) -> Option<(usize, usize)> {
+   let user = lines
+      .get(anchor..)?
+      .iter()
+      .take(8)
+      .find_map(|line| frame_slot(line.text.strip_prefix("mov rax,")?))?;
+   let stored = |line: &phoenix_hook::x86::Line| {
+      frame_slot(line.text.strip_prefix("mov ")?.strip_suffix(",rax")?)
+   };
+   let at = lines.iter().position(|line| stored(line) == Some(user))?;
+   let [load_some, store_some, load_user] = lines.get(at.checked_sub(3)?..at)? else {
+      return None;
+   };
+   let props = load_user
+      .text
+      .strip_prefix("mov rax,[")?
+      .strip_suffix("+8]")?;
+   let some = stored(store_some)?;
+   let tested = lines.iter().any(|line| {
+      line
+         .text
+         .strip_prefix("cmp qword ptr ")
+         .and_then(|rest| rest.strip_suffix(",0"))
+         .and_then(frame_slot)
+         == Some(some)
+   });
+   (load_some.text == format!("mov rax,[{props}]") && tested).then_some((some, user))
+}
+
+/// The DM row: the one caller of the function building the box around the
+/// recipient's name, and the call adding that box's element to the row.
+pub fn dm_row(image: &Image<'_>) -> Found<DmRow> {
+   if !matches!(Abi::of(image), Abi::Win64) {
+      return Err("the DM row is only decoded on Win64".to_owned());
+   }
+   let name_box = loader_of(image, "DM name box", b"dm-name-bounds")?;
+   let funcs = callers(image, name_box).into_iter().collect::<Vec<_>>();
+   let func = one("DM row", &funcs)?;
+   let lines = phoenix_hook::x86::disasm(function_code(image, func, "DM row")?, func, usize::MAX);
+   let built = lines
+      .iter()
+      .position(|line| line.text.starts_with("call ") && line.target == Some(name_box))
+      .ok_or("DM name box call not found")?;
+   let out = lines[built.saturating_sub(8)..built]
+      .iter()
+      .rev()
+      .find_map(|line| frame_slot(line.text.strip_prefix("lea rcx,")?))
+      .ok_or("DM name box result not found")?;
+   // The element moves into `r8` as `movups xmm0, [out]` then `movaps [r8],
+   // xmm0` and `movaps [r8+10h], xmm1`.
+   let call = (built + 1..lines.len().min(built + 80))
+      .filter(|&at| lines[at].text.starts_with("call "))
+      .find(|&at| {
+         let args = &lines[at.saturating_sub(12)..at];
+         args
+            .iter()
+            .any(|line| line.text.strip_prefix("movups xmm0,").and_then(frame_slot) == Some(out))
+            && args.iter().any(|line| line.text == "movaps [r8],xmm0")
+            && args.iter().any(|line| line.text == "movaps [r8+10h],xmm1")
+      })
+      .map(|at| &lines[at])
+      .ok_or("DM name child call not found")?;
+   let child = call.target.ok_or("DM name child call is indirect")?;
+   // The name box adds the name itself with the same `Div::child`.
+   let inner = phoenix_hook::x86::disasm(
+      function_code(image, name_box, "DM name box")?,
+      name_box,
+      usize::MAX,
+   );
+   if call.len != 5
+      || image.read(call.addr, 1) != Some(&[0xE8])
+      || !inner.iter().any(|line| line.target == Some(child))
+   {
+      return Err("DM name child is not Div::child".to_owned());
+   }
+   let status = image.find_bytes(b"dm-status");
+   let anchor = lines
+      .iter()
+      .position(|line| line.target.is_some_and(|target| status.contains(&target)))
+      .ok_or("DM status id not found")?;
+   let (some, user) = option_user_slots(&lines, anchor).ok_or("DM recipient slots not decoded")?;
+   Ok(DmRow {
+      func,
+      site: call.addr,
+      some,
+      user,
+   })
+}
+
+/// The message header's node API, and where each header row adds the author's
+/// name.
+///
+/// Headers are not GPUI `Div`s but Discord's own `Rc<Node>` handles: every
+/// builder call takes the handle and returns it, cloned first when shared.
+#[derive(Clone, Debug)]
+pub struct MessageHeader {
+   /// The calls adding the name, one per display mode.
+   pub sites:      Vec<HeaderSite>,
+   /// `child_node(node, child) -> node`, adding a node as a child.
+   pub child_node: usize,
+   pub svg:        NodeSvg,
+}
+
+/// Discord's node SVG leaf, drawn from an asset path.
+#[derive(Clone, Copy, Debug)]
+pub struct NodeSvg {
+   /// `svg_new(out, path ptr, path len, size: f32)`.
+   pub new:   usize,
+   /// `push_svg(node, &leaf) -> node`, moving the leaf into a boxed child.
+   pub push:  usize,
+   /// The leaf's color tag (`1` when set); the packed color follows it.
+   pub color: usize,
+   /// The leaf's size, which `push_svg` copies.
+   pub size:  usize,
+}
+
+/// A `call child_node` adding the name wrapper to a header row.
+#[derive(Clone, Copy, Debug)]
+pub struct HeaderSite {
+   pub site: usize,
+   /// `[rbp+slot]` holds the message id at the call.
+   pub slot: usize,
+}
+
+/// The app tag's element id template, loaded by the two header row builders.
+const HEADER_APP_TAG: &[u8] = b"\x0fheader-app-tag-\xc0\x00";
+/// A bundled icon drawn as a node SVG leaf.
+const NODE_SVG: &[u8] = b"features_ui/partner.svg";
+/// `sub rsp,48h; lea rax,[rsp+28h]; and dword ptr [rax],0; mov [rax+8],rdx`:
+/// the child handle wrapped as a node child, tag 0.
+const CHILD_NODE_HEAD: [u8; 16] = [
+   0x48, 0x83, 0xEC, 0x48, 0x48, 0x8D, 0x44, 0x24, 0x28, 0x83, 0x20, 0x00, 0x48, 0x89, 0x50, 0x08,
+];
+
+/// The register or memory operand an instruction writes, as `disasm` prints
+/// it: `mov rsi,rax` writes `rsi`.
+fn written(line: &phoenix_hook::x86::Line) -> Option<&str> {
+   let (_, operands) = line.text.split_once(' ')?;
+   Some(operands.split_once(',')?.0)
+}
+
+/// Locates [`MessageHeader`]. `body` is [`message_body`]'s function, whose
+/// auto-moderation avatar fallback draws a node SVG leaf.
+///
+/// Both row builders add the name with `mov rdx,reg; call child_node`, where
+/// `reg` holds what one function called only by the two builders returned.
+/// The message id slot is the format argument of the app tag's element id.
+pub fn message_header(image: &Image<'_>, body: usize) -> Found<MessageHeader> {
+   if !matches!(Abi::of(image), Abi::Win64) {
+      return Err("the message header is only decoded on Win64".to_owned());
+   }
+   let anchor = one("header-app-tag template", &image.find_bytes(HEADER_APP_TAG))?;
+   let mut builders = lea_refs(image, anchor)
+      .into_iter()
+      .filter_map(|lea| Some(image.function_bounds(lea)?.0))
+      .collect::<Vec<_>>();
+   builders.sort_unstable();
+   builders.dedup();
+   if builders.len() != 2 {
+      return Err(format!(
+         "the app tag template is loaded by {} functions",
+         builders.len()
+      ));
+   }
+   let decoded = builders
+      .iter()
+      .map(|&func| header_builder(image, func, anchor))
+      .collect::<Found<Vec<_>>>()?;
+   let both = builders.iter().copied().collect::<HashSet<_>>();
+   let mut sites = Vec::new();
+   let mut child_node = None;
+   for (slot, adds) in &decoded {
+      let names = adds
+         .iter()
+         .filter(|&&(_, _, producer)| callers(image, producer) == both)
+         .copied()
+         .collect::<Vec<_>>();
+      let (site, callee, _) = one("header name add", &names)?;
+      if child_node.is_some_and(|known| known != callee) {
+         return Err("the header builders add children differently".to_owned());
+      }
+      child_node = Some(callee);
+      sites.push(HeaderSite { site, slot: *slot });
+   }
+   let child_node = child_node.ok_or("header child_node not found")?;
+   Ok(MessageHeader {
+      sites,
+      child_node,
+      svg: node_svg(image, body)?,
+   })
+}
+
+/// `(site, callee, producer)`: a `call child_node` adding what `producer`
+/// returned.
+type ChildAdd = (usize, usize, usize);
+
+/// A header builder's message id slot, and every call adding a call's result
+/// with `child_node`.
+fn header_builder(image: &Image<'_>, func: usize, anchor: usize) -> Found<(usize, Vec<ChildAdd>)> {
+   let is_child_node = |func: usize| image.read(func, 16) == Some(&CHILD_NODE_HEAD[..]);
+   let lines = phoenix_hook::x86::disasm(
+      function_code(image, func, "header builder")?,
+      func,
+      usize::MAX,
+   );
+   let template = lines
+      .iter()
+      .position(|line| line.target == Some(anchor))
+      .ok_or("header app tag load not decoded")?;
+   let slot = lines[template.saturating_sub(8)..template]
+      .iter()
+      .rev()
+      .find_map(|line| hex_disp(line.text.strip_prefix("lea rax,[rbp+")?.strip_suffix(']')?))
+      .ok_or("header message id slot not found")?;
+   let mut adds = Vec::new();
+   for at in 1..lines.len() {
+      let line = &lines[at];
+      let Some(callee) = line.target.filter(|_| line.text.starts_with("call ")) else {
+         continue;
+      };
+      let Some(reg) = lines[at - 1].text.strip_prefix("mov rdx,") else {
+         continue;
+      };
+      if line.len != 5 || !is_child_node(callee) {
+         continue;
+      }
+      let Some(set) = (0..at - 1).rev().find(|&j| written(&lines[j]) == Some(reg)) else {
+         continue;
+      };
+      if lines[set].text != format!("mov {reg},rax") {
+         continue;
+      }
+      let producer = lines[..set]
+         .iter()
+         .rev()
+         .find(|line| line.text != "nop")
+         .filter(|line| line.text.starts_with("call "))
+         .and_then(|line| line.target);
+      if let Some(producer) = producer {
+         adds.push((line.addr, callee, producer));
+      }
+   }
+   Ok((slot, adds))
+}
+
+fn node_svg(image: &Image<'_>, body: usize) -> Found<NodeSvg> {
+   let mut svg_news = image
+      .find_bytes(NODE_SVG)
+      .into_iter()
+      .flat_map(|path| lea_refs(image, path))
+      .filter_map(|lea| {
+         let code = image.read(lea, 0x40)?;
+         phoenix_hook::x86::disasm(code, lea, 12)
+            .into_iter()
+            .find(|line| line.text.starts_with("call "))?
+            .target
+      })
+      .collect::<Vec<_>>();
+   // The leaf keeps the size from `xmm3` and the path at `out+10h`; the bundled
+   // icon is drawn as a GPUI `Svg` elsewhere too.
+   svg_news.retain(|&func| {
+      image.read(func, 0x30).is_some_and(|head| {
+         let head = phoenix_hook::x86::disasm(head, func, 8);
+         head.iter().any(|line| line.text == "movaps xmm6,xmm3")
+            && head.iter().any(|line| line.text == "add rcx,10h")
+      })
+   });
+   svg_news.sort_unstable();
+   svg_news.dedup();
+   let svg_new = one("node svg_new", &svg_news)?;
+
+   // In the body: `lea rcx,[rbp+leaf]; ...; call svg_new`, then
+   // `mov dword ptr [rbp+color],1` and the call pushing the leaf.
+   let lines = phoenix_hook::x86::disasm(
+      function_code(image, body, "message body")?,
+      body,
+      usize::MAX,
+   );
+   let (push_svg, svg_color) = lines
+      .iter()
+      .enumerate()
+      .filter(|(_, line)| line.target == Some(svg_new) && line.text.starts_with("call "))
+      .find_map(|(at, _)| {
+         let leaf = lines[at.saturating_sub(8)..at]
+            .iter()
+            .rev()
+            .find_map(|line| {
+               hex_disp(line.text.strip_prefix("lea rcx,[rbp+")?.strip_suffix(']')?)
+            })?;
+         let after = &lines[at + 1..(at + 24).min(lines.len())];
+         let push = after.iter().find(|line| line.text.starts_with("call "))?;
+         let tag = after
+            .iter()
+            .take_while(|line| line.addr < push.addr)
+            .find_map(|line| {
+               hex_disp(
+                  line
+                     .text
+                     .strip_prefix("mov dword ptr [rbp+")?
+                     .strip_suffix("],1")?,
+               )
+            })?;
+         Some((push.target?, tag.checked_sub(leaf)?))
+      })
+      .ok_or("node SVG leaf push not found in the message body")?;
+   if !(4..0x30).contains(&svg_color) {
+      return Err(format!("node SVG color at {svg_color:#x}"));
+   }
+   // `push_svg` boxes the leaf first: `push size; pop rdx` before the
+   // allocation.
+   let convert = calls_in(image, push_svg, 0x40)
+      .first()
+      .ok_or("push_svg calls nothing")?
+      .1;
+   let code = image
+      .read(convert, 0x80)
+      .ok_or("the leaf box is unmapped")?;
+   let head = phoenix_hook::x86::disasm(code, convert, 32);
+   let leaf_size = head
+      .windows(2)
+      .find_map(|pair| {
+         (pair[1].text == "pop rdx")
+            .then(|| hex_disp(pair[0].text.strip_prefix("push ")?))
+            .flatten()
+      })
+      .filter(|&size| svg_color + 8 <= size && size <= 0x100)
+      .ok_or("node SVG leaf size not found")?;
+   Ok(NodeSvg {
+      new:   svg_new,
+      push:  push_svg,
+      color: svg_color,
+      size:  leaf_size,
+   })
+}
+
+/// A bundled icon every build so far draws with `svg().path(..)`, which the
+/// SVG builders and the asset loader are found from.
+const BUNDLED_SVG: &[u8] = b"features_ui/platform-spotify.svg";
+
+/// GPUI's `Svg` element builders.
+#[derive(Clone, Copy, Debug)]
+pub struct SvgBuilders {
+   /// `svg()`: `(sret, &caller_location) -> Svg`.
+   pub new:       usize,
+   /// `Svg::path`: `(sret, svg, &'static str ptr, len) -> Svg`.
+   pub path:      usize,
+   /// `Svg::into_any_element`: `(sret, svg) -> AnyElement`.
+   pub into_any:  usize,
+   /// `Svg`'s size, which `into_any` moves.
+   pub size:      usize,
+   /// Where `Svg` keeps its boxed `StyleRefinement`.
+   pub style_box: usize,
+}
+
+/// The function drawing [`BUNDLED_SVG`]: `svg()` is the call before the path
+/// is loaded, `path` the call after it, and `into_any` the call writing the
+/// function's `sret`. A style setter on the way reads the style box.
+pub fn svg_builders(image: &Image<'_>) -> Found<SvgBuilders> {
+   if !matches!(Abi::of(image), Abi::Win64) {
+      return Err("the SVG builders are only decoded on Win64".to_owned());
+   }
+   let anchors = image.find_bytes(BUNDLED_SVG);
+   let (func, lea) = anchors
+      .iter()
+      .flat_map(|&anchor| lea_refs(image, anchor))
+      .find_map(|lea| Some((image.function_bounds(lea)?.0, lea)))
+      .ok_or("no code draws the bundled SVG")?;
+   let lines = phoenix_hook::x86::disasm(function_code(image, func, "SVG icon")?, func, usize::MAX);
+   let at = lines
+      .iter()
+      .position(|line| line.addr == lea)
+      .ok_or("SVG path load not decoded")?;
+   let call_target = |line: &phoenix_hook::x86::Line| {
+      line
+         .text
+         .starts_with("call ")
+         .then_some(line.target)
+         .flatten()
+   };
+   let new = lines[..at]
+      .iter()
+      .rev()
+      .find_map(call_target)
+      .ok_or("svg() call not found")?;
+   let after = lines[at..]
+      .iter()
+      .filter_map(call_target)
+      .collect::<Vec<_>>();
+   let path = *after.first().ok_or("Svg::path call not found")?;
+   // `mov rax, [rdx+box]` at the head of a style setter taking the `Svg`.
+   let style_box = after
+      .iter()
+      .take(4)
+      .find_map(|&callee| {
+         let head = image.read(callee, 0x20)?;
+         phoenix_hook::x86::disasm(head, callee, 6)
+            .iter()
+            .find_map(|line| hex_disp(line.text.strip_prefix("mov rax,[rdx+")?.strip_suffix(']')?))
+      })
+      .filter(|&offset| (0x100..0x800).contains(&offset))
+      .ok_or("Svg style box not found")?;
+   // The last call, whose result the function returns.
+   let ret = lines
+      .iter()
+      .position(|line| line.text == "ret")
+      .ok_or("SVG icon return not found")?;
+   let into_any = lines[at..ret]
+      .iter()
+      .rev()
+      .find_map(call_target)
+      .ok_or("Svg::into_any call not found")?;
+   let size = image
+      .read(into_any, 0x30)
+      .map(|head| phoenix_hook::x86::disasm(head, into_any, 8))
+      .and_then(|head| {
+         head
+            .iter()
+            .find_map(|line| hex_disp(line.text.strip_prefix("mov r8d,")?))
+      })
+      .filter(|&size| (style_box..0x1000).contains(&size))
+      .ok_or("Svg size not found")?;
+   Ok(SvgBuilders {
+      new,
+      path,
+      into_any,
+      size,
+      style_box,
+   })
+}
+
+/// Discord's asset loader, `(sret, path ptr, path len) -> Option<Vec<u8>>`.
+///
+/// It ends at the bundle holding [`BUNDLED_SVG`]. The bundle sorts records
+/// `{path ptr, path len, index}`; its descriptor points at their start, and the
+/// loader loads the descriptor.
+pub fn asset_load(image: &Image<'_>) -> Found<usize> {
+   let record = |slot: usize| {
+      let ptr = image.read_usize(slot)?;
+      let len = image.read_usize(slot + 8)?;
+      let index = image.read_usize(slot + 16)?;
+      let path = image
+         .read(ptr, len)
+         .filter(|_| (3..=200).contains(&len) && index < 100_000)?;
+      path
+         .iter()
+         .all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(byte))
+         .then_some(())
+   };
+   let mut slots = image
+      .find_bytes(BUNDLED_SVG)
+      .into_iter()
+      .flat_map(|string| image.pointers_to(string))
+      .filter(|&slot| {
+         image.read_usize(slot + 8) == Some(BUNDLED_SVG.len()) && record(slot).is_some()
+      })
+      .collect::<Vec<_>>();
+   slots.dedup();
+   let mut start = one("bundled SVG record", &slots)?;
+   while let Some(previous) = start.checked_sub(24)
+      && record(previous).is_some()
+   {
+      start = previous;
+   }
+   let descriptor = one("asset bundle", &image.pointers_to(start))?;
+   let mut loaders = lea_refs(image, descriptor)
+      .into_iter()
+      .filter_map(|lea| Some(image.function_bounds(lea)?.0))
+      .filter(|&func| prologues(image).media_fetch.at(image, func))
+      .collect::<Vec<_>>();
+   loaders.sort_unstable();
+   loaders.dedup();
+   one("asset loader", &loaders)
 }
 
 /// `Store::delete_message`, the client's optimistic delete. It shares the map

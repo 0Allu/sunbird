@@ -1,5 +1,6 @@
 //! phoenix on Desktop Phoenix: the access gate, the HTTP transport hooks, the
-//! Sunbird pages in User Settings, message accessories and the tray.
+//! Sunbird pages in User Settings, message accessories, member list
+//! decorations and the tray.
 
 #![cfg(any(windows, all(target_os = "linux", target_arch = "x86_64")))]
 
@@ -10,7 +11,10 @@ mod discord;
 mod emoji;
 mod fetch;
 mod gpui;
+mod headers;
+mod icons;
 mod js;
+mod members;
 mod message;
 mod modal;
 mod os;
@@ -108,7 +112,13 @@ pub fn prepare() -> Result<(), Error> {
    staff::prepare(&image);
    settings::install(&image);
    modal::install(&image);
+   // Before accessories hooks `MessageRow::render`, whose prologue the header
+   // locators check.
+   let header = headers::locate(&image);
    accessories::install(&image);
+   members::install(&image);
+   headers::install(&image, header);
+   icons::install(&image);
    context_menu::install(&image);
    message::install(&image);
    badges::install(&image);

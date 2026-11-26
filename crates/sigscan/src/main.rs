@@ -233,6 +233,35 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
                .map(|l| format!("{:x?}", l.style))
                .map_err(|_| "needs the layouts".to_owned()),
          );
+         report(
+            "member row",
+            desktop::member_row(image).map(|row| {
+               format!(
+                  "{} (name calls {:x?}, frame +{:#x}, env +{:#x})",
+                  at(row.func),
+                  row.name.sites,
+                  row.name.closure_slot,
+                  row.name.env
+               )
+            }),
+         );
+         report(
+            "dm row",
+            desktop::dm_row(image).map(|row| {
+               format!(
+                  "{} (name call {}, recipient [rbp+{:#x}] if [rbp+{:#x}])",
+                  at(row.func),
+                  at(row.site),
+                  row.user,
+                  row.some
+               )
+            }),
+         );
+         report(
+            "svg builders",
+            desktop::svg_builders(image).map(|svg| format!("{svg:x?}")),
+         );
+         report("asset loader", desktop::asset_load(image).map(at));
          let row = desktop::message_row(image);
          report(
             "message row",
@@ -333,15 +362,43 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
                   .ok_or_else(|| "prologue changed".to_owned())
             }),
          );
+         let json = desktop::message_json(image);
          report(
             "message json",
-            desktop::message_json(image).map(|found| {
-               format!(
-                  "to_value {}, drop {}",
-                  at(found.to_value),
-                  at(found.drop_value)
-               )
-            }),
+            json
+               .as_ref()
+               .map(|found| {
+                  format!(
+                     "to_value {}, drop {}",
+                     at(found.to_value),
+                     at(found.drop_value)
+                  )
+               })
+               .map_err(Clone::clone),
+         );
+         report(
+            "message header",
+            row.as_ref()
+               .map_err(|_| "needs the message row".to_owned())
+               .and_then(|row| desktop::message_body(image, row.func))
+               .and_then(|body| desktop::message_header(image, body.func))
+               .map(|header| {
+                  let sites = header
+                     .sites
+                     .iter()
+                     .map(|site| format!("{} [rbp+{:#x}]", at(site.site), site.slot))
+                     .collect::<Vec<_>>()
+                     .join(", ");
+                  format!(
+                     "name calls {sites}; child_node {}, svg_new {}, push_svg {}, leaf {:#x} \
+                      (color +{:#x})",
+                     at(header.child_node),
+                     at(header.svg.new),
+                     at(header.svg.push),
+                     header.svg.size,
+                     header.svg.color
+                  )
+               }),
          );
       },
       Machine::Aarch64 if macho => {
