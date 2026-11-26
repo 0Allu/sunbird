@@ -29,7 +29,7 @@ jobs:
         env "BINDGEN_EXTRA_CLANG_ARGS_armv7-linux-androideabi=--target=armv7-linux-androideabi28 --sysroot=$sysroot" \
           cargo ndk -t armeabi-v7a -P 28 clippy --locked --workspace --exclude sigscan -- -D warnings
       test: true
-      test-command: cargo test --locked --workspace
+      test-command: cargo test --locked --workspace && tsc -p plugins/tsconfig.json
 
   ios:
     name: iOS
