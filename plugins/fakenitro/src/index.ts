@@ -118,16 +118,34 @@ let loadedGuilds = -1;
 let loadedAt = 0;
 let growing = true;
 const load = async () => {
-  const guilds = await phoenix.stores.sql<{ g: string; e: string | null; s: string | null }>(
-    "SELECT k AS g, json_extract(CAST(v AS TEXT), '$.emojis') AS e," +
-      " json_extract(CAST(v AS TEXT), '$.stickers') AS s FROM guilds",
-  );
-  growing = guilds.length > loadedGuilds;
-  loadedGuilds = guilds.length;
-  for (const { g, e, s } of guilds) {
-    if (e) addEmojis(unpad(g), JSON.parse(e));
-    if (s) addStickers(JSON.parse(s));
+  let guildCount = 0;
+  try {
+    const guilds = await phoenix.stores.sql<{ g: string; e: string | null; s: string | null }>(
+      "SELECT k AS g, json_extract(CAST(v AS TEXT), '$.emojis') AS e," +
+        " json_extract(CAST(v AS TEXT), '$.stickers') AS s FROM guilds",
+    );
+    guildCount = guilds.length;
+    for (const { g, e, s } of guilds) {
+      if (e) addEmojis(unpad(g), JSON.parse(e));
+      if (s) addStickers(JSON.parse(s));
+    }
+  } catch {
+    // android < 12 sqlite has no json_extract, fall back to parsing in js
+    const guilds = await phoenix.stores
+      .sql<{ g: string; v: string | null }>("SELECT k AS g, CAST(v AS TEXT) AS v FROM guilds")
+      .catch(() => []);
+    guildCount = guilds.length;
+    for (const { g, v } of guilds) {
+      if (!v) continue;
+      try {
+        const parsed = JSON.parse(v) as { emojis?: Phoenix.Emoji[]; stickers?: Phoenix.Sticker[] };
+        addEmojis(unpad(g), parsed.emojis);
+        addStickers(parsed.stickers);
+      } catch {}
+    }
   }
+  growing = guildCount > loadedGuilds;
+  loadedGuilds = guildCount;
   // `guild:channel` keys: Android keeps them in `channel_stubs`, Desktop in
   // `channels`. One row per guild keeps this under the 10000-row limit.
   for (const table of ["channel_stubs", "channels"]) {
@@ -140,7 +158,7 @@ const load = async () => {
     for (const { g, c } of channels) for (const id of c.split(",")) channelGuild.set(unpad(id), unpad(g));
   }
   if (growing) phoenix.log.info(
-    `${emojis.size} emojis, ${stickers.size} stickers in ${guilds.length} servers, ${channelGuild.size} channels`,
+    `${emojis.size} emojis, ${stickers.size} stickers in ${guildCount} servers, ${channelGuild.size} channels`,
   );
 };
 const reload = () => {
@@ -160,6 +178,12 @@ if (gateway.guildCreate) {
     for (const channel of guild.channels ?? []) channelGuild.set(channel.id, guild.id);
   });
 }
+if (gateway.channelCreate) {
+  phoenix.on(gateway.channelCreate, (channel) => {
+    const c = channel as Phoenix.Channel;
+    if (c?.id && c.guild_id) channelGuild.set(c.id, c.guild_id);
+  });
+}
 if (gateway.guildEmojisUpdate) {
   phoenix.on(gateway.guildEmojisUpdate, (update) => addEmojis(update.guild_id, update.emojis));
 }
@@ -170,23 +194,52 @@ if (gateway.guildStickersUpdate) {
   });
 }
 
+const applyUser = (user: { id?: string; premium_type?: number } | null | undefined) => {
+  if (!user?.id) return;
+  premiumType = user.premium_type ?? 0;
+  // desktop switches accounts without reloading plugins
+  if (currentUserId !== null && currentUserId !== user.id) {
+    for (const map of [emojis, byName, stickers, channelGuild, picked] as Map<string, unknown>[]) map.clear();
+    loadedGuilds = -1;
+    settleBy = Date.now() + SETTLE_MS;
+    reload();
+  }
+  currentUserId = user.id;
+};
+
+let fetchingMe = false;
+const fetchMeFallback = () => {
+  if (premiumType !== null || fetchingMe) return;
+  fetchingMe = true;
+  phoenix.discord
+    .get("/users/@me")
+    .then((res) => {
+      if (res.ok) applyUser(res.json<Phoenix.CurrentUser>());
+      else fetchingMe = false;
+    })
+    .catch(() => {
+      fetchingMe = false;
+    });
+};
+
 const readTier = () =>
   phoenix.discord
     .me()
     .then((user) => {
-      if (!user) return;
-      premiumType = user.premium_type ?? 0;
-      // Desktop switches accounts without reloading plugins.
-      if (currentUserId !== null && currentUserId !== user.id) {
-        for (const map of [emojis, byName, stickers, channelGuild, picked] as Map<string, unknown>[]) map.clear();
-        loadedGuilds = -1;
-        settleBy = Date.now() + SETTLE_MS;
-        reload();
-      }
-      currentUserId = user.id;
+      if (user) applyUser(user);
+      else fetchMeFallback();
     })
-    .catch((err) => phoenix.log.warn(`reading the account: ${err}`));
+    .catch((err) => {
+      phoenix.log.warn(`reading the account: ${err}`);
+      fetchMeFallback();
+    });
 readTier();
+if (gateway.ready) {
+  phoenix.on(gateway.ready, (ready) => applyUser(ready.user));
+}
+if (gateway.userUpdate) {
+  phoenix.on(gateway.userUpdate, (user) => applyUser(user));
+}
 // A first login fills the cache by now.
 // ponytail: a tier bought or lost mid-session shows on the next sync.
 if (gateway.readySupplemental) {
@@ -246,6 +299,7 @@ const guildOf = (ctx: Phoenix.UiContext) => (ctx.channelId ? channelGuild.get(ct
 // the message box instead, like an unlocked pick, and remember which emoji it
 // was, since several servers can have one by that name.
 phoenix.messages.onEmojiPick((id, ctx) => {
+  readTier();
   const emoji = emojis.get(id);
   if (!emoji || usable(emoji, guildOf(ctx))) return;
   picked.set(emoji.name, emoji);
@@ -261,6 +315,27 @@ phoenix.messages.onSend((text, ctx) => {
   const result = rewrite(text, guildOf(ctx));
   return result === text ? undefined : result;
 });
+
+const sendChannelId = (path: string) => {
+  const clean = path.split(/[?#]/, 1)[0];
+  const match = /^\/channels\/(\d+)\/messages(?:\/\d+)?$/.exec(clean);
+  return match ? match[1] : undefined;
+};
+
+// catch outgoing sends/edits even if the mobile composer hook missed them
+const rewriteRequest = (req: Phoenix.InterceptedRequest): Phoenix.RequestHookResult => {
+  readTier();
+  if (!req.body.includes(":")) return;
+  const body = req.json<{ content?: unknown }>();
+  if (!body || typeof body.content !== "string" || !body.content.includes(":")) return;
+  const channelId = sendChannelId(req.path);
+  const result = rewrite(body.content, channelId ? channelGuild.get(channelId) : undefined);
+  if (result === body.content) return;
+  return { body: { ...body, content: result } };
+};
+
+phoenix.discord.onRequest({ method: "POST", pathPrefix: "/channels/", pathSuffix: "/messages" }, rewriteRequest);
+phoenix.discord.onRequest({ method: "PATCH", pathPrefix: "/channels/", pathIncludes: "/messages/" }, rewriteRequest);
 
 // --- Incoming rendering: turn fake Nitro emojis, stickers, and GIFs into real ones ---
 
