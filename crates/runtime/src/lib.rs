@@ -530,7 +530,6 @@ pub fn start_hooked(
    let first_run = !state.choices_path().exists();
    platform.before_plugins(&state.home);
    let plugins = js::load_plugins(state, bundled)?;
-   remote::ensure_started();
    platform.started(first_run, &plugins);
    Ok(Started {
       target: state.image.path.clone(),

@@ -246,13 +246,15 @@ impl Platform for Desktop {
          return;
       };
       let _ = std::fs::create_dir_all(state.plugins_dir());
-      remote::set_flag(true);
-      // Desktop keeps the shell on, so any local process could reach `/eval`
-      // and the session; only holders of this start's token get in.
+      // Any local process could reach the shell's `/eval` and the session, so
+      // it only listens once DevTools is opened, and only for holders of this
+      // start's token. `SUNBIRD_DEVTOOLS` starts it at launch, for `dev.ps1`.
       remote::require_token(&state.plugins_dir().with_file_name("debug-shell-token"));
-      remote::ensure_started();
+      if std::env::var_os("SUNBIRD_DEVTOOLS").is_some() {
+         start_shell();
+      }
       phoenix_ui_desktop::start_tray(phoenix_ui_desktop::TrayConfig {
-         dashboard_url:    remote::dashboard_url(),
+         devtools_url:     Arc::new(start_shell),
          plugins_dir:      state.plugins_dir(),
          on_reload_all:    Some(Arc::new(phoenix_runtime::reload_all)),
          on_check_updates: Some(Arc::new(phoenix_runtime::update::check_now)),
@@ -325,6 +327,13 @@ impl Platform for Desktop {
 
 /// Opens a native choose or sheet dialog for the dashboard and blocks this
 /// request's thread until it is answered.
+/// Starts the debug shell if it isn't running and returns the `DevTools` URL.
+fn start_shell() -> String {
+   remote::set_flag(true);
+   remote::ensure_started();
+   remote::dashboard_url()
+}
+
 fn dialog(body: &[u8], sheet: bool) -> remote::Reply {
    let Ok(request) = serde_json::from_slice::<DialogRequest>(body) else {
       return remote::err("400 Bad Request", "expected a JSON dialog request");
