@@ -1202,21 +1202,29 @@ declare namespace Phoenix {
     userId?: string;
   }
 
+  /// An SVG icon: its shape is filled with `color` (32-bit ARGB), whatever fills the source has.
+  interface RenderedIcon {
+    svg: string;
+    color?: number;
+  }
+
   /// Text a `render` returns: plain, colored (32-bit ARGB), or nothing. Under a message's content,
   /// `tint` also colors the message's author and text (32-bit ARGB); `text` may then be empty.
+  /// `icons` are drawn in place of `text` where the client can draw them (desktop's member
+  /// decorations), and `text` shows everywhere else.
   type Rendered =
     | string
-    | { text?: string; color?: number; tint?: number }
+    | { text?: string; color?: number; tint?: number; icons?: RenderedIcon[] }
     | null
     | undefined
     | false;
 
   /// Undoes a registration. `update` draws it again, asking the plugin anew; for a message
-  /// accessory, `update(messageId)` redraws only that message, and for a profile tab,
-  /// `update(userId)` only that profile's page.
+  /// accessory, `update(messageId)` redraws only that message, and for a profile tab or a member
+  /// decoration, `update(userId)` only that user's.
   interface Remover {
     (): void;
-    update?(messageId?: string): void;
+    update?(id?: string): void;
   }
 
   /// A pressable piece of text, or plain text without `onPress`. `color` (32-bit ARGB) wins over
@@ -1331,6 +1339,15 @@ declare namespace Phoenix {
       priority?: number;
       render(ctx: MessageContext): Rendered | Promise<Rendered>;
     }): Remover;
+    /// Text at the end of a user's row in the member list (desktop only; mobile accepts it and
+    /// draws nothing). It runs once per user, and the result is kept until `update(userId)`.
+    addMemberDecoration(options: {
+      priority?: number;
+      render(ctx: { userId: string }): Rendered | Promise<Rendered>;
+    }): Remover;
+    /// A URL serving `svg`, as it is, for places that load images by URL, like profile badges.
+    /// Desktop only: elsewhere it is null.
+    iconUrl(svg: string): string | null;
     /// A row in the message long-press menu, above Delete. The menu closes on press.
     addMessageAction(options: {
       label: string;

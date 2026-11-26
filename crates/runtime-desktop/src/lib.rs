@@ -1,5 +1,6 @@
 //! phoenix on Desktop Phoenix: the access gate, the HTTP transport hooks, the
-//! Sunbird pages in User Settings, message accessories and the tray.
+//! Sunbird pages in User Settings, message accessories, member list
+//! decorations and the tray.
 
 #![cfg(any(windows, all(target_os = "linux", target_arch = "x86_64")))]
 
@@ -10,7 +11,9 @@ mod discord;
 mod emoji;
 mod fetch;
 mod gpui;
+mod icons;
 mod js;
+mod members;
 mod message;
 mod modal;
 mod os;
@@ -109,6 +112,8 @@ pub fn prepare() -> Result<(), Error> {
    settings::install(&image);
    modal::install(&image);
    accessories::install(&image);
+   members::install(&image);
+   icons::install(&image);
    context_menu::install(&image);
    message::install(&image);
    badges::install(&image);
@@ -306,6 +311,10 @@ impl Platform for Desktop {
          ("POST", "/ui/sheet") => Some(dialog(&request.body, true)),
          _ => None,
       }
+   }
+
+   fn public(&self, request: &remote::Request) -> Option<remote::Reply> {
+      icons::serve(&request.path)
    }
 
    fn routes(&self) -> &'static str {

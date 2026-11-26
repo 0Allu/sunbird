@@ -340,6 +340,21 @@ pub fn ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<Object<'
    add_view_queries(ctx, &ui)?;
    add_mount(ctx, plugin, &ui)?;
    add_notify(ctx, plugin, &ui)?;
+   // No local image URLs here: plugins fall back to their own.
+   ui.set(
+      "iconUrl",
+      Function::new(ctx.clone(), |ctx: Ctx<'js>| Value::new_null(ctx))?,
+   )?;
+   // Phoenix's member list has no patch target here yet: a remover that does
+   // nothing, so plugins written for desktop load.
+   ui.set(
+      "addMemberDecoration",
+      Function::new(ctx.clone(), |ctx: Ctx<'js>| {
+         let remove = Function::new(ctx.clone(), || {})?;
+         remove.set("update", Function::new(ctx.clone(), || {})?)?;
+         Ok::<_, rquickjs::Error>(remove)
+      })?,
+   )?;
    ui.set(
       "copy",
       Function::new(ctx.clone(), |text: String| {

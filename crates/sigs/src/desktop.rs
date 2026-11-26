@@ -275,6 +275,9 @@ pub mod layout {
    /// Bytes reserved for each other Mana struct (`Switch`, `Button`, `Modal`,
    /// `TextInput`, `TextArea`, `MenuItem`).
    pub const SCRATCH_CAP: usize = 0x800;
+   /// Bytes reserved for a `gpui::Svg`: its `Interactivity`, paths and
+   /// transformation.
+   pub const SVG_CAP: usize = 0x800;
    /// `gpui::AnyElement`, a boxed element and its vtable.
    pub const ANY_ELEMENT: usize = 0x20;
    /// `gpui::Entity<T>`: id, `Weak` and `TypeId`.
@@ -805,7 +808,8 @@ pub fn settings_label_parts(image: &Image<'_>) -> Found<SettingsLabel> {
 /// The `cmp <arg2>, 0xf` immediate in `is_page_visible`, which the runtime
 /// lowers so page 24 is always shown.
 pub fn settings_visibility(image: &Image<'_>) -> Found<usize> {
-   // `movzx ecx, <page>; mov al, 1; lea <arg2>, [rcx-9]; cmp <arg2>, 0xf; ja ...`
+   // `movzx ecx, <page>; mov al, 1; lea <arg2>, [rcx-9]; cmp <arg2>, 0xf; ja
+   // ...`
    let (guard, imm) = match Abi::of(image) {
       Abi::Win64 => {
          (
@@ -1467,14 +1471,18 @@ pub struct MessageRow {
 }
 
 /// The one function calling every helper that formats `message-content-{id}`.
+/// Builds since November 2026 keep two copies of the template, one per helper.
 pub fn message_row(image: &Image<'_>) -> Found<MessageRow> {
    /// `lea rax, [rcx + disp32]`, the id the template formats.
    const MSG_ID_LEA: Pattern = Pattern::new("48 8D 81 ?? ?? ?? ??");
-   let anchor = one(
-      "message-content template",
-      &image.find_bytes(b"\x10message-content-\xc0\x00"),
-   )?;
-   let leas = lea_refs(image, anchor);
+   let anchors = image.find_bytes(b"\x10message-content-\xc0\x00");
+   if anchors.is_empty() {
+      return Err("message-content template not found".to_owned());
+   }
+   let leas = anchors
+      .into_iter()
+      .flat_map(|anchor| lea_refs(image, anchor))
+      .collect::<Vec<_>>();
    if leas.is_empty() {
       return Err("nothing loads the message-content template".to_owned());
    }
@@ -1570,6 +1578,319 @@ pub fn message_body(image: &Image<'_>, render_row: usize) -> Found<MessageBody> 
       msg_id_offset,
       row_colors_offset,
    })
+}
+
+/// A hex displacement as `disasm` prints it, like `1F8h`.
+fn hex_disp(text: &str) -> Option<usize> {
+   usize::from_str_radix(text.strip_suffix('h')?, 16).ok()
+}
+
+/// The member list's row renderer, and where its list item keeps the user id.
+pub struct MemberRow {
+   pub func:           usize,
+   /// The item's enum tag for a member row, the others being section headers.
+   pub member_tag:     u8,
+   /// Where a member item keeps the user id.
+   pub user_id_offset: usize,
+   /// Where the name joins its row, when that decodes.
+   pub name:           Option<MemberName>,
+}
+
+/// The `call rel32`s adding a member's name to its row, one per branch.
+///
+/// They are `Div::child` by value, `(sret, div, &name) -> Div`. The row's
+/// function keeps its closure's environment pointer in a frame slot, and the
+/// environment a pointer to the member's user id.
+#[derive(Clone, Debug)]
+pub struct MemberName {
+   pub sites:        Vec<usize>,
+   /// `[rbp+closure_slot]` holds the environment pointer at the calls.
+   pub closure_slot: usize,
+   /// `[environment+env]` holds the pointer to the user id.
+   pub env:          usize,
+}
+
+/// `mov r9, register`, how a call island hands a caller's register to a
+/// three-argument detour as its fourth.
+#[must_use]
+pub fn mov_r9_from(register: Register) -> [u8; 3] {
+   let (number, ext) = reg(register);
+   [0x49 | ext << 2, 0x89, 0xC0 | number << 3 | 1]
+}
+
+/// The member row hands its name to a closure building the name's row: the
+/// closure's environment holds the name and, at `+env`, a pointer to the id
+/// slot (`lea rax, [slot]; mov [r8+env], rax`). The closure's function saves
+/// the environment pointer (`mov [rbp+closure_slot], r8`) and adds the name
+/// with calls taking a freshly copied `AnyElement` in `r8`.
+fn member_name(
+   image: &Image<'_>,
+   lines: &[phoenix_hook::x86::Line],
+   slot: &str,
+) -> Option<MemberName> {
+   let (store, env) = lines.iter().enumerate().find_map(|(at, line)| {
+      let field = line.text.strip_prefix("mov [r8+")?.strip_suffix("],rax")?;
+      (lines.get(at.checked_sub(1)?)?.text == format!("lea rax,{slot}"))
+         .then_some((at, hex_disp(field)?))
+   })?;
+   let closure = lines[store..].iter().take(40).find_map(|line| {
+      line
+         .text
+         .starts_with("call ")
+         .then_some(line.target)
+         .flatten()
+   })?;
+   let code = function_code(image, closure, "member name row").ok()?;
+   let body = phoenix_hook::x86::disasm(code, closure, usize::MAX);
+   let closure_slot = body
+      .iter()
+      .take(16)
+      .find_map(|line| hex_disp(line.text.strip_prefix("mov [rbp+")?.strip_suffix("],r8")?))?;
+   // The element copied into `r8`: `movups xmm0, [source]` then `movaps [r8],
+   // xmm0` and `movaps [r8+10h], xmm1`.
+   let copied_from = |at: usize| {
+      let args = &body[at.saturating_sub(12)..at];
+      let copies = args.iter().any(|line| line.text == "movaps [r8],xmm0")
+         && args.iter().any(|line| line.text == "movaps [r8+10h],xmm1");
+      copies
+         .then(|| {
+            args
+               .iter()
+               .rev()
+               .find_map(|line| line.text.strip_prefix("movups xmm0,"))
+         })
+         .flatten()
+   };
+   let calls = body
+      .iter()
+      .enumerate()
+      .filter(|(_, line)| line.text.starts_with("call "))
+      .filter_map(|(at, line)| Some((line.addr, line.target?, line.len, copied_from(at)?)))
+      .collect::<Vec<_>>();
+   let child = calls.first()?.1;
+   // Styled names are first wrapped with the name taken straight from the
+   // environment; the row then gets the name from the copy the function keeps
+   // in its frame, in every branch. Only those calls add to the row itself.
+   let mut frame_sources = calls
+      .iter()
+      .filter(|call| call.1 == child)
+      .filter_map(|call| call.3.starts_with("[rbp+").then_some(call.3))
+      .collect::<Vec<_>>();
+   frame_sources.sort_unstable();
+   let source = frame_sources
+      .chunk_by(|a, b| a == b)
+      .max_by_key(|run| run.len())?
+      .first()
+      .copied()?;
+   let sites = calls
+      .iter()
+      .filter(|&&(site, target, len, from)| {
+         target == child && from == source && len == 5 && image.read(site, 1) == Some(&[0xE8])
+      })
+      .map(|&(site, ..)| site)
+      .collect::<Vec<_>>();
+   (!sites.is_empty()).then_some(MemberName {
+      sites,
+      closure_slot,
+      env,
+   })
+}
+
+/// The function formatting `member-{}-{}`, a member row's element id from the
+/// member's user id. It takes `(sret, &item, ..)` and returns an `AnyElement`.
+pub fn member_row(image: &Image<'_>) -> Found<MemberRow> {
+   if !matches!(Abi::of(image), Abi::Win64) {
+      return Err("the member row is only decoded on Win64".to_owned());
+   }
+   let anchors = image.find_bytes(b"member-{}-{}");
+   let mut funcs = anchors
+      .iter()
+      .flat_map(|&anchor| lea_refs(image, anchor))
+      .filter_map(|lea| Some(image.function_bounds(lea)?.0))
+      .collect::<Vec<_>>();
+   funcs.sort_unstable();
+   funcs.dedup();
+   let func = one("member row", &funcs)?;
+   if !prologues(image).row.at(image, func) {
+      return Err("member row prologue changed".to_owned());
+   }
+   let lines =
+      phoenix_hook::x86::disasm(function_code(image, func, "member row")?, func, usize::MAX);
+   // The id is formatted from a frame slot: `mov r9, [rbp+slot]` before the
+   // template's `lea`.
+   let template = lines
+      .iter()
+      .position(|line| line.target.is_some_and(|target| anchors.contains(&target)))
+      .ok_or("member row template load not found")?;
+   let slot = lines[template.saturating_sub(12)..template]
+      .iter()
+      .rev()
+      .find_map(|line| line.text.strip_prefix("mov r9,"))
+      .filter(|slot| slot.starts_with("[rbp+"))
+      .ok_or("member row id slot not found")?;
+   // That slot is filled once, from the item: `mov rax, [rax+offset]` after the
+   // item's tag is compared.
+   let store = lines
+      .iter()
+      .position(|line| line.text == format!("mov {slot},rax"))
+      .ok_or("member row id store not found")?;
+   let user_id_offset = lines[store.saturating_sub(1)]
+      .text
+      .strip_prefix("mov rax,[rax+")
+      .and_then(|rest| hex_disp(rest.strip_suffix(']')?))
+      .filter(|&offset| offset < 0x100)
+      .ok_or("member row id load not found")?;
+   let member_tag = lines[store.saturating_sub(8)..store]
+      .iter()
+      .rev()
+      .find_map(|line| line.text.strip_prefix("cmp eax,"))
+      .and_then(|tag| tag.parse::<u8>().ok())
+      .ok_or("member row tag check not found")?;
+   Ok(MemberRow {
+      func,
+      member_tag,
+      user_id_offset,
+      name: member_name(image, &lines, slot),
+   })
+}
+
+/// A bundled icon every build so far draws with `svg().path(..)`, which the
+/// SVG builders and the asset loader are found from.
+const BUNDLED_SVG: &[u8] = b"features_ui/platform-spotify.svg";
+
+/// GPUI's `Svg` element builders.
+#[derive(Clone, Copy, Debug)]
+pub struct SvgBuilders {
+   /// `svg()`: `(sret, &caller_location) -> Svg`.
+   pub new:       usize,
+   /// `Svg::path`: `(sret, svg, &'static str ptr, len) -> Svg`.
+   pub path:      usize,
+   /// `Svg::into_any_element`: `(sret, svg) -> AnyElement`.
+   pub into_any:  usize,
+   /// `Svg`'s size, which `into_any` moves.
+   pub size:      usize,
+   /// Where `Svg` keeps its boxed `StyleRefinement`.
+   pub style_box: usize,
+}
+
+/// The function drawing [`BUNDLED_SVG`]: `svg()` is the call before the path
+/// is loaded, `path` the call after it, and `into_any` the call writing the
+/// function's `sret`. A style setter on the way reads the style box.
+pub fn svg_builders(image: &Image<'_>) -> Found<SvgBuilders> {
+   if !matches!(Abi::of(image), Abi::Win64) {
+      return Err("the SVG builders are only decoded on Win64".to_owned());
+   }
+   let anchors = image.find_bytes(BUNDLED_SVG);
+   let (func, lea) = anchors
+      .iter()
+      .flat_map(|&anchor| lea_refs(image, anchor))
+      .find_map(|lea| Some((image.function_bounds(lea)?.0, lea)))
+      .ok_or("no code draws the bundled SVG")?;
+   let lines = phoenix_hook::x86::disasm(function_code(image, func, "SVG icon")?, func, usize::MAX);
+   let at = lines
+      .iter()
+      .position(|line| line.addr == lea)
+      .ok_or("SVG path load not decoded")?;
+   let call_target = |line: &phoenix_hook::x86::Line| {
+      line
+         .text
+         .starts_with("call ")
+         .then_some(line.target)
+         .flatten()
+   };
+   let new = lines[..at]
+      .iter()
+      .rev()
+      .find_map(call_target)
+      .ok_or("svg() call not found")?;
+   let after = lines[at..]
+      .iter()
+      .filter_map(call_target)
+      .collect::<Vec<_>>();
+   let path = *after.first().ok_or("Svg::path call not found")?;
+   // `mov rax, [rdx+box]` at the head of a style setter taking the `Svg`.
+   let style_box = after
+      .iter()
+      .take(4)
+      .find_map(|&callee| {
+         let head = image.read(callee, 0x20)?;
+         phoenix_hook::x86::disasm(head, callee, 6)
+            .iter()
+            .find_map(|line| hex_disp(line.text.strip_prefix("mov rax,[rdx+")?.strip_suffix(']')?))
+      })
+      .filter(|&offset| (0x100..0x800).contains(&offset))
+      .ok_or("Svg style box not found")?;
+   // The last call, whose result the function returns.
+   let ret = lines
+      .iter()
+      .position(|line| line.text == "ret")
+      .ok_or("SVG icon return not found")?;
+   let into_any = lines[at..ret]
+      .iter()
+      .rev()
+      .find_map(call_target)
+      .ok_or("Svg::into_any call not found")?;
+   let size = image
+      .read(into_any, 0x30)
+      .map(|head| phoenix_hook::x86::disasm(head, into_any, 8))
+      .and_then(|head| {
+         head
+            .iter()
+            .find_map(|line| hex_disp(line.text.strip_prefix("mov r8d,")?))
+      })
+      .filter(|&size| (style_box..0x1000).contains(&size))
+      .ok_or("Svg size not found")?;
+   Ok(SvgBuilders {
+      new,
+      path,
+      into_any,
+      size,
+      style_box,
+   })
+}
+
+/// Discord's asset loader, `(sret, path ptr, path len) -> Option<Vec<u8>>`.
+///
+/// It ends at the bundle holding [`BUNDLED_SVG`]. The bundle sorts records
+/// `{path ptr, path len, index}`; its descriptor points at their start, and the
+/// loader loads the descriptor.
+pub fn asset_load(image: &Image<'_>) -> Found<usize> {
+   let record = |slot: usize| {
+      let ptr = image.read_usize(slot)?;
+      let len = image.read_usize(slot + 8)?;
+      let index = image.read_usize(slot + 16)?;
+      let path = image
+         .read(ptr, len)
+         .filter(|_| (3..=200).contains(&len) && index < 100_000)?;
+      path
+         .iter()
+         .all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(byte))
+         .then_some(())
+   };
+   let mut slots = image
+      .find_bytes(BUNDLED_SVG)
+      .into_iter()
+      .flat_map(|string| image.pointers_to(string))
+      .filter(|&slot| {
+         image.read_usize(slot + 8) == Some(BUNDLED_SVG.len()) && record(slot).is_some()
+      })
+      .collect::<Vec<_>>();
+   slots.dedup();
+   let mut start = one("bundled SVG record", &slots)?;
+   while let Some(previous) = start.checked_sub(24)
+      && record(previous).is_some()
+   {
+      start = previous;
+   }
+   let descriptor = one("asset bundle", &image.pointers_to(start))?;
+   let mut loaders = lea_refs(image, descriptor)
+      .into_iter()
+      .filter_map(|lea| Some(image.function_bounds(lea)?.0))
+      .filter(|&func| prologues(image).media_fetch.at(image, func))
+      .collect::<Vec<_>>();
+   loaders.sort_unstable();
+   loaders.dedup();
+   one("asset loader", &loaders)
 }
 
 /// `Store::delete_message`, the client's optimistic delete. It shares the map
@@ -1807,7 +2128,8 @@ pub fn message_context_menu(image: &Image<'_>) -> Found<MessageContextMenu> {
       .ok_or("MessageContextMenu channel_id offset not found")?;
 
    // Find the `Copy Message ID` and `Delete Message` `lea`s inside `build_fn`
-   // directly (scanning only the ~19 KiB function instead of the whole `.text`).
+   // directly (scanning only the ~19 KiB function instead of the whole
+   // `.text`).
    let build_bytes = image
       .read(build_fn, build_end - build_fn)
       .ok_or("MessageContextMenu body is unmapped")?;
@@ -2829,7 +3151,8 @@ pub fn text_fields(image: &Image<'_>) -> Found<TextFields> {
             .map(|w| usize::from(w[3]))
       })
    };
-   // `text_get` is the member of C called by the most other members of C (>= 3).
+   // `text_get` is the member of C called by the most other members of C (>=
+   // 3).
    let mut caller_counts: HashMap<usize, usize> = HashMap::new();
    for (func, calls) in &c_calls {
       let mut seen = HashSet::new();
@@ -2907,8 +3230,8 @@ pub fn text_fields(image: &Image<'_>) -> Found<TextFields> {
    }
    let (set_value, sv_calls) = set_value_hits[0];
 
-   // `arc_drop_slow` is called right after `lock dec qword ptr [rax]` (`F0 48 FF
-   // 08`).
+   // `arc_drop_slow` is called right after `lock dec qword ptr [rax]` (`F0 48
+   // FF 08`).
    let arc_drop_slow = sv_calls
       .iter()
       .find_map(|&(site, callee)| {

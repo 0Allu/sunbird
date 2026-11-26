@@ -22,7 +22,9 @@ use crate::{
    js::ui::{
       DesktopAccessory,
       DesktopAction,
+      DesktopMember,
    },
+   members,
 };
 
 /// What plugins registered with the desktop UI, kept in the runtime's userdata
@@ -31,6 +33,8 @@ use crate::{
 pub struct Desktop<'js> {
    /// `phoenix.ui.addMessageAccessory` callbacks.
    pub accessories:   RefCell<Vec<DesktopAccessory<'js>>>,
+   /// `phoenix.ui.addMemberDecoration` callbacks.
+   pub members:       RefCell<Vec<DesktopMember<'js>>>,
    /// `phoenix.ui.addMessageAction` callbacks.
    pub actions:       RefCell<Vec<DesktopAction<'js>>>,
    /// Active `phoenix.ui.openPage` button callbacks, keyed by button ID.
@@ -45,8 +49,9 @@ unsafe impl<'js> JsLifetime<'js> for Desktop<'js> {
    type Changed<'to> = Desktop<'to>;
 }
 
-/// Drops the accessories, context menu actions, open page callbacks, and emoji
-/// pick handlers `name` registered and redraws Discord without them.
+/// Drops the accessories, member decorations, context menu actions, open page
+/// callbacks, and emoji pick handlers `name` registered and redraws Discord
+/// without them.
 pub fn unload(ctx: &Ctx<'_>, name: &str) {
    let Some(registry) = ctx.userdata::<Desktop<'_>>() else {
       return;
@@ -60,6 +65,16 @@ pub fn unload(ctx: &Ctx<'_>, name: &str) {
       accessories::invalidate_discord_windows();
    }
    drop(list);
+
+   let mut decorations = registry.members.borrow_mut();
+   let before_members = decorations.len();
+   decorations.retain(|entry| entry.plugin != name);
+   if decorations.len() != before_members {
+      members::set_active_count(decorations.len());
+      members::clear_cache();
+      accessories::invalidate_discord_windows();
+   }
+   drop(decorations);
 
    let mut actions = registry.actions.borrow_mut();
    let before_actions = actions.len();
