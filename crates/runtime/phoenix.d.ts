@@ -1202,9 +1202,10 @@ declare namespace Phoenix {
     userId?: string;
   }
 
-  /// An SVG icon: its shape is filled with `color` (32-bit ARGB), whatever fills the source has.
+  /// One of Discord's own icons, `icons/<name>.svg` in the client (like `Screen`, `MobilePhone`,
+  /// `GlobeEarth`), filled with `color` (32-bit ARGB).
   interface RenderedIcon {
-    svg: string;
+    name: string;
     color?: number;
   }
 
@@ -1339,15 +1340,12 @@ declare namespace Phoenix {
       priority?: number;
       render(ctx: MessageContext): Rendered | Promise<Rendered>;
     }): Remover;
-    /// Text at the end of a user's row in the member list (desktop only; mobile accepts it and
-    /// draws nothing). It runs once per user, and the result is kept until `update(userId)`.
-    addMemberDecoration(options: {
+    /// Text or icons at the end of a user's row in the member list. Desktop only, so absent
+    /// elsewhere. It runs once per user, and the result is kept until `update(userId)`.
+    addMemberDecoration?(options: {
       priority?: number;
-      render(ctx: { userId: string }): Rendered | Promise<Rendered>;
+      render(ctx: { userId: string }): Rendered;
     }): Remover;
-    /// A URL serving `svg`, as it is, for places that load images by URL, like profile badges.
-    /// Desktop only: elsewhere it is null.
-    iconUrl(svg: string): string | null;
     /// A row in the message long-press menu, above Delete. The menu closes on press.
     addMessageAction(options: {
       label: string;

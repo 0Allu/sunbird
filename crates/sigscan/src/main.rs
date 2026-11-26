@@ -233,6 +233,21 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
                .map(|l| format!("{:x?}", l.style))
                .map_err(|_| "needs the layouts".to_owned()),
          );
+         report(
+            "member row",
+            desktop::member_row(image).map(|row| {
+               format!(
+                  "{} (tag {}, user id +{:#x})",
+                  at(row.func),
+                  row.member_tag,
+                  row.user_id_offset
+               )
+            }),
+         );
+         report(
+            "svg builders",
+            desktop::svg_builders(image).map(|svg| format!("{svg:x?}")),
+         );
          let row = desktop::message_row(image);
          report(
             "message row",

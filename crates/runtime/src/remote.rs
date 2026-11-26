@@ -407,13 +407,6 @@ fn handle(mut stream: TcpStream) {
       write_response(&mut stream, status, content_type, &response, None);
       return;
    }
-   if req.method == "GET"
-      && let Some((status, content_type, response)) =
-         crate::platform().and_then(|platform| platform.public(&req))
-   {
-      write_response(&mut stream, status, content_type, &response, None);
-      return;
-   }
    let mut cookie = None;
    if let Some(token) = TOKEN.get() {
       let (given, in_query) = token_given(&req, token);

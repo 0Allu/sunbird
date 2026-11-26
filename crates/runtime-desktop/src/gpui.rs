@@ -1215,15 +1215,12 @@ type SvgIntoAnyFn = unsafe extern "C" fn(*mut RawAnyElement, *mut RawSvg) -> *mu
 static SVG: OnceLock<SvgSymbols> = OnceLock::new();
 
 /// Resolves the `Svg` builders, after [`locate`].
-pub fn locate_svg(image: &Image<'static>) -> bool {
-   if SVG.get().is_some() {
-      return true;
-   }
+pub fn locate_svg(image: &Image<'static>) {
    let found = match desktop::svg_builders(image) {
       Ok(found) => found,
       Err(err) => {
          log::warn!("desktop gpui: {err}, icons fall back to text");
-         return false;
+         return;
       },
    };
    if found.size > layout::SVG_CAP {
@@ -1232,7 +1229,7 @@ pub fn locate_svg(image: &Image<'static>) -> bool {
          found.size,
          layout::SVG_CAP
       );
-      return false;
+      return;
    }
    // SAFETY: decoded from the code drawing a bundled icon, which calls them
    // with these Rust-ABI signatures.
@@ -1246,21 +1243,6 @@ pub fn locate_svg(image: &Image<'static>) -> bool {
    };
    let _ = SVG.set(symbols);
    log::info!("desktop gpui: resolved Svg builders {found:x?}");
-   true
-}
-
-/// Whether icons can be drawn.
-pub fn svg_ready() -> bool {
-   SVG.get().is_some() && SYMBOLS.get().is_some()
-}
-
-/// `len` bytes from Discord's own allocator, so Discord can free them.
-pub fn discord_alloc(len: usize) -> Option<*mut u8> {
-   let sym = SYMBOLS.get()?;
-   // SAFETY: Discord's `alloc_or_oom(align, size)`, which aborts rather than
-   // returning null.
-   let ptr = unsafe { (sym.alloc_or_oom)(1, len.max(1)) };
-   (!ptr.is_null()).then_some(ptr)
 }
 
 /// An `svg().path(path)` of `px` pixels filled with `color`, as an
@@ -1331,34 +1313,6 @@ fn inline_row(b: &Builder, pieces: &[Piece], font_px: f32) -> RawDiv {
       }
    }
    row
-}
-
-/// Adds `pieces` as one more child of a `Div` Discord built by value, like the
-/// member name's row right after the name.
-pub fn append_pieces(div: *mut c_void, pieces: &[Piece]) -> bool {
-   let Some(sym) = SYMBOLS.get() else {
-      return false;
-   };
-   let Some(push) = sym.div_push_any else {
-      return false;
-   };
-   if div.is_null() || sym.str_into_any.is_none() {
-      return false;
-   }
-   let b = Builder { sym };
-   let row = inline_row(&b, pieces, 13.0);
-   let mut any = MaybeUninit::<RawAnyElement>::uninit();
-   b.write_any(row, any.as_mut_ptr());
-   // SAFETY: `div` is a live `Div` that `Div::child` just returned, whose
-   // children sit at the decoded offset; `push` moves the element into them.
-   unsafe {
-      let children = div
-         .cast::<u8>()
-         .add(sym.layout.div.children)
-         .cast::<c_void>();
-      push(children, any.as_mut_ptr());
-   }
-   true
 }
 
 /// Lays `pieces` over the right end of a rendered row `RawAnyElement`, in
@@ -1789,8 +1743,7 @@ fn render_plugins_tab(
          for setting in &plugin.settings {
             let sid = format!("sunbird-set-{}-{}", plugin.name, setting.key);
             let sdesc = setting.description.as_deref().unwrap_or("");
-            // A text, number or secret setting: its value, and Edit for an
-            // input.
+            // A text, number or secret setting: its value, and Edit for an input.
             let edit_row = |shown: &str, initial: String, kind: FieldKind| {
                let sub = if sdesc.is_empty() {
                   shown.to_owned()

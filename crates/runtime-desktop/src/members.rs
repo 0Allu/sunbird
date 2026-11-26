@@ -4,19 +4,15 @@
 //! Hooks the member list's row renderer, the function formatting
 //! `member-{}-{}`, found by [`desktop::member_row`]. It takes `(sret, &item,
 //! ..)` like `MessageRow::render`, and a member item keeps the user id at a
-//! decoded offset. Plugin decorations go right after the member's name: the
-//! call adding the name to its row is pointed at a detour that adds them next.
-//! Where that does not decode, they lie over the row's right end instead.
+//! decoded offset. Plugin decorations lie over the row's right end.
 
 use std::{
    collections::HashMap,
-   ffi::c_void,
    sync::{
       LazyLock,
       OnceLock,
       RwLock,
       atomic::{
-         AtomicBool,
          AtomicU8,
          AtomicUsize,
          Ordering,
@@ -55,9 +51,6 @@ type RenderMemberFn = unsafe extern "C" fn(
    s6: u64,
 ) -> *mut RawAnyElement;
 
-/// `Div::child` by value, as the name row adds the name: `(sret, div, &name)`.
-type NameChildFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> *mut c_void;
-
 enum CacheEntry {
    Pending,
    Ready(Vec<RenderedAccessory>),
@@ -68,11 +61,6 @@ const MAX_CACHE_ENTRIES: usize = 8192;
 const MIN_SNOWFLAKE: u64 = 1 << 40;
 
 static ORIG_RENDER_MEMBER: OnceLock<RenderMemberFn> = OnceLock::new();
-static ORIG_NAME_CHILD: OnceLock<NameChildFn> = OnceLock::new();
-/// Whether decorations follow the name, not lie over the row's end.
-static NAME_HOOKED: AtomicBool = AtomicBool::new(false);
-static CLOSURE_SLOT: AtomicUsize = AtomicUsize::new(0);
-static ENV_USER_ID: AtomicUsize = AtomicUsize::new(0);
 static USER_ID_OFFSET: AtomicUsize = AtomicUsize::new(0);
 static MEMBER_TAG: AtomicU8 = AtomicU8::new(u8::MAX);
 static ACTIVE_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -168,6 +156,8 @@ pub fn install(image: &Image<'static>) {
       log::warn!("desktop members: GPUI text/push primitives unavailable, skipping");
       return;
    }
+   // Without it, decorations show their text instead of icons.
+   gpui::locate_svg(image);
    let row = match desktop::member_row(image) {
       Ok(row) => row,
       Err(err) => {
@@ -204,88 +194,6 @@ pub fn install(image: &Image<'static>) {
       row.member_tag,
       row.user_id_offset
    );
-   if let Some(name) = &row.name {
-      install_name(image, name);
-   }
-}
-
-/// Points the calls adding the member's name to its row at
-/// [`name_child_detour`], so decorations follow the name inside that row. The
-/// islands hand the detour the row function's frame, where the closure's
-/// environment leads to the user id.
-fn install_name(image: &Image<'static>, name: &desktop::MemberName) {
-   CLOSURE_SLOT.store(name.closure_slot, Ordering::Release);
-   ENV_USER_ID.store(name.env, Ordering::Release);
-   for &site in &name.sites {
-      let Some(target) = image
-         .read(site + 1, 4)
-         .and_then(|rel| rel.try_into().ok())
-         .map(i32::from_le_bytes)
-         .map(|rel| (site + 5).wrapping_add_signed(rel as isize))
-      else {
-         continue;
-      };
-      // SAFETY: `target` is the call's own `Div::child`, the same for every
-      // site, stored before a call can reach the detour.
-      let _ = ORIG_NAME_CHILD.set(unsafe { std::mem::transmute::<usize, NameChildFn>(target) });
-      // SAFETY: runs from `prepare` before Discord threads execute; the island
-      // only sets `r9`, which the three-argument `Div::child` does not read.
-      match unsafe {
-         image.hook_call(
-            site,
-            &desktop::mov_r9_from(phoenix_hook::x86::Register::RBP),
-            name_child_detour as *const () as usize,
-         )
-      } {
-         Ok(_) => {
-            NAME_HOOKED.store(true, Ordering::Release);
-            log::info!("desktop members: hooked the member name @ {site:#x}");
-         },
-         Err(err) => log::warn!("desktop members: member name hook failed: {err}"),
-      }
-   }
-}
-
-unsafe extern "C" fn name_child_detour(
-   out: *mut c_void,
-   div: *mut c_void,
-   child: *mut c_void,
-   frame: *const u8,
-) -> *mut c_void {
-   let Some(orig) = ORIG_NAME_CHILD.get().copied() else {
-      return out;
-   };
-   // SAFETY: forwards `Div::child`'s own arguments.
-   let row = unsafe { orig(out, div, child) };
-   if ACTIVE_COUNT.load(Ordering::Relaxed) == 0 || row.is_null() || frame.is_null() {
-      return row;
-   }
-   // SAFETY: `frame` is the row function's `rbp`, whose decoded slot holds the
-   // closure's environment, which holds a pointer to the member's user id.
-   let user_id = unsafe {
-      let env = frame
-         .add(CLOSURE_SLOT.load(Ordering::Relaxed))
-         .cast::<*const u8>()
-         .read_unaligned();
-      if env.is_null() {
-         return row;
-      }
-      let id = env
-         .add(ENV_USER_ID.load(Ordering::Relaxed))
-         .cast::<*const u64>()
-         .read_unaligned();
-      if id.is_null() {
-         return row;
-      }
-      id.read_unaligned()
-   };
-   if user_id < MIN_SNOWFLAKE {
-      return row;
-   }
-   if let Some(lines) = lines_for(user_id) {
-      let _ = std::panic::catch_unwind(|| gpui::append_pieces(row, &lines));
-   }
-   row
 }
 
 /// The text decorations drew for `user_id`, queueing them when unknown.
@@ -318,7 +226,6 @@ unsafe extern "C" fn render_member_detour(
    // SAFETY: forwards every argument to the original renderer.
    let out = unsafe { orig(sret, item, a2, a3, s0, s1, s2, s3, s4, s5, s6) };
    if ACTIVE_COUNT.load(Ordering::Relaxed) == 0
-      || NAME_HOOKED.load(Ordering::Relaxed)
       || item.is_null()
       || sret.is_null()
    {

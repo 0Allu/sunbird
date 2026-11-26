@@ -75,8 +75,7 @@ pub fn install(image: &Image<'static>) {
          return;
       },
    };
-   // SAFETY: `trampoline` replays the 15-byte prologue and jumps to `func +
-   // 15`.
+   // SAFETY: `trampoline` replays the 15-byte prologue and jumps to `func + 15`.
    let orig = unsafe { std::mem::transmute::<usize, MediaFetchFn>(trampoline) };
    let _ = ORIG_MEDIA_FETCH.set(orig);
    log::info!("desktop badges: hooked libdiscord_media::fetch @ {func:#x}");
@@ -93,8 +92,7 @@ fn decode_hex_url(hex: &str) -> Option<String> {
       bytes.push(u8::try_from((hi << 4) | lo).ok()?);
    }
    let url = String::from_utf8(bytes).ok()?;
-   // Plugin icons come from the runtime's own address, the only `http` here.
-   (url.starts_with("https://") || url.starts_with(&crate::icons::local_base())).then_some(url)
+   url.starts_with("https://").then_some(url)
 }
 
 fn unwrap_badge_url(url: &str) -> Option<String> {

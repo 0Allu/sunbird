@@ -52,7 +52,7 @@ use crate::{
       ActionMeta,
    },
    emoji,
-   icons,
+   gpui,
    js::Desktop,
    members,
    modal::{
@@ -160,27 +160,27 @@ fn parse_rendered(value: &Value<'_>, priority: i32) -> Option<RenderedAccessory>
    None
 }
 
-/// `icons: [{ svg, color }]`, registered for drawing. Empty where icons cannot
-/// be drawn, which leaves the text.
+/// `icons: [{ name, color }]`, Discord's own `icons/<name>.svg`.
 fn parse_icons(obj: &Object<'_>) -> Vec<(&'static str, Option<u32>)> {
    let Ok(Some(list)) = obj.get::<_, Option<Array<'_>>>("icons") else {
       return Vec::new();
    };
-   if !icons::ready() {
-      return Vec::new();
-   }
    list
       .iter::<Object<'_>>()
       .filter_map(Result::ok)
       .take(8)
       .filter_map(|icon| {
-         let svg = icon.get::<_, String>("svg").ok()?;
+         let name = icon.get::<_, String>("name").ok()?;
+         // Only a bare name, so every path stays under `icons/`.
+         if name.is_empty() || name.len() > 40 || !name.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return None;
+         }
          let color = icon
             .get::<_, Option<f64>>("color")
             .ok()
             .flatten()
             .map(to_argb);
-         Some((icons::register(&svg)?, color))
+         Some((gpui::intern_str(&format!("icons/{name}.svg")), color))
       })
       .collect()
 }
@@ -281,8 +281,7 @@ pub fn render_accessories(engine: &Engine, message_id: u64) -> Vec<RenderedAcces
    engine.with(|ctx| evaluate_accessories_in_ctx(&ctx, message_id))
 }
 
-/// Calls every `addMemberDecoration` for `user_id`. Promises land through
-/// [`members::set_rendered`] once they settle.
+/// Calls every `addMemberDecoration` for `user_id`.
 fn evaluate_members_in_ctx<'js>(ctx: &Ctx<'js>, user_id: u64) -> Vec<RenderedAccessory> {
    let Some(registry) = ctx.userdata::<Desktop<'js>>() else {
       return Vec::new();
@@ -295,34 +294,14 @@ fn evaluate_members_in_ctx<'js>(ctx: &Ctx<'js>, user_id: u64) -> Vec<RenderedAcc
    let _ = arg.set("userId", user_id.to_string());
 
    let mut out = Vec::new();
-   let mut pending = Vec::new();
    for decoration in &snapshot {
       match decoration
          .render
          .call::<_, Value<'_>>((arg.clone(),))
          .catch(ctx)
       {
-         Ok(val) if val.is_promise() => pending.push((decoration.priority, val)),
          Ok(val) => out.extend(parse_rendered(&val, decoration.priority)),
          Err(err) => log::error!("[{}] addMemberDecoration render: {err}", decoration.plugin),
-      }
-   }
-   // Each settled promise redraws the row with everything known by then.
-   let settled = std::rc::Rc::new(std::cell::RefCell::new(out.clone()));
-   for (priority, promise) in pending {
-      let Some(then) = promise
-         .as_object()
-         .and_then(|promise| promise.get::<_, Function<'_>>("then").ok())
-      else {
-         continue;
-      };
-      let settled = settled.clone();
-      if let Ok(on_resolve) = Function::new(ctx.clone(), move |resolved: Value<'js>| {
-         let mut all = settled.borrow_mut();
-         all.extend(parse_rendered(&resolved, priority));
-         members::set_rendered(user_id, all.clone());
-      }) {
-         let _ = then.call::<_, Value<'_>>((on_resolve,));
       }
    }
    out
@@ -450,8 +429,7 @@ fn cached_message_and_me(channel_id: u64, message_id: u64) -> (Option<String>, O
    let Ok(db) = store::database(&state.files_dir()) else {
       return (None, None);
    };
-   // Phoenix keys messages `<channel>:<message>`, each zero-padded to 20
-   // digits.
+   // Phoenix keys messages `<channel>:<message>`, each zero-padded to 20 digits.
    let rows = if channel_id != 0 {
       store::query(&db, "SELECT v FROM messages WHERE k = ?", &[format!(
          "{channel_id:020}:{message_id:020}"
@@ -799,11 +777,6 @@ pub fn desktop_ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<
       Function::new(ctx.clone(), move |ctx: Ctx<'js>, options: Object<'js>| {
          add_message_accessory(&ctx, &owner, &options)
       })?,
-   )?;
-
-   ui.set(
-      "iconUrl",
-      Function::new(ctx.clone(), |svg: String| icons::url(&svg))?,
    )?;
 
    let member_owner = plugin.to_owned();

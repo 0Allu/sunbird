@@ -11,7 +11,6 @@ mod discord;
 mod emoji;
 mod fetch;
 mod gpui;
-mod icons;
 mod js;
 mod members;
 mod message;
@@ -113,7 +112,6 @@ pub fn prepare() -> Result<(), Error> {
    modal::install(&image);
    accessories::install(&image);
    members::install(&image);
-   icons::install(&image);
    context_menu::install(&image);
    message::install(&image);
    badges::install(&image);
@@ -311,10 +309,6 @@ impl Platform for Desktop {
          ("POST", "/ui/sheet") => Some(dialog(&request.body, true)),
          _ => None,
       }
-   }
-
-   fn public(&self, request: &remote::Request) -> Option<remote::Reply> {
-      icons::serve(&request.path)
    }
 
    fn routes(&self) -> &'static str {
