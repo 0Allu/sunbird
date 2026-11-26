@@ -236,11 +236,14 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
          report(
             "member row",
             desktop::member_row(image).map(|row| {
+               let closure = match row.name.closure_slot {
+                  Some(slot) => format!("frame +{slot:#x}"),
+                  None => format!("closure in {}", row.name.frame),
+               };
                format!(
-                  "{} (name calls {:x?}, frame +{:#x}, env +{:#x})",
+                  "{} (name calls {:x?}, {closure}, env +{:#x})",
                   at(row.func),
                   row.name.sites,
-                  row.name.closure_slot,
                   row.name.env
                )
             }),
@@ -249,11 +252,12 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
             "dm row",
             desktop::dm_row(image).map(|row| {
                format!(
-                  "{} (name call {}, recipient [rbp+{:#x}] if [rbp+{:#x}])",
+                  "{} (name call {}, recipient [{frame}+{:#x}] if [{frame}+{:#x}])",
                   at(row.func),
                   at(row.site),
                   row.user,
-                  row.some
+                  row.some,
+                  frame = row.frame
                )
             }),
          );
@@ -386,7 +390,7 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
                   let sites = header
                      .sites
                      .iter()
-                     .map(|site| format!("{} [rbp+{:#x}]", at(site.site), site.slot))
+                     .map(|site| format!("{} [{}+{:#x}]", at(site.site), header.frame, site.slot))
                      .collect::<Vec<_>>()
                      .join(", ");
                   format!(
@@ -593,7 +597,18 @@ impl Tools<'_> {
             println!("   -- end of function --");
             break;
          }
-         println!("   {}  {}", self.at(line.addr), line.text);
+         // Calls and jumps through a pointer slot, as ELF builds make them,
+         // print where the slot points.
+         let bytes = &code[line.addr - addr..];
+         let through = match bytes {
+            [0xFF, 0x15, ..] => x86::call_target(self.image, bytes, line.addr).map(|(_, to)| to),
+            [0xFF, 0x25, ..] => x86::jump_target(self.image, bytes, line.addr),
+            _ => None,
+         };
+         match through {
+            Some(to) => println!("   {}  {}   -> {to:#x}", self.at(line.addr), line.text),
+            None => println!("   {}  {}", self.at(line.addr), line.text),
+         }
       }
    }
 }
