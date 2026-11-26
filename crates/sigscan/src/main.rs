@@ -359,6 +359,7 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
             }),
          );
          report("media fetch", desktop::media_fetch(image).map(at));
+         report("composer gift", desktop::composer_gift(image).map(at));
          report(
             "emoji check",
             desktop::emoji_check(image).and_then(|check| {

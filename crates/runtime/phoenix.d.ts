@@ -1408,7 +1408,7 @@ declare namespace Phoenix {
     openPage(options: { title: string; sections: PageSection[] }): PageHandle;
     /// Hides every Phoenix view matching `accessibilityId` (e.g. `"composer.gift"` or
     /// `"Record Voice Message"`) by omitting it from its parent's child list. Call the returned
-    /// function to restore it.
+    /// function to restore it. Desktop only knows `"composer.gift"`.
     hide(accessibilityId: string): Remover;
     /// Observes or intercepts any Phoenix view event (e.g. `"rowDoubleTap"`, `"press"`),
     /// filtered by event name in Rust. With `intercept: true`, return `false` to pass the event

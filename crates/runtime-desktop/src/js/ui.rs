@@ -11,6 +11,7 @@ use std::{
    sync::{
       Arc,
       atomic::{
+         AtomicBool,
          AtomicU64,
          Ordering,
       },
@@ -52,6 +53,7 @@ use crate::{
       self,
       RenderedAccessory,
    },
+   composer,
    context_menu::{
       self,
       ActionMeta,
@@ -1072,6 +1074,19 @@ fn profile_sections<'js>(
    Ok(sections)
 }
 
+/// `phoenix.ui.hide`. Desktop knows one id, the composer's gift button.
+fn hide<'js>(ctx: &Ctx<'js>, id: &str) -> rquickjs::Result<Function<'js>> {
+   if id != "composer.gift" || !composer::hide_gift(true) {
+      return noop_handle(ctx);
+   }
+   let shown = AtomicBool::new(false);
+   Function::new(ctx.clone(), move || {
+      if !shown.swap(true, Ordering::Relaxed) {
+         composer::hide_gift(false);
+      }
+   })
+}
+
 fn drop_page_buttons(ctx: &Ctx<'_>, owner: u64) {
    if let Some(registry) = ctx.userdata::<Desktop<'_>>() {
       registry
@@ -1190,13 +1205,17 @@ pub fn desktop_ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<
       })?,
    )?;
 
+   ui.set(
+      "hide",
+      Function::new(ctx.clone(), |ctx: Ctx<'js>, id: String| hide(&ctx, &id))?,
+   )?;
+
    // Graceful no-op shims for remaining mobile UI-op surfaces so cross-platform
    // plugins load without throwing on desktop.
    for slot_fn in [
       "addHeaderButton",
       "addComposerButton",
       "addProfileSection",
-      "hide",
       "patchProps",
       "onEvent",
       "onNode",

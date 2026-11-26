@@ -2502,6 +2502,57 @@ pub fn asset_load(image: &Image<'_>) -> Found<usize> {
    one("asset loader", &loaders)
 }
 
+/// The `jne rel32` that leaves the composer's Nitro gift button out.
+///
+/// The composer fills an `Option` for the button: its block, after the
+/// `gift-button.wrap` id, stores `Some` (`mov qword [rax - 8], 1`) and jumps
+/// past the `None` store, `and qword [rsp + disp32], 0`. The first `jne` to
+/// just before that store skips the button. Rewriting its two opcode bytes as
+/// `nop; jmp` keeps the displacement, and the locator checks both bytes share
+/// a word so the rewrite is one atomic store.
+pub fn composer_gift(image: &Image<'_>) -> Found<usize> {
+   const SOME_THEN_JMP: [u8; 9] = [0x48, 0xC7, 0x40, 0xF8, 0x01, 0x00, 0x00, 0x00, 0xE9];
+   const NONE_STORE: [u8; 4] = [0x48, 0x83, 0xA4, 0x24];
+
+   let ids = literal(image, b"gift-button.wrap")
+      .into_iter()
+      .flat_map(|text| lea_refs(image, text))
+      .collect::<Vec<_>>();
+   let id = one("gift button id", &ids)?;
+   let (start, _) = image
+      .function_bounds(id)
+      .ok_or("gift button has no function bounds")?;
+   let block = image.read(id, 0x200).ok_or("gift button is unmapped")?;
+   let some = block
+      .windows(SOME_THEN_JMP.len())
+      .position(|window| window == SOME_THEN_JMP)
+      .ok_or("gift button stores no Some")?;
+   let after = rel32_target(image, id + some + SOME_THEN_JMP.len())
+      .ok_or("gift button jump does not decode")?;
+   let none = after.checked_sub(9).ok_or("gift button jumps to 0")?;
+   match image.read(none, 9) {
+      Some(store) if store.starts_with(&NONE_STORE) && store[8] == 0 => {},
+      _ => {
+         return Err(format!(
+            "gift button jumps to {after:#x}, after no None store"
+         ));
+      },
+   }
+   let code = none
+      .checked_sub(start)
+      .and_then(|len| image.read(start, len))
+      .ok_or("gift button's None store is outside its function")?;
+   (0..code.len().saturating_sub(6))
+      .find(|&at| {
+         code[at..at + 2] == [0x0F, 0x85]
+            && rel32_target(image, start + at + 2)
+               .is_some_and(|to| (none - 0x20..=none).contains(&to))
+      })
+      .map(|at| start + at)
+      .filter(|&jne| jne % 8 != 7)
+      .ok_or_else(|| format!("no jne skips the gift button before {none:#x}"))
+}
+
 /// `Store::delete_message`, the client's optimistic delete. It shares the map
 /// and index deletes with the `MESSAGE_DELETE` handler and takes a lock.
 pub fn optimistic_delete(image: &Image<'_>, message_delete: usize) -> Found<usize> {
