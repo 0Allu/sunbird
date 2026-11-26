@@ -1202,10 +1202,9 @@ declare namespace Phoenix {
     userId?: string;
   }
 
-  /// One of Discord's own icons, `icons/<name>.svg` in the client (like `Screen`, `MobilePhone`,
-  /// `GlobeEarth`), filled with `color` (32-bit ARGB).
+  /// An SVG icon: its shape is filled with `color` (32-bit ARGB), whatever fills the source has.
   interface RenderedIcon {
-    name: string;
+    svg: string;
     color?: number;
   }
 

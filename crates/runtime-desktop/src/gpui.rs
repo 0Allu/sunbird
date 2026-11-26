@@ -1245,6 +1245,20 @@ pub fn locate_svg(image: &Image<'static>) {
    log::info!("desktop gpui: resolved Svg builders {found:x?}");
 }
 
+/// Whether icons can be drawn.
+pub fn svg_ready() -> bool {
+   SVG.get().is_some() && SYMBOLS.get().is_some()
+}
+
+/// `len` bytes from Discord's own allocator, so Discord can free them.
+pub fn discord_alloc(len: usize) -> Option<*mut u8> {
+   let sym = SYMBOLS.get()?;
+   // SAFETY: Discord's `alloc_or_oom(align, size)`, which aborts rather than
+   // returning null.
+   let ptr = unsafe { (sym.alloc_or_oom)(1, len.max(1)) };
+   (!ptr.is_null()).then_some(ptr)
+}
+
 /// An `svg().path(path)` of `px` pixels filled with `color`, as an
 /// `AnyElement`.
 fn svg_icon(

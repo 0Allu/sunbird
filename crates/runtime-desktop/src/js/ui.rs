@@ -52,7 +52,7 @@ use crate::{
       ActionMeta,
    },
    emoji,
-   gpui,
+   icons,
    js::Desktop,
    members,
    modal::{
@@ -160,7 +160,8 @@ fn parse_rendered(value: &Value<'_>, priority: i32) -> Option<RenderedAccessory>
    None
 }
 
-/// `icons: [{ name, color }]`, Discord's own `icons/<name>.svg`.
+/// `icons: [{ svg, color }]`, registered for drawing. Empty where icons cannot
+/// be drawn, which leaves the text.
 fn parse_icons(obj: &Object<'_>) -> Vec<(&'static str, Option<u32>)> {
    let Ok(Some(list)) = obj.get::<_, Option<Array<'_>>>("icons") else {
       return Vec::new();
@@ -170,17 +171,13 @@ fn parse_icons(obj: &Object<'_>) -> Vec<(&'static str, Option<u32>)> {
       .filter_map(Result::ok)
       .take(8)
       .filter_map(|icon| {
-         let name = icon.get::<_, String>("name").ok()?;
-         // Only a bare name, so every path stays under `icons/`.
-         if name.is_empty() || name.len() > 40 || !name.bytes().all(|b| b.is_ascii_alphanumeric()) {
-            return None;
-         }
+         let svg = icon.get::<_, String>("svg").ok()?;
          let color = icon
             .get::<_, Option<f64>>("color")
             .ok()
             .flatten()
             .map(to_argb);
-         Some((gpui::intern_str(&format!("icons/{name}.svg")), color))
+         Some((icons::register(&svg)?, color))
       })
       .collect()
 }

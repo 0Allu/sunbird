@@ -1659,7 +1659,7 @@ pub fn member_row(image: &Image<'_>) -> Found<MemberRow> {
 }
 
 /// A bundled icon every build so far draws with `svg().path(..)`, which the
-/// SVG builders are found from.
+/// SVG builders and the asset loader are found from.
 const BUNDLED_SVG: &[u8] = b"features_ui/platform-spotify.svg";
 
 /// GPUI's `Svg` element builders.
@@ -1751,6 +1751,50 @@ pub fn svg_builders(image: &Image<'_>) -> Found<SvgBuilders> {
       size,
       style_box,
    })
+}
+
+/// Discord's asset loader, `(sret, path ptr, path len) -> Option<Vec<u8>>`.
+///
+/// It ends at the bundle holding [`BUNDLED_SVG`]. The bundle sorts records
+/// `{path ptr, path len, index}`; its descriptor points at their start, and the
+/// loader loads the descriptor.
+pub fn asset_load(image: &Image<'_>) -> Found<usize> {
+   let record = |slot: usize| {
+      let ptr = image.read_usize(slot)?;
+      let len = image.read_usize(slot + 8)?;
+      let index = image.read_usize(slot + 16)?;
+      let path = image
+         .read(ptr, len)
+         .filter(|_| (3..=200).contains(&len) && index < 100_000)?;
+      path
+         .iter()
+         .all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(byte))
+         .then_some(())
+   };
+   let mut slots = image
+      .find_bytes(BUNDLED_SVG)
+      .into_iter()
+      .flat_map(|string| image.pointers_to(string))
+      .filter(|&slot| {
+         image.read_usize(slot + 8) == Some(BUNDLED_SVG.len()) && record(slot).is_some()
+      })
+      .collect::<Vec<_>>();
+   slots.dedup();
+   let mut start = one("bundled SVG record", &slots)?;
+   while let Some(previous) = start.checked_sub(24)
+      && record(previous).is_some()
+   {
+      start = previous;
+   }
+   let descriptor = one("asset bundle", &image.pointers_to(start))?;
+   let mut loaders = lea_refs(image, descriptor)
+      .into_iter()
+      .filter_map(|lea| Some(image.function_bounds(lea)?.0))
+      .filter(|&func| prologues(image).media_fetch.at(image, func))
+      .collect::<Vec<_>>();
+   loaders.sort_unstable();
+   loaders.dedup();
+   one("asset loader", &loaders)
 }
 
 /// `Store::delete_message`, the client's optimistic delete. It shares the map

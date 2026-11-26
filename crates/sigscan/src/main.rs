@@ -248,6 +248,7 @@ fn check(image: &Image<'_>, machine: Machine, macho: bool) -> misstep::Result<()
             "svg builders",
             desktop::svg_builders(image).map(|svg| format!("{svg:x?}")),
          );
+         report("asset loader", desktop::asset_load(image).map(at));
          let row = desktop::message_row(image);
          report(
             "message row",
