@@ -83,6 +83,20 @@ pub(crate) fn alloc_exec(at: usize, len: usize) -> Option<usize> {
    (page != libc::MAP_FAILED).then_some(page as usize)
 }
 
+/// Releases a mapping [`alloc_exec`] made at the wrong place.
+#[cfg(all(windows, target_arch = "x86_64"))]
+const fn free_exec(_: usize, _: usize) {
+   // `VirtualAlloc` at an address places the memory there or fails.
+}
+
+/// Releases a mapping [`alloc_exec`] made at the wrong place: the kernel takes
+/// the address as a hint and maps elsewhere when it is taken.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn free_exec(addr: usize, len: usize) {
+   // SAFETY: unmaps the fresh mapping nothing else uses.
+   unsafe { libc::munmap(addr as *mut c_void, len) };
+}
+
 const NT_GNU_BUILD_ID: u32 = 3;
 #[cfg(all(unix, not(target_vendor = "apple")))]
 const PF_X: u32 = 1;
@@ -993,11 +1007,14 @@ impl Image<'static> {
       Ok(trampoline)
    }
 
-   /// Points the one `call rel32` at `site` to `detour`, through an island
-   /// within reach of the call that runs `prefix` and then jumps to `detour`,
-   /// and returns the call's original target. Other calls to that target stay
-   /// as they are. `prefix` may only touch registers the target does not read,
+   /// Points the one call at `site` to `detour`, through an island within
+   /// reach of the call that runs `prefix` and then jumps to `detour`, and
+   /// returns the call's original target. Other calls to that target stay as
+   /// they are. `prefix` may only touch registers the target does not read,
    /// like handing a callee-saved register of the caller to `detour`.
+   ///
+   /// The call is a `call rel32`, or a `call [rip + slot]` as ELF builds make,
+   /// which becomes a `call rel32` and a `nop` the call returns onto.
    ///
    /// # Safety
    ///
@@ -1013,6 +1030,7 @@ impl Image<'static> {
       /// `call rel32`.
       const CALL: u8 = 0xE8;
       const CALL_LEN: usize = 5;
+      const NOP: u8 = 0x90;
       /// Windows hands out memory at this granularity.
       const STEP: usize = 0x1_0000;
       const REACH: usize = 0x7000_0000;
@@ -1025,14 +1043,16 @@ impl Image<'static> {
          }
       };
       let call = self
-         .read(site, CALL_LEN)
+         .read(site, 6)
+         .or_else(|| self.read(site, CALL_LEN))
          .ok_or(crate::Error::Unmapped { addr: site })?;
-      if call[0] != CALL {
-         return Err(refuse("not a call rel32"));
-      }
-      let rel = i32::from_le_bytes([call[1], call[2], call[3], call[4]]);
+      let (len, target) = match call {
+         [CALL, ..] | [0xFF, 0x15, ..] => {
+            crate::x86::call_target(self, call, site).ok_or_else(|| refuse("not a call"))?
+         },
+         _ => return Err(refuse("not a call rel32 or through a slot")),
+      };
       let next = site + CALL_LEN;
-      let target = next.wrapping_add_signed(rel as isize);
       let rel_to =
          |to: usize| i32::try_from(i64::try_from(to).ok()? - i64::try_from(next).ok()?).ok();
 
@@ -1049,13 +1069,23 @@ impl Image<'static> {
       let island = (1..REACH / STEP)
          .filter_map(|k| low.checked_sub(k * STEP))
          .take_while(|&at| rel_to(at).is_some())
-         .find_map(|at| alloc_exec(at, code.len()).filter(|&got| rel_to(got).is_some()))
+         .find_map(|at| {
+            let got = alloc_exec(at, code.len())?;
+            if rel_to(got).is_some() {
+               return Some(got);
+            }
+            free_exec(got, code.len());
+            None
+         })
          .ok_or_else(|| refuse("no memory within reach of the call"))?;
       // SAFETY: `island` holds `code.len()` writable bytes.
       unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), island as *mut u8, code.len()) };
       let rel = rel_to(island).ok_or_else(|| refuse("the island is out of reach"))?;
+      let mut patch = vec![CALL];
+      patch.extend(rel.to_le_bytes());
+      patch.resize(len, NOP);
       // SAFETY: forwarded from the caller.
-      unsafe { self.write_code(site + 1, &rel.to_le_bytes()) }?;
+      unsafe { self.write_code(site, &patch) }?;
       Ok(target)
    }
 }

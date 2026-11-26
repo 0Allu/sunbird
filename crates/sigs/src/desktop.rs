@@ -78,6 +78,8 @@ pub struct Prologues {
    /// and `ReqwestTransport::send`.
    pub frame:       Prologue,
    pub media_fetch: Prologue,
+   /// The asset loader, [`asset_load`].
+   pub asset_load:  Prologue,
    /// `getEmojiUnavailableReason`, a leaf: its first four instructions on
    /// Win64, five on System V, up to the `jne`.
    pub emoji_check: Prologue,
@@ -107,6 +109,10 @@ impl Prologues {
                   pattern: MEDIA_FETCH_PROLOGUE,
                   len:     MEDIA_FETCH_PROLOGUE_LEN,
                },
+               asset_load:  Prologue {
+                  pattern: MEDIA_FETCH_PROLOGUE,
+                  len:     MEDIA_FETCH_PROLOGUE_LEN,
+               },
                emoji_check: Prologue {
                   pattern: Pattern::new("44 0F B6 ?? ?? B0 03 45 89 ?? 41 83 ?? 02"),
                   len:     14,
@@ -118,6 +124,11 @@ impl Prologues {
                row:         SYSV_FRAME,
                frame:       SYSV_FRAME,
                media_fetch: SYSV_FRAME,
+               // Four pushes and `sub rsp, imm32`.
+               asset_load:  Prologue {
+                  pattern: Pattern::new("41 57 41 56 41 54 53 48 81 EC ?? ?? ?? ??"),
+                  len:     14,
+               },
                emoji_check: Prologue {
                   pattern: Pattern::new("0F B6 ?? ?? B0 03 89 ?? 83 ?? 02 83 ?? 0E"),
                   len:     14,
@@ -1592,118 +1603,285 @@ fn hex_disp(text: &str) -> Option<usize> {
    usize::from_str_radix(text.strip_suffix('h')?, 16).ok()
 }
 
+/// What the island in front of a hooked call hands its detour after the
+/// callee's own arguments, and what frame slots are read from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Frame {
+   /// A register of the caller: `rbp`, which Win64 frames address their slots
+   /// from, or a callee-saved register holding a pointer the detour reads.
+   Reg(Register),
+   /// The caller's `rsp` at the call. System V frames address their slots
+   /// from it, keeping no frame pointer.
+   Stack,
+}
+
+impl Frame {
+   /// What `abi` builds address frame slots from.
+   #[must_use]
+   pub const fn of(abi: Abi) -> Self {
+      match abi {
+         Abi::Win64 => Self::Reg(Register::RBP),
+         Abi::SysV => Self::Stack,
+      }
+   }
+
+   /// The island code putting this into `arg`: `mov arg, reg`, or `lea arg,
+   /// [rsp+8]`, since the call into the island pushed a return address.
+   #[must_use]
+   pub fn island(self, arg: Register) -> Vec<u8> {
+      let (to, to_ext) = reg(arg);
+      match self {
+         Self::Reg(from) => {
+            let (from, from_ext) = reg(from);
+            vec![0x48 | from_ext << 2 | to_ext, 0x89, 0xC0 | from << 3 | to]
+         },
+         Self::Stack => vec![0x48 | to_ext << 2, 0x8D, 0x44 | to << 3, 0x24, 0x08],
+      }
+   }
+
+   /// The register as `disasm` prints it.
+   fn base(self) -> String {
+      match self {
+         Self::Reg(register) => reg_name(register),
+         Self::Stack => "rsp".to_owned(),
+      }
+   }
+}
+
+impl std::fmt::Display for Frame {
+   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+      f.write_str(&self.base())
+   }
+}
+
+/// A register as `disasm` prints it, like `r8`.
+fn reg_name(register: Register) -> String {
+   format!("{register:?}").to_lowercase()
+}
+
+/// `[base]` or `[base+disp]` as `disasm` prints a frame operand, like
+/// `[rbp+0DB0h]` or `[rsp+8]`.
+fn slot_of(operand: &str, base: &str) -> Option<usize> {
+   let rest = operand
+      .strip_prefix('[')?
+      .strip_suffix(']')?
+      .strip_prefix(base)?;
+   if rest.is_empty() {
+      return Some(0);
+   }
+   let disp = rest.strip_prefix('+')?;
+   disp.strip_suffix('h').map_or_else(
+      || disp.parse().ok(),
+      |hex| usize::from_str_radix(hex, 16).ok(),
+   )
+}
+
+/// The callee of the call `line` decodes: `call rel32`, or through a pointer
+/// slot as ELF builds call.
+fn callee(image: &Image<'_>, line: &phoenix_hook::x86::Line) -> Option<usize> {
+   if !line.text.starts_with("call ") {
+      return None;
+   }
+   call_target(image, image.read(line.addr, line.len)?, line.addr).map(|(_, callee)| callee)
+}
+
+/// Whether [`Image::hook_call`] can point the call `line` decodes elsewhere.
+fn hookable(image: &Image<'_>, line: &phoenix_hook::x86::Line) -> bool {
+   match image.read(line.addr, 2) {
+      Some([0xE8, _]) => line.len == 5,
+      Some([0xFF, 0x15]) => line.len == 6,
+      _ => false,
+   }
+}
+
+/// The operand an `AnyElement` is copied from for the call at `at`, passed by
+/// reference in `arg`: `movups xmm0, [source]` (or `movaps`), then `movaps
+/// [arg], xmm0` and `movaps [arg+10h], xmm1`.
+fn element_source<'a>(
+   lines: &'a [phoenix_hook::x86::Line],
+   at: usize,
+   arg: &str,
+) -> Option<&'a str> {
+   let args = &lines[at.saturating_sub(12)..at];
+   let copies = args
+      .iter()
+      .any(|line| line.text == format!("movaps [{arg}],xmm0"))
+      && args
+         .iter()
+         .any(|line| line.text == format!("movaps [{arg}+10h],xmm1"));
+   copies
+      .then(|| {
+         args.iter().rev().find_map(|line| {
+            line
+               .text
+               .strip_prefix("movups xmm0,")
+               .or_else(|| line.text.strip_prefix("movaps xmm0,"))
+         })
+      })
+      .flatten()
+}
+
+/// The call before `at` that last wrote `slot`, as its hidden return pointer
+/// (`lea sret, [slot]`, or `mov sret, rsp` for `[rsp]`). A store to `slot`
+/// on the way means no call did.
+fn returned_into(
+   lines: &[phoenix_hook::x86::Line],
+   at: usize,
+   slot: &str,
+   sret: &str,
+) -> Option<usize> {
+   let lea = format!("lea {sret},");
+   let from_rsp = format!("mov {sret},rsp");
+   for call in (0..at).rev() {
+      if written(&lines[call]) == Some(slot) {
+         return None;
+      }
+      if !lines[call].text.starts_with("call ") {
+         continue;
+      }
+      let out = lines[call.saturating_sub(8)..call]
+         .iter()
+         .rev()
+         .find_map(|line| {
+            if let Some(operand) = line.text.strip_prefix(&lea) {
+               return Some(Some(operand));
+            }
+            if line.text == from_rsp {
+               return Some(Some("[rsp]"));
+            }
+            (written(line) == Some(sret)).then_some(None)
+         });
+      if out.flatten() == Some(slot) {
+         return Some(call);
+      }
+   }
+   None
+}
+
 /// The member list's row renderer, and where its name joins the row.
 pub struct MemberRow {
    pub func: usize,
    pub name: MemberName,
 }
 
-/// The `call rel32`s adding a member's name to its row, one per branch.
+/// The calls adding a member's name to its row, one per branch.
 ///
 /// They are `Div::child` by value, `(sret, div, &name) -> Div`. The row's
-/// function keeps its closure's environment pointer in a frame slot, and the
-/// environment a pointer to the member's user id.
+/// closure keeps its environment pointer in a frame slot on Win64 and in a
+/// callee-saved register on System V, and the environment a pointer to the
+/// member's user id.
 #[derive(Clone, Debug)]
 pub struct MemberName {
    pub sites:        Vec<usize>,
-   /// `[rbp+closure_slot]` holds the environment pointer at the calls.
-   pub closure_slot: usize,
+   /// What the islands hand the detour.
+   pub frame:        Frame,
+   /// `[frame+closure_slot]` holds the environment pointer at the calls;
+   /// without one, `frame` is the environment pointer itself.
+   pub closure_slot: Option<usize>,
    /// `[environment+env]` holds the pointer to the user id.
    pub env:          usize,
 }
 
-/// `mov r9, register`, how a call island hands a caller's register to a
-/// three-argument detour as its fourth.
-#[must_use]
-pub fn mov_r9_from(register: Register) -> [u8; 3] {
-   let (number, ext) = reg(register);
-   [0x49 | ext << 2, 0x89, 0xC0 | number << 3 | 1]
-}
-
 /// The member row hands its name to a closure building the name's row: the
 /// closure's environment holds the name and, at `+env`, a pointer to the id
-/// slot (`lea rax, [slot]; mov [r8+env], rax`). The closure's function saves
-/// the environment pointer (`mov [rbp+closure_slot], r8`) and adds the name
-/// with calls taking a freshly copied `AnyElement` in `r8`.
+/// slot (`lea rax, [slot]; mov [env_arg+env], rax`). The closure's function
+/// saves the environment pointer (`mov [rbp+closure_slot], r8` on Win64, `mov
+/// rbx, rdx` on System V) and adds the name with calls taking a freshly copied
+/// `AnyElement`: the one each branch's name row was returned into.
 fn member_name(
    image: &Image<'_>,
    lines: &[phoenix_hook::x86::Line],
    slot: &str,
 ) -> Option<MemberName> {
+   let abi = Abi::of(image);
+   let env_arg = reg_name(abi.arg(2));
+   let env_store = format!("mov [{env_arg}+");
    let (store, env) = lines.iter().enumerate().find_map(|(at, line)| {
-      let field = line.text.strip_prefix("mov [r8+")?.strip_suffix("],rax")?;
+      let field = line.text.strip_prefix(&env_store)?.strip_suffix("],rax")?;
       (lines.get(at.checked_sub(1)?)?.text == format!("lea rax,{slot}"))
          .then_some((at, hex_disp(field)?))
    })?;
-   let closure = lines[store..].iter().take(40).find_map(|line| {
-      line
-         .text
-         .starts_with("call ")
-         .then_some(line.target)
-         .flatten()
-   })?;
+   let closure = lines[store..]
+      .iter()
+      .take(40)
+      .find_map(|line| callee(image, line))?;
    let code = function_code(image, closure, "member name row").ok()?;
    let body = phoenix_hook::x86::disasm(code, closure, usize::MAX);
-   let closure_slot = body
-      .iter()
-      .take(16)
-      .find_map(|line| hex_disp(line.text.strip_prefix("mov [rbp+")?.strip_suffix("],r8")?))?;
-   // The element copied into `r8`: `movups xmm0, [source]` then `movaps [r8],
-   // xmm0` and `movaps [r8+10h], xmm1`.
-   let copied_from = |at: usize| {
-      let args = &body[at.saturating_sub(12)..at];
-      let copies = args.iter().any(|line| line.text == "movaps [r8],xmm0")
-         && args.iter().any(|line| line.text == "movaps [r8+10h],xmm1");
-      copies
-         .then(|| {
-            args
-               .iter()
-               .rev()
-               .find_map(|line| line.text.strip_prefix("movups xmm0,"))
-         })
-         .flatten()
+   let base = Frame::of(abi).base();
+   let saved_reg = |line: &phoenix_hook::x86::Line| {
+      let to = line
+         .text
+         .strip_prefix("mov ")?
+         .strip_suffix(&format!(",{env_arg}"))?;
+      [
+         Register::RBX,
+         Register::R12,
+         Register::R13,
+         Register::R14,
+         Register::R15,
+      ]
+      .into_iter()
+      .find(|&register| reg_name(register) == to)
    };
+   let (saved, frame, closure_slot) = body.iter().enumerate().take(16).find_map(|(at, line)| {
+      if let Some(register) = saved_reg(line) {
+         return Some((at, Frame::Reg(register), None));
+      }
+      let operand = line
+         .text
+         .strip_prefix("mov ")?
+         .strip_suffix(&format!(",{env_arg}"))?;
+      Some((at, Frame::of(abi), Some(slot_of(operand, &base)?)))
+   })?;
+   let sret = reg_name(abi.arg(0));
    let calls = body
       .iter()
       .enumerate()
-      .filter(|(_, line)| line.text.starts_with("call "))
-      .filter_map(|(at, line)| Some((line.addr, line.target?, line.len, copied_from(at)?)))
+      .filter_map(|(at, line)| {
+         let target = callee(image, line)?;
+         Some((at, target, element_source(&body, at, &env_arg)?))
+      })
       .collect::<Vec<_>>();
    let child = calls.first()?.1;
-   // Styled names are first wrapped with the name taken straight from the
-   // environment; the row then gets the name from the copy the function keeps
-   // in its frame, in every branch. Only those calls add to the row itself.
-   let mut frame_sources = calls
-      .iter()
-      .filter(|call| call.1 == child)
-      .filter_map(|call| call.3.starts_with("[rbp+").then_some(call.3))
-      .collect::<Vec<_>>();
-   frame_sources.sort_unstable();
-   let source = frame_sources
-      .chunk_by(|a, b| a == b)
-      .max_by_key(|run| run.len())?
-      .first()
-      .copied()?;
+   // Styled names are first wrapped with the name taken from the
+   // environment; the row then gets the element the name row was returned
+   // into, in every branch. Only those calls add to the row itself. ELF builds
+   // keep a copy of `Div::child` per caller crate.
    let sites = calls
       .iter()
-      .filter(|&&(site, target, len, from)| {
-         target == child && from == source && len == 5 && image.read(site, 1) == Some(&[0xE8])
+      .filter(|&&(at, target, source)| {
+         (target == child || same_code(image, target, child))
+            && hookable(image, &body[at])
+            && returned_into(&body, at, source, &sret).is_some()
       })
-      .map(|&(site, ..)| site)
+      .map(|&(at, ..)| at)
       .collect::<Vec<_>>();
-   (!sites.is_empty()).then_some(MemberName {
-      sites,
-      closure_slot,
-      env,
+   // A register handed over must still hold the environment at every site.
+   if let Frame::Reg(register) = frame
+      && closure_slot.is_none()
+   {
+      let name = reg_name(register);
+      let last = *sites.last()?;
+      let clobbered = body[saved + 1..last]
+         .iter()
+         .any(|line| written(line) == Some(name.as_str()) || line.text == format!("pop {name}"));
+      if clobbered {
+         return None;
+      }
+   }
+   (!sites.is_empty()).then(|| {
+      MemberName {
+         sites: sites.into_iter().map(|at| body[at].addr).collect(),
+         frame,
+         closure_slot,
+         env,
+      }
    })
 }
 
 /// The function formatting `member-{}-{}`, a member row's element id from the
 /// member's user id, and the calls in it adding the member's name to its row.
 pub fn member_row(image: &Image<'_>) -> Found<MemberRow> {
-   if !matches!(Abi::of(image), Abi::Win64) {
-      return Err("the member row is only decoded on Win64".to_owned());
-   }
    let anchors = image.find_bytes(b"member-{}-{}");
    let mut funcs = anchors
       .iter()
@@ -1718,8 +1896,11 @@ pub fn member_row(image: &Image<'_>) -> Found<MemberRow> {
    }
    let lines =
       phoenix_hook::x86::disasm(function_code(image, func, "member row")?, func, usize::MAX);
-   // The id is formatted from a frame slot: `mov r9, [rbp+slot]` before the
-   // template's `lea`.
+   // The id is formatted from a frame slot, the fourth argument (`mov r9,
+   // [rbp+slot]` on Win64) of the call taking the template.
+   let abi = Abi::of(image);
+   let id_load = format!("mov {},", reg_name(abi.arg(3)));
+   let base = Frame::of(abi).base();
    let template = lines
       .iter()
       .position(|line| line.target.is_some_and(|target| anchors.contains(&target)))
@@ -1727,8 +1908,8 @@ pub fn member_row(image: &Image<'_>) -> Found<MemberRow> {
    let slot = lines[template.saturating_sub(12)..template]
       .iter()
       .rev()
-      .find_map(|line| line.text.strip_prefix("mov r9,"))
-      .filter(|slot| slot.starts_with("[rbp+"))
+      .find_map(|line| line.text.strip_prefix(&id_load))
+      .filter(|slot| slot_of(slot, &base).is_some())
       .ok_or("member row id slot not found")?;
    Ok(MemberRow {
       func,
@@ -1744,13 +1925,15 @@ pub fn member_row(image: &Image<'_>) -> Found<MemberRow> {
 /// one the row's presence dot (`dm-status`) is keyed by; group DMs have none.
 #[derive(Clone, Debug)]
 pub struct DmRow {
-   pub func: usize,
-   /// The `call rel32` adding the name box.
-   pub site: usize,
-   /// `[rbp+some]` is the recipient's `Option` tag, zero for none.
-   pub some: usize,
-   /// `[rbp+user]` is the recipient's user id when `some` is set.
-   pub user: usize,
+   pub func:  usize,
+   /// The call adding the name box.
+   pub site:  usize,
+   /// What the island hands the detour, which the slots are read from.
+   pub frame: Frame,
+   /// `[frame+some]` is the recipient's `Option` tag, zero for none.
+   pub some:  usize,
+   /// `[frame+user]` is the recipient's user id when `some` is set.
+   pub user:  usize,
 }
 
 /// The single function loading `text`, as it is laid out in the string pool.
@@ -1766,23 +1949,22 @@ fn loader_of(image: &Image<'_>, what: &str, text: &[u8]) -> Found<usize> {
    one(what, &funcs)
 }
 
-/// `[rbp+slot]` as `disasm` prints a frame operand, like `[rbp+0DB0h]`.
-fn frame_slot(operand: &str) -> Option<usize> {
-   hex_disp(operand.strip_prefix("[rbp+")?.strip_suffix(']')?)
-}
-
 /// The `Option<UserId>` slots read after `anchor`'s `lea`: the id is the first
-/// `mov rax, [rbp+user]` after it, and the row copies the option there from
-/// its props, `mov rax, [r]; mov [rbp+some], rax; mov rax, [r+8]; mov
-/// [rbp+user], rax`, then tests `cmp qword ptr [rbp+some], 0`.
-fn option_user_slots(lines: &[phoenix_hook::x86::Line], anchor: usize) -> Option<(usize, usize)> {
+/// `mov rax, [frame+user]` after it, and the row copies the option there from
+/// its props, `mov rax, [r]; mov [frame+some], rax; mov rax, [r+8]; mov
+/// [frame+user], rax`, then tests `cmp qword ptr [frame+some], 0`.
+fn option_user_slots(
+   lines: &[phoenix_hook::x86::Line],
+   anchor: usize,
+   base: &str,
+) -> Option<(usize, usize)> {
    let user = lines
       .get(anchor..)?
       .iter()
       .take(8)
-      .find_map(|line| frame_slot(line.text.strip_prefix("mov rax,")?))?;
+      .find_map(|line| slot_of(line.text.strip_prefix("mov rax,")?, base))?;
    let stored = |line: &phoenix_hook::x86::Line| {
-      frame_slot(line.text.strip_prefix("mov ")?.strip_suffix(",rax")?)
+      slot_of(line.text.strip_prefix("mov ")?.strip_suffix(",rax")?, base)
    };
    let at = lines.iter().position(|line| stored(line) == Some(user))?;
    let [load_some, store_some, load_user] = lines.get(at.checked_sub(3)?..at)? else {
@@ -1798,7 +1980,7 @@ fn option_user_slots(lines: &[phoenix_hook::x86::Line], anchor: usize) -> Option
          .text
          .strip_prefix("cmp qword ptr ")
          .and_then(|rest| rest.strip_suffix(",0"))
-         .and_then(frame_slot)
+         .and_then(|operand| slot_of(operand, base))
          == Some(some)
    });
    (load_some.text == format!("mov rax,[{props}]") && tested).then_some((some, user))
@@ -1806,59 +1988,89 @@ fn option_user_slots(lines: &[phoenix_hook::x86::Line], anchor: usize) -> Option
 
 /// The DM row: the one caller of the function building the box around the
 /// recipient's name, and the call adding that box's element to the row.
+///
+/// ELF builds inline the box into the row, whose element is then the one the
+/// box's last call returns into.
 pub fn dm_row(image: &Image<'_>) -> Found<DmRow> {
-   if !matches!(Abi::of(image), Abi::Win64) {
-      return Err("the DM row is only decoded on Win64".to_owned());
-   }
+   let abi = Abi::of(image);
+   let frame = Frame::of(abi);
+   let base = frame.base();
+   let element_arg = reg_name(abi.arg(2));
    let name_box = loader_of(image, "DM name box", b"dm-name-bounds")?;
-   let funcs = callers(image, name_box).into_iter().collect::<Vec<_>>();
-   let func = one("DM row", &funcs)?;
-   let lines = phoenix_hook::x86::disasm(function_code(image, func, "DM row")?, func, usize::MAX);
-   let built = lines
-      .iter()
-      .position(|line| line.text.starts_with("call ") && line.target == Some(name_box))
-      .ok_or("DM name box call not found")?;
-   let out = lines[built.saturating_sub(8)..built]
-      .iter()
-      .rev()
-      .find_map(|line| frame_slot(line.text.strip_prefix("lea rcx,")?))
-      .ok_or("DM name box result not found")?;
-   // The element moves into `r8` as `movups xmm0, [out]` then `movaps [r8],
-   // xmm0` and `movaps [r8+10h], xmm1`.
-   let call = (built + 1..lines.len().min(built + 80))
-      .filter(|&at| lines[at].text.starts_with("call "))
-      .find(|&at| {
-         let args = &lines[at.saturating_sub(12)..at];
-         args
-            .iter()
-            .any(|line| line.text.strip_prefix("movups xmm0,").and_then(frame_slot) == Some(out))
-            && args.iter().any(|line| line.text == "movaps [r8],xmm0")
-            && args.iter().any(|line| line.text == "movaps [r8+10h],xmm1")
-      })
-      .map(|at| &lines[at])
-      .ok_or("DM name child call not found")?;
-   let child = call.target.ok_or("DM name child call is indirect")?;
-   // The name box adds the name itself with the same `Div::child`.
-   let inner = phoenix_hook::x86::disasm(
+   let status = image.find_bytes(b"dm-status");
+   let loads_status = |lines: &[phoenix_hook::x86::Line]| {
+      lines
+         .iter()
+         .position(|line| line.target.is_some_and(|target| status.contains(&target)))
+   };
+   let box_lines = phoenix_hook::x86::disasm(
       function_code(image, name_box, "DM name box")?,
       name_box,
       usize::MAX,
    );
-   if call.len != 5
-      || image.read(call.addr, 1) != Some(&[0xE8])
-      || !inner.iter().any(|line| line.target == Some(child))
-   {
-      return Err("DM name child is not Div::child".to_owned());
+   let (func, lines, call) = if loads_status(&box_lines).is_some() {
+      let names = image.find_bytes(b"dm-name-bounds");
+      let built = box_lines
+         .iter()
+         .position(|line| line.target.is_some_and(|target| names.contains(&target)))
+         .ok_or("DM name box load not found")?;
+      let sret = reg_name(abi.arg(0));
+      let at = (built + 1..box_lines.len().min(built + 400))
+         .find(|&at| {
+            callee(image, &box_lines[at]).is_some()
+               && element_source(&box_lines, at, &element_arg).is_some_and(|source| {
+                  returned_into(&box_lines, at, source, &sret).is_some_and(|by| by > built)
+               })
+         })
+         .ok_or("DM name child call not found")?;
+      let child = callee(image, &box_lines[at]).ok_or("DM name child call is indirect")?;
+      let adds_name = box_lines[built..at].iter().any(|line| {
+         callee(image, line).is_some_and(|other| other == child || same_code(image, other, child))
+      });
+      if !adds_name {
+         return Err("DM name child is not Div::child".to_owned());
+      }
+      (name_box, box_lines, at)
+   } else {
+      let funcs = callers(image, name_box).into_iter().collect::<Vec<_>>();
+      let func = one("DM row", &funcs)?;
+      let lines =
+         phoenix_hook::x86::disasm(function_code(image, func, "DM row")?, func, usize::MAX);
+      let built = lines
+         .iter()
+         .position(|line| callee(image, line) == Some(name_box))
+         .ok_or("DM name box call not found")?;
+      let box_arg = format!("lea {},", reg_name(abi.arg(0)));
+      let out = lines[built.saturating_sub(8)..built]
+         .iter()
+         .rev()
+         .find_map(|line| line.text.strip_prefix(&box_arg))
+         .filter(|out| slot_of(out, &base).is_some())
+         .ok_or("DM name box result not found")?;
+      let at = (built + 1..lines.len().min(built + 80))
+         .filter(|&at| lines[at].text.starts_with("call "))
+         .find(|&at| element_source(&lines, at, &element_arg) == Some(out))
+         .ok_or("DM name child call not found")?;
+      let child = callee(image, &lines[at]).ok_or("DM name child call is indirect")?;
+      // The name box adds the name itself with the same `Div::child`.
+      if !box_lines
+         .iter()
+         .any(|line| callee(image, line) == Some(child))
+      {
+         return Err("DM name child is not Div::child".to_owned());
+      }
+      (func, lines, at)
+   };
+   if !hookable(image, &lines[call]) {
+      return Err("DM name child call cannot be hooked".to_owned());
    }
-   let status = image.find_bytes(b"dm-status");
-   let anchor = lines
-      .iter()
-      .position(|line| line.target.is_some_and(|target| status.contains(&target)))
-      .ok_or("DM status id not found")?;
-   let (some, user) = option_user_slots(&lines, anchor).ok_or("DM recipient slots not decoded")?;
+   let anchor = loads_status(&lines).ok_or("DM status id not found")?;
+   let (some, user) =
+      option_user_slots(&lines, anchor, &base).ok_or("DM recipient slots not decoded")?;
    Ok(DmRow {
       func,
-      site: call.addr,
+      site: lines[call].addr,
+      frame,
       some,
       user,
    })
@@ -1873,6 +2085,8 @@ pub fn dm_row(image: &Image<'_>) -> Found<DmRow> {
 pub struct MessageHeader {
    /// The calls adding the name, one per display mode.
    pub sites:      Vec<HeaderSite>,
+   /// What the islands hand the detours, which the slots are read from.
+   pub frame:      Frame,
    /// `child_node(node, child) -> node`, adding a node as a child.
    pub child_node: usize,
    pub svg:        NodeSvg,
@@ -1895,19 +2109,36 @@ pub struct NodeSvg {
 #[derive(Clone, Copy, Debug)]
 pub struct HeaderSite {
    pub site: usize,
-   /// `[rbp+slot]` holds the message id at the call.
+   /// `[frame+slot]` holds the message id at the call.
    pub slot: usize,
 }
 
 /// The app tag's element id template, loaded by the two header row builders.
 const HEADER_APP_TAG: &[u8] = b"\x0fheader-app-tag-\xc0\x00";
+/// The most header row builders a build has had.
+pub const MAX_HEADER_BUILDERS: usize = 3;
 /// A bundled icon drawn as a node SVG leaf.
 const NODE_SVG: &[u8] = b"features_ui/partner.svg";
-/// `sub rsp,48h; lea rax,[rsp+28h]; and dword ptr [rax],0; mov [rax+8],rdx`:
-/// the child handle wrapped as a node child, tag 0.
-const CHILD_NODE_HEAD: [u8; 16] = [
-   0x48, 0x83, 0xEC, 0x48, 0x48, 0x8D, 0x44, 0x24, 0x28, 0x83, 0x20, 0x00, 0x48, 0x89, 0x50, 0x08,
-];
+
+/// `child_node`'s head: the child handle wrapped as a node child, tag 0.
+const fn child_node_head(abi: Abi) -> [u8; 16] {
+   match abi {
+      // `sub rsp,48h; lea rax,[rsp+28h]; and dword ptr [rax],0; mov [rax+8],rdx`
+      Abi::Win64 => {
+         [
+            0x48, 0x83, 0xEC, 0x48, 0x48, 0x8D, 0x44, 0x24, 0x28, 0x83, 0x20, 0x00, 0x48, 0x89,
+            0x50, 0x08,
+         ]
+      },
+      // `sub rsp,28h; lea rax,[rsp+8]; and dword ptr [rax],0; mov [rax+8],rsi`
+      Abi::SysV => {
+         [
+            0x48, 0x83, 0xEC, 0x28, 0x48, 0x8D, 0x44, 0x24, 0x08, 0x83, 0x20, 0x00, 0x48, 0x89,
+            0x70, 0x08,
+         ]
+      },
+   }
+}
 
 /// The register or memory operand an instruction writes, as `disasm` prints
 /// it: `mov rsi,rax` writes `rsi`.
@@ -1919,13 +2150,11 @@ fn written(line: &phoenix_hook::x86::Line) -> Option<&str> {
 /// Locates [`MessageHeader`]. `body` is [`message_body`]'s function, whose
 /// auto-moderation avatar fallback draws a node SVG leaf.
 ///
-/// Both row builders add the name with `mov rdx,reg; call child_node`, where
-/// `reg` holds what one function called only by the two builders returned.
-/// The message id slot is the format argument of the app tag's element id.
+/// Every row builder adds the name with `mov child,from; call child_node`,
+/// where `from`, a register or a frame slot, holds what one function called
+/// only by the builders returned. The message id slot is the format
+/// argument of the app tag's element id.
 pub fn message_header(image: &Image<'_>, body: usize) -> Found<MessageHeader> {
-   if !matches!(Abi::of(image), Abi::Win64) {
-      return Err("the message header is only decoded on Win64".to_owned());
-   }
    let anchor = one("header-app-tag template", &image.find_bytes(HEADER_APP_TAG))?;
    let mut builders = lea_refs(image, anchor)
       .into_iter()
@@ -1933,7 +2162,9 @@ pub fn message_header(image: &Image<'_>, body: usize) -> Found<MessageHeader> {
       .collect::<Vec<_>>();
    builders.sort_unstable();
    builders.dedup();
-   if builders.len() != 2 {
+   // Two on Win64 and on Linux 2233; older Linux builds kept a second copy of
+   // one, taking another argument.
+   if !(2..=MAX_HEADER_BUILDERS).contains(&builders.len()) {
       return Err(format!(
          "the app tag template is loaded by {} functions",
          builders.len()
@@ -1943,17 +2174,20 @@ pub fn message_header(image: &Image<'_>, body: usize) -> Found<MessageHeader> {
       .iter()
       .map(|&func| header_builder(image, func, anchor))
       .collect::<Found<Vec<_>>>()?;
-   let both = builders.iter().copied().collect::<HashSet<_>>();
+   let all = builders.iter().copied().collect::<HashSet<_>>();
    let mut sites = Vec::new();
    let mut child_node = None;
    for (slot, adds) in &decoded {
       let names = adds
          .iter()
-         .filter(|&&(_, _, producer)| callers(image, producer) == both)
+         .filter(|&&(_, _, producer)| {
+            let by = callers(image, producer);
+            !by.is_empty() && by.is_subset(&all)
+         })
          .copied()
          .collect::<Vec<_>>();
       let (site, callee, _) = one("header name add", &names)?;
-      if child_node.is_some_and(|known| known != callee) {
+      if child_node.is_some_and(|known| known != callee && !same_code(image, known, callee)) {
          return Err("the header builders add children differently".to_owned());
       }
       child_node = Some(callee);
@@ -1962,6 +2196,7 @@ pub fn message_header(image: &Image<'_>, body: usize) -> Found<MessageHeader> {
    let child_node = child_node.ok_or("header child_node not found")?;
    Ok(MessageHeader {
       sites,
+      frame: Frame::of(Abi::of(image)),
       child_node,
       svg: node_svg(image, body)?,
    })
@@ -1974,7 +2209,11 @@ type ChildAdd = (usize, usize, usize);
 /// A header builder's message id slot, and every call adding a call's result
 /// with `child_node`.
 fn header_builder(image: &Image<'_>, func: usize, anchor: usize) -> Found<(usize, Vec<ChildAdd>)> {
-   let is_child_node = |func: usize| image.read(func, 16) == Some(&CHILD_NODE_HEAD[..]);
+   let abi = Abi::of(image);
+   let base = Frame::of(abi).base();
+   let head = child_node_head(abi);
+   let is_child_node = |func: usize| image.read(func, 16) == Some(&head[..]);
+   let child_arg = format!("mov {},", reg_name(abi.arg(1)));
    let lines = phoenix_hook::x86::disasm(
       function_code(image, func, "header builder")?,
       func,
@@ -1987,32 +2226,35 @@ fn header_builder(image: &Image<'_>, func: usize, anchor: usize) -> Found<(usize
    let slot = lines[template.saturating_sub(8)..template]
       .iter()
       .rev()
-      .find_map(|line| hex_disp(line.text.strip_prefix("lea rax,[rbp+")?.strip_suffix(']')?))
+      .find_map(|line| slot_of(line.text.strip_prefix("lea rax,")?, &base))
       .ok_or("header message id slot not found")?;
    let mut adds = Vec::new();
    for at in 1..lines.len() {
       let line = &lines[at];
-      let Some(callee) = line.target.filter(|_| line.text.starts_with("call ")) else {
+      let Some(callee) = callee(image, line) else {
          continue;
       };
-      let Some(reg) = lines[at - 1].text.strip_prefix("mov rdx,") else {
+      let Some(from) = lines[at - 1].text.strip_prefix(&child_arg) else {
          continue;
       };
-      if line.len != 5 || !is_child_node(callee) {
+      if !hookable(image, line) || !is_child_node(callee) {
          continue;
       }
-      let Some(set) = (0..at - 1).rev().find(|&j| written(&lines[j]) == Some(reg)) else {
+      let Some(set) = (0..at - 1)
+         .rev()
+         .find(|&j| written(&lines[j]) == Some(from))
+      else {
          continue;
       };
-      if lines[set].text != format!("mov {reg},rax") {
+      if lines[set].text != format!("mov {from},rax") {
          continue;
       }
+      // Calls with stacked arguments pop them before the result is kept.
       let producer = lines[..set]
          .iter()
          .rev()
-         .find(|line| line.text != "nop")
-         .filter(|line| line.text.starts_with("call "))
-         .and_then(|line| line.target);
+         .find(|line| line.text != "nop" && !line.text.starts_with("add rsp,"))
+         .and_then(|line| self::callee(image, line));
       if let Some(producer) = producer {
          adds.push((line.addr, callee, producer));
       }
@@ -2021,6 +2263,8 @@ fn header_builder(image: &Image<'_>, func: usize, anchor: usize) -> Found<(usize
 }
 
 fn node_svg(image: &Image<'_>, body: usize) -> Found<NodeSvg> {
+   let abi = Abi::of(image);
+   let base = Frame::of(abi).base();
    let mut svg_news = image
       .find_bytes(NODE_SVG)
       .into_iter()
@@ -2028,26 +2272,34 @@ fn node_svg(image: &Image<'_>, body: usize) -> Found<NodeSvg> {
       .filter_map(|lea| {
          let code = image.read(lea, 0x40)?;
          phoenix_hook::x86::disasm(code, lea, 12)
-            .into_iter()
-            .find(|line| line.text.starts_with("call "))?
-            .target
+            .iter()
+            .find(|line| line.text.starts_with("call "))
+            .and_then(|line| callee(image, line))
       })
       .collect::<Vec<_>>();
-   // The leaf keeps the size from `xmm3` and the path at `out+10h`; the bundled
-   // icon is drawn as a GPUI `Svg` elsewhere too.
+   // The leaf keeps the size, the first float argument (`xmm3` on Win64,
+   // `xmm0` on System V), and the path at `out+10h`; the bundled icon is drawn
+   // as a GPUI `Svg` elsewhere too.
+   let out_path = format!("add {},10h", reg_name(abi.arg(0)));
+   let keeps_size = |line: &phoenix_hook::x86::Line| {
+      match abi {
+         Abi::Win64 => line.text == "movaps xmm6,xmm3",
+         Abi::SysV => line.text.starts_with("movss [rsp+") && line.text.ends_with(",xmm0"),
+      }
+   };
    svg_news.retain(|&func| {
       image.read(func, 0x30).is_some_and(|head| {
          let head = phoenix_hook::x86::disasm(head, func, 8);
-         head.iter().any(|line| line.text == "movaps xmm6,xmm3")
-            && head.iter().any(|line| line.text == "add rcx,10h")
+         head.iter().any(keeps_size) && head.iter().any(|line| line.text == out_path)
       })
    });
    svg_news.sort_unstable();
    svg_news.dedup();
    let svg_new = one("node svg_new", &svg_news)?;
 
-   // In the body: `lea rcx,[rbp+leaf]; ...; call svg_new`, then
-   // `mov dword ptr [rbp+color],1` and the call pushing the leaf.
+   // In the body: `lea out,[frame+leaf]; ...; call svg_new`, then
+   // `mov dword ptr [frame+color],1` and the call pushing the leaf.
+   let leaf_arg = format!("lea {},", reg_name(abi.arg(0)));
    let lines = phoenix_hook::x86::disasm(
       function_code(image, body, "message body")?,
       body,
@@ -2056,35 +2308,35 @@ fn node_svg(image: &Image<'_>, body: usize) -> Found<NodeSvg> {
    let (push_svg, svg_color) = lines
       .iter()
       .enumerate()
-      .filter(|(_, line)| line.target == Some(svg_new) && line.text.starts_with("call "))
+      .filter(|(_, line)| callee(image, line) == Some(svg_new))
       .find_map(|(at, _)| {
          let leaf = lines[at.saturating_sub(8)..at]
             .iter()
             .rev()
-            .find_map(|line| {
-               hex_disp(line.text.strip_prefix("lea rcx,[rbp+")?.strip_suffix(']')?)
-            })?;
+            .find_map(|line| slot_of(line.text.strip_prefix(&leaf_arg)?, &base))?;
          let after = &lines[at + 1..(at + 24).min(lines.len())];
          let push = after.iter().find(|line| line.text.starts_with("call "))?;
          let tag = after
             .iter()
             .take_while(|line| line.addr < push.addr)
             .find_map(|line| {
-               hex_disp(
+               slot_of(
                   line
                      .text
-                     .strip_prefix("mov dword ptr [rbp+")?
-                     .strip_suffix("],1")?,
+                     .strip_prefix("mov dword ptr ")?
+                     .strip_suffix(",1")?,
+                  &base,
                )
             })?;
-         Some((push.target?, tag.checked_sub(leaf)?))
+         Some((callee(image, push)?, tag.checked_sub(leaf)?))
       })
       .ok_or("node SVG leaf push not found in the message body")?;
    if !(4..0x30).contains(&svg_color) {
       return Err(format!("node SVG color at {svg_color:#x}"));
    }
-   // `push_svg` boxes the leaf first: `push size; pop rdx` before the
-   // allocation.
+   // `push_svg` boxes the leaf first: `push size; pop size_arg` before the
+   // allocation, which takes the alignment first.
+   let size_pop = format!("pop {}", reg_name(abi.arg(1)));
    let convert = calls_in(image, push_svg, 0x40)
       .first()
       .ok_or("push_svg calls nothing")?
@@ -2096,7 +2348,7 @@ fn node_svg(image: &Image<'_>, body: usize) -> Found<NodeSvg> {
    let leaf_size = head
       .windows(2)
       .find_map(|pair| {
-         (pair[1].text == "pop rdx")
+         (pair[1].text == size_pop)
             .then(|| hex_disp(pair[0].text.strip_prefix("push ")?))
             .flatten()
       })
@@ -2133,9 +2385,7 @@ pub struct SvgBuilders {
 /// is loaded, `path` the call after it, and `into_any` the call writing the
 /// function's `sret`. A style setter on the way reads the style box.
 pub fn svg_builders(image: &Image<'_>) -> Found<SvgBuilders> {
-   if !matches!(Abi::of(image), Abi::Win64) {
-      return Err("the SVG builders are only decoded on Win64".to_owned());
-   }
+   let abi = Abi::of(image);
    let anchors = image.find_bytes(BUNDLED_SVG);
    let (func, lea) = anchors
       .iter()
@@ -2147,13 +2397,7 @@ pub fn svg_builders(image: &Image<'_>) -> Found<SvgBuilders> {
       .iter()
       .position(|line| line.addr == lea)
       .ok_or("SVG path load not decoded")?;
-   let call_target = |line: &phoenix_hook::x86::Line| {
-      line
-         .text
-         .starts_with("call ")
-         .then_some(line.target)
-         .flatten()
-   };
+   let call_target = |line: &phoenix_hook::x86::Line| callee(image, line);
    let new = lines[..at]
       .iter()
       .rev()
@@ -2164,7 +2408,8 @@ pub fn svg_builders(image: &Image<'_>) -> Found<SvgBuilders> {
       .filter_map(call_target)
       .collect::<Vec<_>>();
    let path = *after.first().ok_or("Svg::path call not found")?;
-   // `mov rax, [rdx+box]` at the head of a style setter taking the `Svg`.
+   // `mov rax, [svg+box]` at the head of a style setter taking the `Svg`.
+   let box_load = format!("mov rax,[{}+", reg_name(abi.arg(1)));
    let style_box = after
       .iter()
       .take(4)
@@ -2172,7 +2417,7 @@ pub fn svg_builders(image: &Image<'_>) -> Found<SvgBuilders> {
          let head = image.read(callee, 0x20)?;
          phoenix_hook::x86::disasm(head, callee, 6)
             .iter()
-            .find_map(|line| hex_disp(line.text.strip_prefix("mov rax,[rdx+")?.strip_suffix(']')?))
+            .find_map(|line| hex_disp(line.text.strip_prefix(&box_load)?.strip_suffix(']')?))
       })
       .filter(|&offset| (0x100..0x800).contains(&offset))
       .ok_or("Svg style box not found")?;
@@ -2186,13 +2431,15 @@ pub fn svg_builders(image: &Image<'_>) -> Found<SvgBuilders> {
       .rev()
       .find_map(call_target)
       .ok_or("Svg::into_any call not found")?;
+   // It moves the `Svg` with a copy of its size, the third argument.
+   let size_load = format!("mov {},", reg_name(abi.arg(2).full_register32()));
    let size = image
       .read(into_any, 0x30)
       .map(|head| phoenix_hook::x86::disasm(head, into_any, 8))
       .and_then(|head| {
          head
             .iter()
-            .find_map(|line| hex_disp(line.text.strip_prefix("mov r8d,")?))
+            .find_map(|line| hex_disp(line.text.strip_prefix(&size_load)?))
       })
       .filter(|&size| (style_box..0x1000).contains(&size))
       .ok_or("Svg size not found")?;
@@ -2209,7 +2456,8 @@ pub fn svg_builders(image: &Image<'_>) -> Found<SvgBuilders> {
 ///
 /// It ends at the bundle holding [`BUNDLED_SVG`]. The bundle sorts records
 /// `{path ptr, path len, index}`; its descriptor points at their start, and the
-/// loader loads the descriptor.
+/// loader loads the descriptor. ELF images also hold the descriptor's address
+/// as relocation addends, which no code loads.
 pub fn asset_load(image: &Image<'_>) -> Found<usize> {
    let record = |slot: usize| {
       let ptr = image.read_usize(slot)?;
@@ -2238,11 +2486,16 @@ pub fn asset_load(image: &Image<'_>) -> Found<usize> {
    {
       start = previous;
    }
-   let descriptor = one("asset bundle", &image.pointers_to(start))?;
+   let descriptors = image
+      .pointers_to(start)
+      .into_iter()
+      .filter(|&descriptor| !lea_refs(image, descriptor).is_empty())
+      .collect::<Vec<_>>();
+   let descriptor = one("asset bundle", &descriptors)?;
    let mut loaders = lea_refs(image, descriptor)
       .into_iter()
       .filter_map(|lea| Some(image.function_bounds(lea)?.0))
-      .filter(|&func| prologues(image).media_fetch.at(image, func))
+      .filter(|&func| prologues(image).asset_load.at(image, func))
       .collect::<Vec<_>>();
    loaders.sort_unstable();
    loaders.dedup();
@@ -3923,4 +4176,45 @@ fn rip_leas(code: &[u8], addr: usize) -> impl Iterator<Item = (usize, usize)> + 
          (addr + pos + 6).checked_add_signed(disp as isize)?,
       ))
    })
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[test]
+   fn islands_hand_over_the_frame() {
+      let text = |frame: Frame, arg: Register| {
+         let code = frame.island(arg);
+         let lines = phoenix_hook::x86::disasm(&code, 0, usize::MAX);
+         assert_eq!(lines.iter().map(|line| line.len).sum::<usize>(), code.len());
+         lines
+            .into_iter()
+            .map(|line| line.text)
+            .collect::<Vec<_>>()
+            .join("; ")
+      };
+      assert_eq!(text(Frame::Reg(Register::RBP), Register::R9), "mov r9,rbp");
+      assert_eq!(text(Frame::Reg(Register::RBP), Register::R8), "mov r8,rbp");
+      assert_eq!(
+         text(Frame::Reg(Register::RBX), Register::RCX),
+         "mov rcx,rbx"
+      );
+      assert_eq!(
+         text(Frame::Reg(Register::R14), Register::RCX),
+         "mov rcx,r14"
+      );
+      assert_eq!(text(Frame::Stack, Register::RCX), "lea rcx,[rsp+8]");
+      assert_eq!(text(Frame::Stack, Register::RDX), "lea rdx,[rsp+8]");
+      assert_eq!(text(Frame::Stack, Register::R9), "lea r9,[rsp+8]");
+   }
+
+   #[test]
+   fn frame_slots_parse() {
+      assert_eq!(slot_of("[rbp+0DB0h]", "rbp"), Some(0xDB0));
+      assert_eq!(slot_of("[rsp+8]", "rsp"), Some(8));
+      assert_eq!(slot_of("[rsp]", "rsp"), Some(0));
+      assert_eq!(slot_of("[rsp+8]", "rbp"), None);
+      assert_eq!(slot_of("[rsp+rax]", "rsp"), None);
+   }
 }

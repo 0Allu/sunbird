@@ -178,7 +178,10 @@ impl Decorations {
 }
 
 static ORIG_NAME_CHILD: OnceLock<NameChildFn> = OnceLock::new();
-static CLOSURE_SLOT: AtomicUsize = AtomicUsize::new(0);
+/// Where the name detour finds the closure's environment: `[frame+slot]`, or
+/// the frame itself with [`ENV_IS_FRAME`].
+static CLOSURE_SLOT: AtomicUsize = AtomicUsize::new(ENV_IS_FRAME);
+const ENV_IS_FRAME: usize = usize::MAX;
 static ENV_USER_ID: AtomicUsize = AtomicUsize::new(0);
 
 /// Locates the member row and hooks the calls adding its name, from
@@ -200,6 +203,13 @@ pub fn install(image: &Image<'static>) {
    }
 }
 
+/// The callee of the call at `site`, before it is hooked: `call rel32`, or
+/// through a pointer slot in ELF builds.
+fn callee_at(image: &Image<'_>, site: usize) -> Option<usize> {
+   let code = image.read(site, 6).or_else(|| image.read(site, 5))?;
+   phoenix_hook::x86::call_target(image, code, site).map(|(_, callee)| callee)
+}
+
 static ORIG_DM_CHILD: OnceLock<NameChildFn> = OnceLock::new();
 static DM_SOME: AtomicUsize = AtomicUsize::new(0);
 static DM_USER: AtomicUsize = AtomicUsize::new(0);
@@ -208,12 +218,7 @@ static DM_USER: AtomicUsize = AtomicUsize::new(0);
 /// [`dm_child_detour`], so member decorations follow the name there too, as
 /// Vencord's member list setting covers the DM list.
 fn install_dm(image: &Image<'static>, row: &desktop::DmRow) {
-   let Some(target) = image
-      .read(row.site + 1, 4)
-      .and_then(|rel| rel.try_into().ok())
-      .map(i32::from_le_bytes)
-      .map(|rel| (row.site + 5).wrapping_add_signed(rel as isize))
-   else {
+   let Some(target) = callee_at(image, row.site) else {
       return;
    };
    DM_SOME.store(row.some, Ordering::Release);
@@ -221,14 +226,9 @@ fn install_dm(image: &Image<'static>, row: &desktop::DmRow) {
    // SAFETY: `target` is the call's own `Div::child`, stored before the call
    // can reach the detour.
    let _ = ORIG_DM_CHILD.set(unsafe { std::mem::transmute::<usize, NameChildFn>(target) });
+   let frame = row.frame.island(phoenix_hook::x86::Abi::of(image).arg(3));
    // SAFETY: as in `install_name`.
-   match unsafe {
-      image.hook_call(
-         row.site,
-         &desktop::mov_r9_from(phoenix_hook::x86::Register::RBP),
-         dm_child_detour as *const () as usize,
-      )
-   } {
+   match unsafe { image.hook_call(row.site, &frame, dm_child_detour as *const () as usize) } {
       Ok(_) => log::info!("desktop members: hooked the DM name @ {:#x}", row.site),
       Err(err) => log::warn!("desktop members: DM name hook failed: {err}"),
    }
@@ -248,8 +248,8 @@ unsafe extern "C" fn dm_child_detour(
    if !MEMBERS.active() || row.is_null() || frame.is_null() {
       return row;
    }
-   // SAFETY: `frame` is the DM row's `rbp`, whose decoded slots hold the
-   // recipient's `Option<UserId>`, unset for group DMs.
+   // SAFETY: `frame` is what the DM row's decoded slots are addressed from,
+   // and they hold the recipient's `Option<UserId>`, unset for group DMs.
    let user_id = unsafe {
       let slot = |at: &AtomicUsize| {
          frame
@@ -268,32 +268,24 @@ unsafe extern "C" fn dm_child_detour(
 
 /// Points the calls adding the member's name to its row at
 /// [`name_child_detour`], so decorations follow the name inside that row. The
-/// islands hand the detour the row function's frame, where the closure's
-/// environment leads to the user id.
+/// islands hand the detour the row function's frame or the closure's
+/// environment, which leads to the user id.
 fn install_name(image: &Image<'static>, name: &desktop::MemberName) {
-   CLOSURE_SLOT.store(name.closure_slot, Ordering::Release);
+   CLOSURE_SLOT.store(name.closure_slot.unwrap_or(ENV_IS_FRAME), Ordering::Release);
    ENV_USER_ID.store(name.env, Ordering::Release);
+   let frame = name.frame.island(phoenix_hook::x86::Abi::of(image).arg(3));
    for &site in &name.sites {
-      let Some(target) = image
-         .read(site + 1, 4)
-         .and_then(|rel| rel.try_into().ok())
-         .map(i32::from_le_bytes)
-         .map(|rel| (site + 5).wrapping_add_signed(rel as isize))
-      else {
+      let Some(target) = callee_at(image, site) else {
          continue;
       };
-      // SAFETY: `target` is the call's own `Div::child`, the same for every
-      // site, stored before a call can reach the detour.
+      // SAFETY: `target` is the call's own `Div::child`, stored before a call
+      // can reach the detour. ELF builds call identical copies of it, which
+      // `member_row` checks.
       let _ = ORIG_NAME_CHILD.set(unsafe { std::mem::transmute::<usize, NameChildFn>(target) });
       // SAFETY: runs from `prepare` before Discord threads execute; the island
-      // only sets `r9`, which the three-argument `Div::child` does not read.
-      match unsafe {
-         image.hook_call(
-            site,
-            &desktop::mov_r9_from(phoenix_hook::x86::Register::RBP),
-            name_child_detour as *const () as usize,
-         )
-      } {
+      // only sets the fourth argument register, which the three-argument
+      // `Div::child` does not read.
+      match unsafe { image.hook_call(site, &frame, name_child_detour as *const () as usize) } {
          Ok(_) => log::info!("desktop members: hooked the member name @ {site:#x}"),
          Err(err) => log::warn!("desktop members: member name hook failed: {err}"),
       }
@@ -314,13 +306,14 @@ unsafe extern "C" fn name_child_detour(
    if !MEMBERS.active() || row.is_null() || frame.is_null() {
       return row;
    }
-   // SAFETY: `frame` is the row function's `rbp`, whose decoded slot holds the
-   // closure's environment, which holds a pointer to the member's user id.
+   // SAFETY: `frame` is the closure's environment, or what its decoded slot
+   // holding the environment is addressed from; the environment holds a
+   // pointer to the member's user id.
    let user_id = unsafe {
-      let env = frame
-         .add(CLOSURE_SLOT.load(Ordering::Relaxed))
-         .cast::<*const u8>()
-         .read_unaligned();
+      let env = match CLOSURE_SLOT.load(Ordering::Relaxed) {
+         ENV_IS_FRAME => frame,
+         slot => frame.add(slot).cast::<*const u8>().read_unaligned(),
+      };
       if env.is_null() {
          return row;
       }

@@ -86,7 +86,7 @@ pub fn install(image: &Image<'static>) {
          return;
       },
    };
-   let pro = desktop::Prologues::of(phoenix_hook::x86::Abi::of(image)).media_fetch;
+   let pro = desktop::Prologues::of(phoenix_hook::x86::Abi::of(image)).asset_load;
    // SAFETY: runs from `prepare` before Discord threads execute; `load_detour`
    // has the loader's `(sret, path ptr, path len)` signature.
    match unsafe {

@@ -48,22 +48,22 @@ const LEAF_WORDS: usize = 32;
 /// with their SVG's viewBox.
 const ICON_SIZE: f32 = 24.0;
 /// One detour per header builder.
-pub(crate) const SITES: usize = 2;
+const SITES: usize = desktop::MAX_HEADER_BUILDERS;
 
 pub(crate) struct Symbols {
    child_node: ChildNodeFn,
    svg_new:    SvgNewFn,
    push_svg:   PushSvgFn,
    svg_color:  usize,
-   /// `[rbp+slot]` holds the message id at each site.
-   slots:      [usize; SITES],
+   /// `[frame+slot]` holds the message id at each site.
+   slots:      Vec<usize>,
 }
 
 static SYMBOLS: OnceLock<Symbols> = OnceLock::new();
 
 /// Hooks the header builders' name calls, from `DllMain`.
-pub fn install(image: &Image<'static>, found: Result<(Symbols, [usize; SITES]), String>) {
-   let (symbols, sites) = match found {
+pub fn install(image: &Image<'static>, found: Result<Located, String>) {
+   let (symbols, sites, frame) = match found {
       Ok(found) => found,
       Err(err) => {
          log::warn!("desktop headers: {err}, skipping");
@@ -73,22 +73,19 @@ pub fn install(image: &Image<'static>, found: Result<(Symbols, [usize; SITES]), 
    let detours: [usize; SITES] = [
       name_detour::<0> as *const () as usize,
       name_detour::<1> as *const () as usize,
+      name_detour::<2> as *const () as usize,
    ];
    let child_node = symbols.child_node as usize;
    if SYMBOLS.set(symbols).is_err() {
       return;
    }
+   let frame = frame.island(phoenix_hook::x86::Abi::of(image).arg(2));
    for (site, detour) in sites.into_iter().zip(detours) {
       // SAFETY: runs from `prepare` before Discord threads execute; the island
-      // only sets `r9`, which the two-argument `child_node` does not read, and
-      // the detour calls `child_node` itself, stored above.
-      match unsafe {
-         image.hook_call(
-            site,
-            &desktop::mov_r9_from(phoenix_hook::x86::Register::RBP),
-            detour,
-         )
-      } {
+      // only sets the third argument register, which the two-argument
+      // `child_node` does not read, and the detour calls `child_node` itself,
+      // stored above.
+      match unsafe { image.hook_call(site, &frame, detour) } {
          Ok(target) if target == child_node => {
             log::info!("desktop headers: hooked the header name @ {site:#x}");
          },
@@ -98,32 +95,36 @@ pub fn install(image: &Image<'static>, found: Result<(Symbols, [usize; SITES]), 
    }
 }
 
-/// The symbols, and the call adding the name in each header builder. Runs
-/// before any hook goes in.
-pub fn locate(image: &Image<'_>) -> Result<(Symbols, [usize; SITES]), String> {
+/// The symbols, the call adding the name in each header builder, and what the
+/// detours read the message id from.
+type Located = (Symbols, Vec<usize>, desktop::Frame);
+
+/// Finds [`Located`]. Runs before any hook goes in.
+pub fn locate(image: &Image<'_>) -> Result<Located, String> {
    let row = desktop::message_row(image)?;
    let body = desktop::message_body(image, row.func)?;
    let header = desktop::message_header(image, body.func)?;
-   let [first, second] = header.sites.as_slice() else {
+   if header.sites.len() > SITES {
       return Err(format!("{} header name calls", header.sites.len()));
-   };
+   }
    let svg = header.svg;
    if svg.size > LEAF_WORDS * 8 {
       return Err(format!("the node SVG leaf is {:#x} bytes", svg.size));
    }
    // SAFETY: decoded from Discord's own calls with these signatures: two
-   // handles in `rcx`/`rdx`; `out`, path and size in `rcx`, `rdx`, `r8`,
-   // `xmm3`; the handle and the leaf's address.
+   // handles; `out`, path and the float size; the handle and the leaf's
+   // address.
    let symbols = unsafe {
       Symbols {
          child_node: std::mem::transmute::<usize, ChildNodeFn>(header.child_node),
-         svg_new: std::mem::transmute::<usize, SvgNewFn>(svg.new),
-         push_svg: std::mem::transmute::<usize, PushSvgFn>(svg.push),
-         svg_color: svg.color,
-         slots: [first.slot, second.slot],
+         svg_new:    std::mem::transmute::<usize, SvgNewFn>(svg.new),
+         push_svg:   std::mem::transmute::<usize, PushSvgFn>(svg.push),
+         svg_color:  svg.color,
+         slots:      header.sites.iter().map(|site| site.slot).collect(),
       }
    };
-   Ok((symbols, [first.site, second.site]))
+   let sites = header.sites.iter().map(|site| site.site).collect();
+   Ok((symbols, sites, header.frame))
 }
 
 /// Message id to author id, `0` while the lookup is pending or found nothing.
@@ -177,7 +178,7 @@ fn icons(symbols: &Symbols, site: usize, frame: *const u8) -> Vec<(&'static str,
    let Some(&slot) = symbols.slots.get(site) else {
       return Vec::new();
    };
-   // SAFETY: the builder keeps the message id at `[rbp+slot]` at the call.
+   // SAFETY: the builder keeps the message id at `[frame+slot]` at the call.
    let message_id = unsafe { frame.add(slot).cast::<u64>().read_unaligned() };
    if message_id < MIN_SNOWFLAKE {
       return Vec::new();
@@ -191,11 +192,11 @@ fn icons(symbols: &Symbols, site: usize, frame: *const u8) -> Vec<(&'static str,
 }
 
 /// `child_node` adding the name wrapper, then the decorations' icons. The
-/// island hands it the builder's `rbp` as `frame`.
+/// island hands it what the builder's frame slots are addressed from as
+/// `frame`.
 unsafe extern "C" fn name_detour<const SITE: usize>(
    node: *mut c_void,
    child: *mut c_void,
-   _r8: usize,
    frame: *const u8,
 ) -> *mut c_void {
    let Some(symbols) = SYMBOLS.get() else {
