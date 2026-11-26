@@ -54,11 +54,18 @@ const settings = phoenix.settings.define({
     title: "Show in the member list",
     description: "Next to each member's name (desktop only)",
     default: true,
-    onChange: (on) => syncMembers(on),
+    onChange: (on) => sync("members", on),
+  },
+  messageHeaders: {
+    type: "switch",
+    title: "Show in message headers",
+    description: "Next to each author's name (desktop only)",
+    default: true,
+    onChange: (on) => sync("headers", on),
   },
   profileBadges: { type: "switch", title: "Profile badges", default: true },
-  ignoreBots: { type: "switch", title: "Ignore bots", default: true, onChange: () => members?.update?.() },
-  showSelf: { type: "switch", title: "Show my own", default: true, onChange: () => members?.update?.() },
+  ignoreBots: { type: "switch", title: "Ignore bots", default: true, onChange: () => update() },
+  showSelf: { type: "switch", title: "Show my own", default: true, onChange: () => update() },
 });
 
 const presences = new Map<string, Presence>();
@@ -83,7 +90,7 @@ function setPresence(userId: string, presence?: Presence) {
     presences.delete(userId);
   }
   // Most updates only change activities, which leave the row as it is.
-  if (key(presence) !== before && drawn.has(userId)) members?.update?.(userId);
+  if (key(presence) !== before && drawn.has(userId)) update(userId);
 }
 
 function readPresence(raw: unknown, userId?: string) {
@@ -139,30 +146,34 @@ function shown(userId: string, bot: boolean) {
   return presences.get(userId);
 }
 
-let members: Phoenix.Remover | undefined;
+const removers: Partial<Record<"members" | "headers", Phoenix.Remover>> = {};
+const update = (userId?: string) => Object.values(removers).forEach((r) => r.update?.(userId));
 
-function syncMembers(enabled: boolean) {
-  if (enabled && !members) {
-    // Runtimes before member decorations have no such call.
-    members = phoenix.ui.addMemberDecoration?.({
-      render: ({ userId }) => {
-        if (drawn.size > 2_000) drawn.clear();
-        drawn.add(userId);
-        const p = shown(userId, bots.has(userId));
-        if (!p) return null;
-        return {
-          text: devices(p).map((d) => PLATFORMS[d].emoji).join(" "),
-          color: STATUS[p.status].color,
-          icons: devices(p).map((d) => ({ svg: svg(d), color: STATUS[p.platforms[d]!].color })),
-        };
-      },
-    });
-  } else if (!enabled && members) {
-    members();
-    members = undefined;
+function render({ userId }: { userId: string }) {
+  if (drawn.size > 2_000) drawn.clear();
+  drawn.add(userId);
+  const p = shown(userId, bots.has(userId));
+  if (!p) return null;
+  return {
+    text: devices(p).map((d) => PLATFORMS[d].emoji).join(" "),
+    color: STATUS[p.status].color,
+    icons: devices(p).map((d) => ({ svg: svg(d), color: STATUS[p.platforms[d]!].color })),
+  };
+}
+
+function sync(where: "members" | "headers", enabled: boolean) {
+  const current = removers[where];
+  if (enabled && !current) {
+    // Runtimes before these decorations have no such calls.
+    const add = where === "members" ? phoenix.ui.addMemberDecoration : phoenix.ui.addMessageHeaderDecoration;
+    removers[where] = add?.({ render });
+  } else if (!enabled && current) {
+    current();
+    delete removers[where];
   }
 }
-syncMembers(settings.memberList);
+sync("members", settings.memberList);
+sync("headers", settings.messageHeaders);
 
 const toHex = (s: string) => [...s].map((c) => c.charCodeAt(0).toString(16).padStart(2, "0")).join("");
 

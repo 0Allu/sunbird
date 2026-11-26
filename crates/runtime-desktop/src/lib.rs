@@ -11,6 +11,7 @@ mod discord;
 mod emoji;
 mod fetch;
 mod gpui;
+mod headers;
 mod icons;
 mod js;
 mod members;
@@ -113,6 +114,7 @@ pub fn prepare() -> Result<(), Error> {
    modal::install(&image);
    accessories::install(&image);
    members::install(&image);
+   headers::install(&image);
    icons::install(&image);
    context_menu::install(&image);
    message::install(&image);

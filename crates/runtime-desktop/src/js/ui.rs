@@ -54,7 +54,7 @@ use crate::{
    emoji,
    icons,
    js::Desktop,
-   members,
+   members::Place,
    modal::{
       self,
       ModalButton,
@@ -71,7 +71,8 @@ pub struct DesktopAccessory<'js> {
    pub render:   Function<'js>,
 }
 
-/// A `phoenix.ui.addMemberDecoration` callback.
+/// A `phoenix.ui.addMemberDecoration` or `addMessageHeaderDecoration`
+/// callback.
 #[derive(Clone)]
 pub struct DesktopMember<'js> {
    pub id:       u64,
@@ -278,12 +279,24 @@ pub fn render_accessories(engine: &Engine, message_id: u64) -> Vec<RenderedAcces
    engine.with(|ctx| evaluate_accessories_in_ctx(&ctx, message_id))
 }
 
-/// Calls every `addMemberDecoration` for `user_id`.
-fn evaluate_members_in_ctx<'js>(ctx: &Ctx<'js>, user_id: u64) -> Vec<RenderedAccessory> {
+/// The plugin API name registering `place`'s decorations.
+const fn api_name(place: Place) -> &'static str {
+   match place {
+      Place::Members => "addMemberDecoration",
+      Place::Headers => "addMessageHeaderDecoration",
+   }
+}
+
+/// Calls every decoration registered for `place` with `user_id`.
+fn evaluate_decorations_in_ctx<'js>(
+   ctx: &Ctx<'js>,
+   place: Place,
+   user_id: u64,
+) -> Vec<RenderedAccessory> {
    let Some(registry) = ctx.userdata::<Desktop<'js>>() else {
       return Vec::new();
    };
-   let snapshot: Vec<DesktopMember<'js>> = registry.members.borrow().clone();
+   let snapshot: Vec<DesktopMember<'js>> = registry.decorations(place).borrow().clone();
    drop(registry);
    let Ok(arg) = Object::new(ctx.clone()) else {
       return Vec::new();
@@ -298,19 +311,22 @@ fn evaluate_members_in_ctx<'js>(ctx: &Ctx<'js>, user_id: u64) -> Vec<RenderedAcc
          .catch(ctx)
       {
          Ok(val) => out.extend(parse_rendered(&val, decoration.priority)),
-         Err(err) => log::error!("[{}] addMemberDecoration render: {err}", decoration.plugin),
+         Err(err) => log::error!("[{}] {} render: {err}", decoration.plugin, api_name(place)),
       }
    }
    out
 }
 
-/// Evaluates every registered `addMemberDecoration` for `user_id`.
-pub fn render_members(engine: &Engine, user_id: u64) -> Vec<RenderedAccessory> {
-   engine.with(|ctx| evaluate_members_in_ctx(&ctx, user_id))
+/// Evaluates every decoration registered for `place` with `user_id`.
+pub fn render_decorations(engine: &Engine, place: Place, user_id: u64) -> Vec<RenderedAccessory> {
+   engine.with(|ctx| evaluate_decorations_in_ctx(&ctx, place, user_id))
 }
 
-fn add_member_decoration<'js>(
+/// `addMemberDecoration` and `addMessageHeaderDecoration`, which differ only
+/// in where they draw.
+fn add_decoration<'js>(
    ctx: &Ctx<'js>,
+   place: Place,
    plugin: &str,
    options: &Object<'js>,
 ) -> rquickjs::Result<Function<'js>> {
@@ -319,11 +335,12 @@ fn add_member_decoration<'js>(
    let render = options.get::<_, Function<'js>>("render")?;
    let priority = options.get::<_, Option<i32>>("priority")?.unwrap_or(0);
    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+   let decorations = place.decorations();
    let count = {
       let registry = ctx
          .userdata::<Desktop<'js>>()
          .ok_or_else(|| Exception::throw_internal(ctx, "no registry"))?;
-      let mut list = registry.members.borrow_mut();
+      let mut list = registry.decorations(place).borrow_mut();
       list.push(DesktopMember {
          id,
          plugin: plugin.to_owned(),
@@ -332,26 +349,26 @@ fn add_member_decoration<'js>(
       });
       list.len()
    };
-   members::set_active_count(count);
-   members::clear_cache();
+   decorations.set_active_count(count);
+   decorations.clear_cache();
 
    let remove = Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
       if let Some(registry) = ctx.userdata::<Desktop<'js>>() {
-         let mut list = registry.members.borrow_mut();
+         let mut list = registry.decorations(place).borrow_mut();
          list.retain(|entry| entry.id != id);
-         members::set_active_count(list.len());
-         members::clear_cache();
+         decorations.set_active_count(list.len());
+         decorations.clear_cache();
          accessories::invalidate_discord_windows();
       }
    })?;
    remove.set(
       "update",
-      Function::new(ctx.clone(), |ctx: Ctx<'js>, user_id: Opt<String>| {
+      Function::new(ctx.clone(), move |ctx: Ctx<'js>, user_id: Opt<String>| {
          if let Some(uid) = user_id.0.and_then(|s| s.parse::<u64>().ok()) {
-            let items = evaluate_members_in_ctx(&ctx, uid);
-            members::set_rendered(uid, items);
+            let items = evaluate_decorations_in_ctx(&ctx, place, uid);
+            decorations.set_rendered(uid, items);
          } else {
-            members::clear_cache();
+            decorations.clear_cache();
             accessories::invalidate_discord_windows();
          }
       })?,
@@ -776,13 +793,15 @@ pub fn desktop_ui_object<'js>(ctx: &Ctx<'js>, plugin: &str) -> rquickjs::Result<
       })?,
    )?;
 
-   let member_owner = plugin.to_owned();
-   ui.set(
-      "addMemberDecoration",
-      Function::new(ctx.clone(), move |ctx: Ctx<'js>, options: Object<'js>| {
-         add_member_decoration(&ctx, &member_owner, &options)
-      })?,
-   )?;
+   for place in [Place::Members, Place::Headers] {
+      let owner = plugin.to_owned();
+      ui.set(
+         api_name(place),
+         Function::new(ctx.clone(), move |ctx: Ctx<'js>, options: Object<'js>| {
+            add_decoration(&ctx, place, &owner, &options)
+         })?,
+      )?;
+   }
 
    let action_owner = plugin.to_owned();
    ui.set(

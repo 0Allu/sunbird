@@ -1345,6 +1345,13 @@ declare namespace Phoenix {
       priority?: number;
       render(ctx: { userId: string }): Rendered;
     }): Remover;
+    /// Icons right after the author's name in message headers. Desktop only, so absent
+    /// elsewhere. Only `icons` are drawn. Like `addMemberDecoration`, it runs once per author and
+    /// the result is kept until `update(userId)`.
+    addMessageHeaderDecoration?(options: {
+      priority?: number;
+      render(ctx: { userId: string }): Rendered;
+    }): Remover;
     /// A row in the message long-press menu, above Delete. The menu closes on press.
     addMessageAction(options: {
       label: string;

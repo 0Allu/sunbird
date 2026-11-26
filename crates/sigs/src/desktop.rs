@@ -1698,7 +1698,6 @@ fn member_name(
    })
 }
 
-
 /// The function formatting `member-{}-{}`, a member row's element id from the
 /// member's user id, and the calls in it adding the member's name to its row.
 pub fn member_row(image: &Image<'_>) -> Found<MemberRow> {
@@ -1735,6 +1734,388 @@ pub fn member_row(image: &Image<'_>) -> Found<MemberRow> {
       func,
       name: member_name(image, &lines, slot).ok_or("member name row not decoded")?,
    })
+}
+
+/// The message header's node API, and where each header row adds the author's
+/// name.
+///
+/// Headers are not GPUI `Div`s but Discord's own `Rc<Node>` handles: every
+/// builder call takes the handle and returns it, cloned first when shared.
+#[derive(Clone, Debug)]
+pub struct MessageHeader {
+   /// The calls adding the name, one per display mode.
+   pub sites:      Vec<HeaderSite>,
+   /// `child_node(node, child) -> node`, adding a node as a child.
+   pub child_node: usize,
+   pub svg:        NodeSvg,
+}
+
+/// Discord's node SVG leaf, drawn from an asset path.
+#[derive(Clone, Copy, Debug)]
+pub struct NodeSvg {
+   /// `svg_new(out, path ptr, path len, size: f32)`.
+   pub new:   usize,
+   /// `push_svg(node, &leaf) -> node`, moving the leaf into a boxed child.
+   pub push:  usize,
+   /// The leaf's color tag (`1` when set); the packed color follows it.
+   pub color: usize,
+   /// The leaf's size, which `push_svg` copies.
+   pub size:  usize,
+}
+
+/// A `call child_node` adding the name wrapper to a header row.
+#[derive(Clone, Copy, Debug)]
+pub struct HeaderSite {
+   pub site: usize,
+   /// `[rbp+slot]` holds the message id at the call.
+   pub slot: usize,
+}
+
+/// The app tag's element id template, loaded by the two header row builders.
+const HEADER_APP_TAG: &[u8] = b"\x0fheader-app-tag-\xc0\x00";
+/// A bundled icon drawn as a node SVG leaf.
+const NODE_SVG: &[u8] = b"features_ui/partner.svg";
+/// `sub rsp,48h; lea rax,[rsp+28h]; and dword ptr [rax],0; mov [rax+8],rdx`:
+/// the child handle wrapped as a node child, tag 0.
+const CHILD_NODE_HEAD: [u8; 16] = [
+   0x48, 0x83, 0xEC, 0x48, 0x48, 0x8D, 0x44, 0x24, 0x28, 0x83, 0x20, 0x00, 0x48, 0x89, 0x50, 0x08,
+];
+
+/// The register or memory operand an instruction writes, as `disasm` prints
+/// it: `mov rsi,rax` writes `rsi`.
+fn written(line: &phoenix_hook::x86::Line) -> Option<&str> {
+   let (_, operands) = line.text.split_once(' ')?;
+   Some(operands.split_once(',')?.0)
+}
+
+/// `[base+disp]` of a `lea`, unless the base is the frame or the stack.
+fn lea_field(line: &phoenix_hook::x86::Line) -> Option<usize> {
+   let (_, operand) = line.text.strip_prefix("lea ")?.split_once(',')?;
+   let (base, disp) = operand
+      .strip_prefix('[')?
+      .strip_suffix(']')?
+      .split_once('+')?;
+   (!matches!(base, "rbp" | "rsp"))
+      .then(|| hex_disp(disp))
+      .flatten()
+}
+
+/// Locates [`MessageHeader`]. `body` is [`message_body`]'s function, whose
+/// auto-moderation avatar fallback draws a node SVG leaf.
+///
+/// Both row builders add the name with `mov rdx,reg; call child_node`, where
+/// `reg` holds what one function called only by the two builders returned.
+/// The message id slot is the format argument of the app tag's element id.
+pub fn message_header(image: &Image<'_>, body: usize) -> Found<MessageHeader> {
+   if !matches!(Abi::of(image), Abi::Win64) {
+      return Err("the message header is only decoded on Win64".to_owned());
+   }
+   let anchor = one("header-app-tag template", &image.find_bytes(HEADER_APP_TAG))?;
+   let mut builders = lea_refs(image, anchor)
+      .into_iter()
+      .filter_map(|lea| Some(image.function_bounds(lea)?.0))
+      .collect::<Vec<_>>();
+   builders.sort_unstable();
+   builders.dedup();
+   if builders.len() != 2 {
+      return Err(format!(
+         "the app tag template is loaded by {} functions",
+         builders.len()
+      ));
+   }
+   let decoded = builders
+      .iter()
+      .map(|&func| header_builder(image, func, anchor))
+      .collect::<Found<Vec<_>>>()?;
+   let both = builders.iter().copied().collect::<HashSet<_>>();
+   let mut sites = Vec::new();
+   let mut child_node = None;
+   for (slot, adds) in &decoded {
+      let names = adds
+         .iter()
+         .filter(|&&(_, _, producer)| callers(image, producer) == both)
+         .copied()
+         .collect::<Vec<_>>();
+      let (site, callee, _) = one("header name add", &names)?;
+      if child_node.is_some_and(|known| known != callee) {
+         return Err("the header builders add children differently".to_owned());
+      }
+      child_node = Some(callee);
+      sites.push(HeaderSite { site, slot: *slot });
+   }
+   let child_node = child_node.ok_or("header child_node not found")?;
+   Ok(MessageHeader {
+      sites,
+      child_node,
+      svg: node_svg(image, body)?,
+   })
+}
+
+/// `(site, callee, producer)`: a `call child_node` adding what `producer`
+/// returned.
+type ChildAdd = (usize, usize, usize);
+
+/// A header builder's message id slot, and every call adding a call's result
+/// with `child_node`.
+fn header_builder(image: &Image<'_>, func: usize, anchor: usize) -> Found<(usize, Vec<ChildAdd>)> {
+   let is_child_node = |func: usize| image.read(func, 16) == Some(&CHILD_NODE_HEAD[..]);
+   let lines = phoenix_hook::x86::disasm(
+      function_code(image, func, "header builder")?,
+      func,
+      usize::MAX,
+   );
+   let template = lines
+      .iter()
+      .position(|line| line.target == Some(anchor))
+      .ok_or("header app tag load not decoded")?;
+   let slot = lines[template.saturating_sub(8)..template]
+      .iter()
+      .rev()
+      .find_map(|line| hex_disp(line.text.strip_prefix("lea rax,[rbp+")?.strip_suffix(']')?))
+      .ok_or("header message id slot not found")?;
+   let mut adds = Vec::new();
+   for at in 1..lines.len() {
+      let line = &lines[at];
+      let Some(callee) = line.target.filter(|_| line.text.starts_with("call ")) else {
+         continue;
+      };
+      let Some(reg) = lines[at - 1].text.strip_prefix("mov rdx,") else {
+         continue;
+      };
+      if line.len != 5 || !is_child_node(callee) {
+         continue;
+      }
+      let Some(set) = (0..at - 1).rev().find(|&j| written(&lines[j]) == Some(reg)) else {
+         continue;
+      };
+      if lines[set].text != format!("mov {reg},rax") {
+         continue;
+      }
+      let producer = lines[..set]
+         .iter()
+         .rev()
+         .find(|line| line.text != "nop")
+         .filter(|line| line.text.starts_with("call "))
+         .and_then(|line| line.target);
+      if let Some(producer) = producer {
+         adds.push((line.addr, callee, producer));
+      }
+   }
+   Ok((slot, adds))
+}
+
+fn node_svg(image: &Image<'_>, body: usize) -> Found<NodeSvg> {
+   let mut svg_news = image
+      .find_bytes(NODE_SVG)
+      .into_iter()
+      .flat_map(|path| lea_refs(image, path))
+      .filter_map(|lea| {
+         let code = image.read(lea, 0x40)?;
+         phoenix_hook::x86::disasm(code, lea, 12)
+            .into_iter()
+            .find(|line| line.text.starts_with("call "))?
+            .target
+      })
+      .collect::<Vec<_>>();
+   // The leaf keeps the size from `xmm3` and the path at `out+10h`; the bundled
+   // icon is drawn as a GPUI `Svg` elsewhere too.
+   svg_news.retain(|&func| {
+      image.read(func, 0x30).is_some_and(|head| {
+         let head = phoenix_hook::x86::disasm(head, func, 8);
+         head.iter().any(|line| line.text == "movaps xmm6,xmm3")
+            && head.iter().any(|line| line.text == "add rcx,10h")
+      })
+   });
+   svg_news.sort_unstable();
+   svg_news.dedup();
+   let svg_new = one("node svg_new", &svg_news)?;
+
+   // In the body: `lea rcx,[rbp+leaf]; ...; call svg_new`, then
+   // `mov dword ptr [rbp+color],1` and the call pushing the leaf.
+   let lines = phoenix_hook::x86::disasm(
+      function_code(image, body, "message body")?,
+      body,
+      usize::MAX,
+   );
+   let (push_svg, svg_color) = lines
+      .iter()
+      .enumerate()
+      .filter(|(_, line)| line.target == Some(svg_new) && line.text.starts_with("call "))
+      .find_map(|(at, _)| {
+         let leaf = lines[at.saturating_sub(8)..at]
+            .iter()
+            .rev()
+            .find_map(|line| {
+               hex_disp(line.text.strip_prefix("lea rcx,[rbp+")?.strip_suffix(']')?)
+            })?;
+         let after = &lines[at + 1..(at + 24).min(lines.len())];
+         let push = after.iter().find(|line| line.text.starts_with("call "))?;
+         let tag = after
+            .iter()
+            .take_while(|line| line.addr < push.addr)
+            .find_map(|line| {
+               hex_disp(
+                  line
+                     .text
+                     .strip_prefix("mov dword ptr [rbp+")?
+                     .strip_suffix("],1")?,
+               )
+            })?;
+         Some((push.target?, tag.checked_sub(leaf)?))
+      })
+      .ok_or("node SVG leaf push not found in the message body")?;
+   if !(4..0x30).contains(&svg_color) {
+      return Err(format!("node SVG color at {svg_color:#x}"));
+   }
+   // `push_svg` boxes the leaf first: `push size; pop rdx` before the
+   // allocation.
+   let convert = calls_in(image, push_svg, 0x40)
+      .first()
+      .ok_or("push_svg calls nothing")?
+      .1;
+   let code = image
+      .read(convert, 0x80)
+      .ok_or("the leaf box is unmapped")?;
+   let head = phoenix_hook::x86::disasm(code, convert, 32);
+   let leaf_size = head
+      .windows(2)
+      .find_map(|pair| {
+         (pair[1].text == "pop rdx")
+            .then(|| hex_disp(pair[0].text.strip_prefix("push ")?))
+            .flatten()
+      })
+      .filter(|&size| svg_color + 8 <= size && size <= 0x100)
+      .ok_or("node SVG leaf size not found")?;
+   Ok(NodeSvg {
+      new:   svg_new,
+      push:  push_svg,
+      color: svg_color,
+      size:  leaf_size,
+   })
+}
+
+/// Where a `Message` keeps its author's user id: `Arc<User>` at `author`, the
+/// `User` `arc_data` into the `Arc`, its id `user_id` into the `User`.
+#[derive(Clone, Copy, Debug)]
+pub struct MessageAuthor {
+   pub author:   usize,
+   /// The message's own id, which places the `Message` inside other structs.
+   pub id:       usize,
+   pub arc_data: usize,
+   pub user_id:  usize,
+}
+
+/// Locates [`MessageAuthor`] from [`MessageJson::to_value`].
+///
+/// It loads each field (`lea reg,[message+field]`) right before writing its
+/// key, and the author's serializer steps into the `Arc` and calls `User`'s.
+pub fn message_author(image: &Image<'_>, to_value: usize) -> Found<MessageAuthor> {
+   let key = |lines: &[phoenix_hook::x86::Line], name: &[u8]| {
+      lines.iter().position(|line| {
+         line.text.starts_with("lea rdx,")
+            && line
+               .target
+               .and_then(|target| image.read(target, name.len()))
+               .is_some_and(|text| text == name)
+      })
+   };
+   let field_before = |lines: &[phoenix_hook::x86::Line], at: usize| {
+      lines[at.saturating_sub(8)..at]
+         .iter()
+         .rev()
+         .find_map(lea_field)
+   };
+   let lines = phoenix_hook::x86::disasm(
+      function_code(image, to_value, "Message to_value")?,
+      to_value,
+      usize::MAX,
+   );
+   let id_key = key(&lines, b"id").ok_or("message id key not found")?;
+   let author_key = key(&lines, b"author").ok_or("message author key not found")?;
+   let id = field_before(&lines, id_key).ok_or("message id field not found")?;
+   let author = field_before(&lines, author_key).ok_or("message author field not found")?;
+   let author_ser = lines[author_key..]
+      .iter()
+      .filter(|line| line.text.starts_with("call "))
+      .nth(1)
+      .and_then(|line| line.target)
+      .ok_or("author serializer not found")?;
+   let lines = phoenix_hook::x86::disasm(
+      function_code(image, author_ser, "author serializer")?,
+      author_ser,
+      usize::MAX,
+   );
+   let step = lines
+      .iter()
+      .position(|line| line.text.starts_with("add rdx,"))
+      .ok_or("author Arc step not found")?;
+   let arc_data =
+      hex_disp(&lines[step].text["add rdx,".len()..]).ok_or("author Arc step not decoded")?;
+   let user_ser = lines[step..]
+      .iter()
+      .find(|line| line.text.starts_with("call "))
+      .and_then(|line| line.target)
+      .ok_or("User serializer not found")?;
+   let lines = phoenix_hook::x86::disasm(
+      function_code(image, user_ser, "User serializer")?,
+      user_ser,
+      usize::MAX,
+   );
+   let user_key = key(&lines, b"idusername").ok_or("User id key not found")?;
+   let user_id = lines[user_key..]
+      .iter()
+      .take(12)
+      .find_map(lea_field)
+      .ok_or("User id field not found")?;
+   if author >= 0x1000 || id >= 0x1000 || arc_data != 0x10 || user_id >= 0x400 {
+      return Err(format!(
+         "message author offsets out of range ({author:#x}, {id:#x}, {arc_data:#x}, {user_id:#x})"
+      ));
+   }
+   Ok(MessageAuthor {
+      author,
+      id,
+      arc_data,
+      user_id,
+   })
+}
+
+/// Where a `MessageRow` keeps its author's `Arc<User>`.
+///
+/// The row embeds the `Message` whose id [`message_row`] decoded, so the
+/// author sits as far from that id as in `Message`; `MessageRow::render` must
+/// load it as a pointer (`mov r64,[reg+field]`) for the offset to hold.
+pub fn row_author(image: &Image<'_>, row: &MessageRow, author: &MessageAuthor) -> Found<usize> {
+   let field = (row.msg_id_offset + author.author)
+      .checked_sub(author.id)
+      .ok_or("the message row does not hold a whole Message")?;
+   let lines = phoenix_hook::x86::disasm(
+      function_code(image, row.func, "MessageRow::render")?,
+      row.func,
+      usize::MAX,
+   );
+   let loads = lines.iter().any(|line| {
+      let Some((dest, source)) = line
+         .text
+         .strip_prefix("mov r")
+         .and_then(|t| t.split_once(','))
+      else {
+         return false;
+      };
+      !dest.ends_with('d')
+         && source
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .and_then(|s| s.split_once('+'))
+            .and_then(|(_, disp)| hex_disp(disp))
+            == Some(field)
+   });
+   if !loads {
+      return Err(format!(
+         "MessageRow::render never loads the author at +{field:#x}"
+      ));
+   }
+   Ok(field)
 }
 
 /// A bundled icon every build so far draws with `svg().path(..)`, which the

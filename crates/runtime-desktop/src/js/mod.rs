@@ -24,7 +24,7 @@ use crate::{
       DesktopAction,
       DesktopMember,
    },
-   members,
+   members::Place,
 };
 
 /// What plugins registered with the desktop UI, kept in the runtime's userdata
@@ -35,6 +35,8 @@ pub struct Desktop<'js> {
    pub accessories:   RefCell<Vec<DesktopAccessory<'js>>>,
    /// `phoenix.ui.addMemberDecoration` callbacks.
    pub members:       RefCell<Vec<DesktopMember<'js>>>,
+   /// `phoenix.ui.addMessageHeaderDecoration` callbacks.
+   pub headers:       RefCell<Vec<DesktopMember<'js>>>,
    /// `phoenix.ui.addMessageAction` callbacks.
    pub actions:       RefCell<Vec<DesktopAction<'js>>>,
    /// Active `phoenix.ui.openPage` button callbacks, keyed by button ID.
@@ -42,6 +44,16 @@ pub struct Desktop<'js> {
    /// `phoenix.messages.onEmojiPick` handlers by id and plugin. Desktop has
    /// no picker presses to give them, only the unlock they turn on.
    pub emoji_pickers: RefCell<Vec<(u64, String)>>,
+}
+
+impl<'js> Desktop<'js> {
+   /// The decorations `place` draws.
+   pub const fn decorations(&self, place: Place) -> &RefCell<Vec<DesktopMember<'js>>> {
+      match place {
+         Place::Members => &self.members,
+         Place::Headers => &self.headers,
+      }
+   }
 }
 
 // SAFETY: every field is bound to 'js, and Changed swaps exactly that lifetime.
@@ -66,15 +78,16 @@ pub fn unload(ctx: &Ctx<'_>, name: &str) {
    }
    drop(list);
 
-   let mut decorations = registry.members.borrow_mut();
-   let before_members = decorations.len();
-   decorations.retain(|entry| entry.plugin != name);
-   if decorations.len() != before_members {
-      members::set_active_count(decorations.len());
-      members::clear_cache();
-      accessories::invalidate_discord_windows();
+   for place in [Place::Members, Place::Headers] {
+      let mut decorations = registry.decorations(place).borrow_mut();
+      let before = decorations.len();
+      decorations.retain(|entry| entry.plugin != name);
+      if decorations.len() != before {
+         place.decorations().set_active_count(decorations.len());
+         place.decorations().clear_cache();
+         accessories::invalidate_discord_windows();
+      }
    }
-   drop(decorations);
 
    let mut actions = registry.actions.borrow_mut();
    let before_actions = actions.len();

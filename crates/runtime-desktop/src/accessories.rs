@@ -109,6 +109,12 @@ static WORKER_TX: OnceLock<mpsc::Sender<u64>> = OnceLock::new();
 
 const MAX_CACHE_ENTRIES: usize = 8192;
 
+/// Whether `MessageRow::render` is hooked, which hands message headers their
+/// row.
+pub fn row_hooked() -> bool {
+   ORIG_RENDER_ROW.get().is_some()
+}
+
 pub fn set_active_count(count: usize) {
    ACTIVE_COUNT.store(count, Ordering::Release);
    if count > 0 {
@@ -219,7 +225,7 @@ fn lookup_cached_tint(message_id: u64) -> Option<u32> {
 
 /// Converts plugin ARGB (`0xAARRGGBB`, with `0x00RRGGBB` treated as opaque)
 /// into Discord GPUI's packed `0xRRGGBBAA` `u32` token format.
-const fn argb_to_rgba(argb: u32) -> u32 {
+pub const fn argb_to_rgba(argb: u32) -> u32 {
    let raw_a = (argb >> 24) & 0xFF;
    let a = if raw_a == 0 && argb != 0 { 0xFF } else { raw_a };
    ((argb & 0x00FF_FFFF) << 8) | a
@@ -391,19 +397,21 @@ unsafe extern "C" fn render_row_detour(
    let Some(orig) = ORIG_RENDER_ROW.get().copied() else {
       return sret;
    };
+   let message_id = if row.is_null() {
+      0
+   } else {
+      let offset = MSG_ID_OFFSET.load(Ordering::Relaxed);
+      // SAFETY: `row` is Discord's live `&MessageRow` and `offset` was decoded
+      // from its `message-content-{id}` formatting read.
+      unsafe { row.cast::<u8>().add(offset).cast::<u64>().read_unaligned() }
+   };
+   let outer = crate::headers::enter(row.cast(), message_id);
    // SAFETY: forwards all arguments verbatim to the original
    // `MessageRow::render`.
    let out = unsafe { orig(sret, row, a2, a3, s0, s1, s2, s3, s4, s5, s6) };
+   crate::headers::leave(outer);
 
-   if ACTIVE_COUNT.load(Ordering::Relaxed) == 0 || row.is_null() || sret.is_null() {
-      return out;
-   }
-
-   let offset = MSG_ID_OFFSET.load(Ordering::Relaxed);
-   // SAFETY: `row` is Discord's live `&MessageRow` and `offset` was decoded
-   // from its `message-content-{id}` formatting read.
-   let message_id = unsafe { row.cast::<u8>().add(offset).cast::<u64>().read_unaligned() };
-   if message_id == 0 {
+   if ACTIVE_COUNT.load(Ordering::Relaxed) == 0 || sret.is_null() || message_id == 0 {
       return out;
    }
 

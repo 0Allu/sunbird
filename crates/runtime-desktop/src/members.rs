@@ -1,5 +1,6 @@
-//! Native GPUI member list decorations (`phoenix.ui.addMemberDecoration`) for
-//! Desktop Phoenix.
+//! Plugin decorations keyed by user id for Desktop Phoenix: the member list
+//! (`phoenix.ui.addMemberDecoration`) and message headers
+//! (`phoenix.ui.addMessageHeaderDecoration`, drawn by [`crate::headers`]).
 //!
 //! In the member list's row renderer, the function formatting `member-{}-{}`
 //! found by [`desktop::member_row`], the calls adding the member's name to its
@@ -41,97 +42,144 @@ enum CacheEntry {
 
 const MAX_CACHE_ENTRIES: usize = 8192;
 /// Snowflakes from 2015 on are far above this, so anything below is not an id.
-const MIN_SNOWFLAKE: u64 = 1 << 40;
+pub const MIN_SNOWFLAKE: u64 = 1 << 40;
+
+/// Where decorations keyed by user id go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+   /// After names in the member list.
+   Members,
+   /// After authors' names in message headers.
+   Headers,
+}
+
+impl Place {
+   pub const fn decorations(self) -> &'static Decorations {
+      match self {
+         Self::Members => &MEMBERS,
+         Self::Headers => &HEADERS,
+      }
+   }
+}
+
+/// What a [`Place`]'s decorations drew per user, filled on a worker thread so
+/// Discord's render never waits on plugins.
+pub struct Decorations {
+   place:  Place,
+   active: AtomicUsize,
+   cache:  LazyLock<RwLock<HashMap<u64, CacheEntry>>>,
+   worker: OnceLock<mpsc::Sender<u64>>,
+}
+
+pub static MEMBERS: Decorations = Decorations::new(Place::Members);
+pub static HEADERS: Decorations = Decorations::new(Place::Headers);
+
+impl Decorations {
+   const fn new(place: Place) -> Self {
+      Self {
+         place,
+         active: AtomicUsize::new(0),
+         cache: LazyLock::new(|| RwLock::new(HashMap::new())),
+         worker: OnceLock::new(),
+      }
+   }
+
+   pub fn active(&self) -> bool {
+      self.active.load(Ordering::Relaxed) > 0
+   }
+
+   pub fn set_active_count(&'static self, count: usize) {
+      self.active.store(count, Ordering::Release);
+      if count > 0 {
+         self.ensure_worker();
+      }
+   }
+
+   pub fn clear_cache(&self) {
+      if let Ok(mut map) = self.cache.write() {
+         map.clear();
+      }
+   }
+
+   /// Stores what the decorations drew for `user_id` and repaints when it
+   /// changed.
+   pub fn set_rendered(&self, user_id: u64, mut items: Vec<RenderedAccessory>) {
+      items.sort_by_key(|a| a.priority);
+      let changed = self.cache.write().is_ok_and(|mut map| {
+         if map.len() > MAX_CACHE_ENTRIES {
+            map.clear();
+         }
+         let same = matches!(map.get(&user_id), Some(CacheEntry::Ready(old)) if *old == items);
+         map.insert(user_id, CacheEntry::Ready(items));
+         !same
+      });
+      if changed {
+         invalidate_discord_windows();
+      }
+   }
+
+   fn ensure_worker(&'static self) -> &'static mpsc::Sender<u64> {
+      self.worker.get_or_init(|| {
+         let (tx, rx) = mpsc::channel::<u64>();
+         let name = match self.place {
+            Place::Members => "sunbird-members",
+            Place::Headers => "sunbird-headers",
+         };
+         let _ = std::thread::Builder::new()
+            .name(name.to_owned())
+            .spawn(move || {
+               while let Ok(id) = rx.recv() {
+                  let mut batch = vec![id];
+                  while let Ok(more) = rx.try_recv() {
+                     if !batch.contains(&more) {
+                        batch.push(more);
+                     }
+                  }
+                  for uid in batch {
+                     if self.active.load(Ordering::Acquire) == 0 {
+                        break;
+                     }
+                     let items = phoenix_runtime::engine().map_or_default(|engine| {
+                        crate::js::ui::render_decorations(&engine, self.place, uid)
+                     });
+                     self.set_rendered(uid, items);
+                  }
+               }
+            });
+         tx
+      })
+   }
+
+   /// What the decorations drew for `user_id`, queueing them when unknown.
+   pub fn lookup(&'static self, user_id: u64) -> Option<Vec<RenderedAccessory>> {
+      if let Ok(map) = self.cache.read()
+         && let Some(entry) = map.get(&user_id)
+      {
+         return match entry {
+            CacheEntry::Ready(items) if !items.is_empty() => Some(items.clone()),
+            _ => None,
+         };
+      }
+      let queue = self.cache.write().is_ok_and(|mut map| {
+         if map.contains_key(&user_id) {
+            return false;
+         }
+         if map.len() > MAX_CACHE_ENTRIES {
+            map.clear();
+         }
+         map.insert(user_id, CacheEntry::Pending);
+         true
+      });
+      if queue {
+         let _ = self.ensure_worker().send(user_id);
+      }
+      None
+   }
+}
 
 static ORIG_NAME_CHILD: OnceLock<NameChildFn> = OnceLock::new();
 static CLOSURE_SLOT: AtomicUsize = AtomicUsize::new(0);
 static ENV_USER_ID: AtomicUsize = AtomicUsize::new(0);
-static ACTIVE_COUNT: AtomicUsize = AtomicUsize::new(0);
-static CACHE: LazyLock<RwLock<HashMap<u64, CacheEntry>>> =
-   LazyLock::new(|| RwLock::new(HashMap::new()));
-static WORKER_TX: OnceLock<mpsc::Sender<u64>> = OnceLock::new();
-
-pub fn set_active_count(count: usize) {
-   ACTIVE_COUNT.store(count, Ordering::Release);
-   if count > 0 {
-      ensure_worker();
-   }
-}
-
-pub fn clear_cache() {
-   if let Ok(mut map) = CACHE.write() {
-      map.clear();
-   }
-}
-
-/// Stores what the decorations drew for `user_id` and repaints when it
-/// changed.
-pub fn set_rendered(user_id: u64, mut items: Vec<RenderedAccessory>) {
-   items.sort_by_key(|a| a.priority);
-   let changed = CACHE.write().is_ok_and(|mut map| {
-      if map.len() > MAX_CACHE_ENTRIES {
-         map.clear();
-      }
-      let same = matches!(map.get(&user_id), Some(CacheEntry::Ready(old)) if *old == items);
-      map.insert(user_id, CacheEntry::Ready(items));
-      !same
-   });
-   if changed {
-      invalidate_discord_windows();
-   }
-}
-
-fn ensure_worker() -> &'static mpsc::Sender<u64> {
-   WORKER_TX.get_or_init(|| {
-      let (tx, rx) = mpsc::channel::<u64>();
-      let _ = std::thread::Builder::new()
-         .name("sunbird-members".to_owned())
-         .spawn(move || {
-            while let Ok(id) = rx.recv() {
-               let mut batch = vec![id];
-               while let Ok(more) = rx.try_recv() {
-                  if !batch.contains(&more) {
-                     batch.push(more);
-                  }
-               }
-               for uid in batch {
-                  if ACTIVE_COUNT.load(Ordering::Acquire) == 0 {
-                     break;
-                  }
-                  let items = phoenix_runtime::engine()
-                     .map_or_default(|engine| crate::js::ui::render_members(&engine, uid));
-                  set_rendered(uid, items);
-               }
-            }
-         });
-      tx
-   })
-}
-
-fn lookup_cached(user_id: u64) -> Option<Vec<RenderedAccessory>> {
-   if let Ok(map) = CACHE.read()
-      && let Some(entry) = map.get(&user_id)
-   {
-      return match entry {
-         CacheEntry::Ready(items) if !items.is_empty() => Some(items.clone()),
-         _ => None,
-      };
-   }
-   let queue = CACHE.write().is_ok_and(|mut map| {
-      if map.contains_key(&user_id) {
-         return false;
-      }
-      if map.len() > MAX_CACHE_ENTRIES {
-         map.clear();
-      }
-      map.insert(user_id, CacheEntry::Pending);
-      true
-   });
-   if queue {
-      let _ = ensure_worker().send(user_id);
-   }
-   None
-}
 
 /// Locates the member row and hooks the calls adding its name, from
 /// `DllMain`.
@@ -193,7 +241,7 @@ unsafe extern "C" fn name_child_detour(
    };
    // SAFETY: forwards `Div::child`'s own arguments.
    let row = unsafe { orig(out, div, child) };
-   if ACTIVE_COUNT.load(Ordering::Relaxed) == 0 || row.is_null() || frame.is_null() {
+   if !MEMBERS.active() || row.is_null() || frame.is_null() {
       return row;
    }
    // SAFETY: `frame` is the row function's `rbp`, whose decoded slot holds the
@@ -226,7 +274,8 @@ unsafe extern "C" fn name_child_detour(
 
 /// The text decorations drew for `user_id`, queueing them when unknown.
 fn lines_for(user_id: u64) -> Option<Vec<gpui::Piece>> {
-   let lines = lookup_cached(user_id)?
+   let lines = MEMBERS
+      .lookup(user_id)?
       .iter()
       .filter(|item| !item.text.is_empty() || !item.icons.is_empty())
       .map(RenderedAccessory::piece)
