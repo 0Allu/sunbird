@@ -7,6 +7,7 @@
 mod bridge;
 mod debug;
 mod discord;
+#[cfg(target_os = "android")] mod discord_update;
 #[cfg(target_os = "android")] mod fetch;
 #[cfg(target_os = "ios")] mod foundation;
 mod host;
@@ -117,7 +118,7 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
 }
 
 /// Phoenix Unlock's green, for update banners.
-const ACCENT: i64 = 0xFF23_A55A;
+pub(crate) const ACCENT: i64 = 0xFF23_A55A;
 
 impl Platform for Mobile {
    fn send(&self, request: &Request) -> Result<Response, FetchError> {

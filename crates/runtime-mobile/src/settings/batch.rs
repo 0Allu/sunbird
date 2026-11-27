@@ -366,8 +366,15 @@ impl Settings {
          return false;
       };
       if screen.stack.is_empty() {
+         let first = navigator.rust_pages.is_none();
          navigator.rust_pages = Some(ids);
          out.push(original);
+         #[cfg(target_os = "android")]
+         if first && crate::discord_update::take_open_page() {
+            super::open_discord_update();
+         }
+         #[cfg(not(target_os = "android"))]
+         let _ = first;
          return false;
       }
       let mut all = ids.clone();

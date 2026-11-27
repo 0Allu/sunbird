@@ -104,6 +104,9 @@ enum Press {
    ApplyUpdate,
    /// The site, to get the update [`crate::update`] found.
    OpenSite,
+   /// The page that updates Discord itself, and starting that update.
+   OpenDiscordUpdate,
+   StartDiscordUpdate,
    ToggleStaff,
    ToggleRemoteShell,
    Back,
@@ -116,6 +119,7 @@ enum PageKind {
    Install,
    Plugin(usize),
    Code(usize),
+   DiscordUpdate,
 }
 
 /// What the UI thread hands to the worker. UI ops must not be sent from the
@@ -314,6 +318,17 @@ pub fn start() {
       }
    });
    phoenix_runtime::update::check();
+   #[cfg(target_os = "android")]
+   crate::discord_update::check();
+}
+
+/// Opens the Discord update page on the worker, over the main page.
+#[cfg(target_os = "android")]
+fn open_discord_update() {
+   if let Some(worker) = WORKER.get() {
+      let _ = worker.send(Job::Press(Press::OpenMain));
+      let _ = worker.send(Job::Press(Press::OpenDiscordUpdate));
+   }
 }
 
 /// Rebuilds the open pages, for state that changed outside them.

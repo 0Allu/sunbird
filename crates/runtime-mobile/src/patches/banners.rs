@@ -48,6 +48,8 @@ use crate::{
 pub enum BannerAction {
    None,
    ApplyUpdate,
+   /// Opens Settings on the Discord update page.
+   OpenDiscordUpdate,
    JsCallback,
 }
 
@@ -485,6 +487,10 @@ pub fn pressed(id: u32) -> Vec<Op> {
       BannerAction::None => {},
       BannerAction::ApplyUpdate => {
          phoenix_runtime::update::apply();
+      },
+      BannerAction::OpenDiscordUpdate => {
+         #[cfg(target_os = "android")]
+         crate::discord_update::open_page();
       },
       BannerAction::JsCallback => {
          if let Some(engine) = phoenix_runtime::engine() {

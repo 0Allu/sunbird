@@ -178,7 +178,15 @@ fn press(pressed: Press) {
          phoenix_runtime::set_remote_shell_enabled(!phoenix_runtime::remote_shell_enabled());
       },
       Press::OpenInstall => phoenix_runtime::update::fetch_catalog(),
-      Press::OpenMain | Press::OpenConsole | Press::OpenPlugin(_) | Press::Back => {},
+      Press::StartDiscordUpdate => {
+         #[cfg(target_os = "android")]
+         crate::discord_update::start();
+      },
+      Press::OpenMain
+      | Press::OpenConsole
+      | Press::OpenPlugin(_)
+      | Press::OpenDiscordUpdate
+      | Press::Back => {},
    }
 }
 

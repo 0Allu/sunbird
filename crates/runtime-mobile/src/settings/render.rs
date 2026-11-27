@@ -33,6 +33,7 @@ use crate::settings::{
       log_lines,
    },
    pages::{
+      discord_update_sections,
       install_sections,
       main_sections,
    },
@@ -246,7 +247,11 @@ impl Settings {
          Job::Submit(Field::Code(_)) | Job::Press(Press::PickFile | Press::OpenSite) => Vec::new(),
          Job::Refresh
          | Job::Press(
-            Press::SaveCode(_) | Press::Reload(_) | Press::ApplyUpdate | Press::Listed(_),
+            Press::SaveCode(_)
+            | Press::Reload(_)
+            | Press::ApplyUpdate
+            | Press::Listed(_)
+            | Press::StartDiscordUpdate,
          )
          | Job::Picked(_)
          | Job::Submit(Field::Install | Field::Setting(..)) => self.rerender_all(None),
@@ -262,6 +267,7 @@ impl Settings {
             self.open_page(PageKind::Install)
          },
          Job::Press(Press::EditCode(index)) => self.open_page(PageKind::Code(index)),
+         Job::Press(Press::OpenDiscordUpdate) => self.open_page(PageKind::DiscordUpdate),
          Job::Press(
             press @ (Press::Toggle(_)
             | Press::Setting(..)
@@ -314,6 +320,7 @@ impl Settings {
                |plugin| (plugin.name.clone(), plugin_sections(index, plugin)),
             )
          },
+         PageKind::DiscordUpdate => ("Discord update".to_owned(), discord_update_sections()),
       }
    }
 

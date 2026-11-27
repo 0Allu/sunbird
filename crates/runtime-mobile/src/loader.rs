@@ -15,7 +15,10 @@ use std::{
       BufWriter,
       Write,
    },
-   path::Path,
+   path::{
+      Path,
+      PathBuf,
+   },
    thread,
 };
 
@@ -70,15 +73,7 @@ fn self_update(slot: &Slot) -> Result<(), String> {
    slot.step("Downloading loader...");
    let _ = crate::picker::toast("Downloading Phoenix Unlock update...");
 
-   let url = format!("{}{LOADER_ASSET}", update::ASSETS);
-   let bytes =
-      phoenix_runtime::fetch::get(&url).map_err(|err| format!("Download failed: {err}"))?;
-   if !bytes.starts_with(b"\x7fELF") || memmem::find(&bytes, b"phoenix-version:").is_none() {
-      return Err("Downloaded loader is invalid".to_owned());
-   }
-
-   let loader = patcher::Library::new(patcher::LOADER, bytes)
-      .map_err(|err| format!("Downloaded loader is invalid: {err}"))?;
+   let loader = download()?;
    let base = crate::host::base_apk().map_err(|err| format!("Self-update failed: {err}"))?;
    if installed_from_splits(&base) {
       let _ = crate::picker::open(update::SITE);
@@ -86,14 +81,30 @@ fn self_update(slot: &Slot) -> Result<(), String> {
    }
 
    slot.step("Signing the update...");
-   let state = phoenix_runtime::state().ok_or("Self-update failed: phoenix has not started")?;
-   let files = crate::install::files_dir().unwrap_or_else(|| state.files_dir());
-   fs::create_dir_all(&files)
-      .map_err(|err| format!("Self-update failed: {}: {err}", files.display()))?;
-   let path = files.join(UPDATE_APK);
+   let path = update_path().map_err(|err| format!("Self-update failed: {err}"))?;
    write_update(&base, &loader, &path).map_err(|err| format!("Self-update failed: {err}"))?;
    slot.step("Opening Android's installer...");
    crate::install::open(&path).map_err(|err| format!("Self-update failed: {err}"))
+}
+
+/// The site's loader for this phone's ABI.
+pub fn download() -> Result<patcher::Library, String> {
+   let url = format!("{}{LOADER_ASSET}", update::ASSETS);
+   let bytes =
+      phoenix_runtime::fetch::get(&url).map_err(|err| format!("Download failed: {err}"))?;
+   if !bytes.starts_with(b"\x7fELF") || memmem::find(&bytes, b"phoenix-version:").is_none() {
+      return Err("Downloaded loader is invalid".to_owned());
+   }
+   patcher::Library::new(patcher::LOADER, bytes)
+      .map_err(|err| format!("Downloaded loader is invalid: {err}"))
+}
+
+/// Where a signed update waits for Android's installer, its directory made.
+pub fn update_path() -> Result<PathBuf, String> {
+   let state = phoenix_runtime::state().ok_or("phoenix has not started")?;
+   let files = crate::install::files_dir().unwrap_or_else(|| state.files_dir());
+   fs::create_dir_all(&files).map_err(|err| format!("{}: {err}", files.display()))?;
+   Ok(files.join(UPDATE_APK))
 }
 
 /// Whether the app runs from split APKs, which sit next to `base`.
@@ -117,6 +128,11 @@ fn installed_from_splits(base: &str) -> bool {
 fn write_update(base: &str, loader: &patcher::Library, path: &Path) -> Result<(), String> {
    let map = crate::host::Map::open(base).map_err(|err| format!("{base}: {err}"))?;
    let apk = patcher::swap_loader(map.bytes(), loader).map_err(|err| err.to_string())?;
+   write_apk(&apk, path)
+}
+
+/// Writes `apk` to `path`.
+pub fn write_apk(apk: &patcher::Apk<'_>, path: &Path) -> Result<(), String> {
    let mut file =
       BufWriter::new(File::create(path).map_err(|err| format!("{}: {err}", path.display()))?);
    for part in apk.parts() {
