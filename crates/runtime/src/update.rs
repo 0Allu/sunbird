@@ -474,8 +474,9 @@ fn update_plugin(name: &str, expected_crc: Option<u32>) -> Result<(), String> {
 }
 
 /// Refuses an update that declares more than the running copy and the
-/// bundled one, since the user agreed only to what those reach. Copies from
-/// before permission lines declare nothing, and would otherwise never update.
+/// bundled one, since the user agreed only to what those reach. A running
+/// copy that declares nothing was installed before permission lines existed,
+/// when every plugin reached everything, so its update takes what it declares.
 fn same_reach(name: &str, source: &str) -> Result<(), String> {
    let Some(running) = crate::source(name) else {
       return Ok(());
@@ -483,15 +484,18 @@ fn same_reach(name: &str, source: &str) -> Result<(), String> {
    let newer = source
       .parse::<Permissions>()
       .map_err(|err| err.to_string())?;
-   let widened = |copy: &str| {
+   let parse = |copy: &str| {
       copy
          .parse::<Permissions>()
          .unwrap_or_else(|_| Permissions::Declared(Declared::default()))
-         .widened(&newer)
    };
-   let mut added = widened(&running);
+   let current = parse(&running);
+   if current.grants().is_empty() {
+      return Ok(());
+   }
+   let mut added = current.widened(&newer);
    if let Some(bundled) = crate::bundled_source(name) {
-      let past_bundled = widened(&bundled);
+      let past_bundled = parse(&bundled).widened(&newer);
       added.retain(|grant| past_bundled.contains(grant));
    }
    if added.is_empty() {
