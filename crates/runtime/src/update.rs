@@ -323,6 +323,17 @@ pub fn check_and_notify() {
          return;
       },
    };
+   let restored = restore_permissions(&update);
+   if !restored.is_empty() {
+      log::info!("restored permissions of {restored:?}");
+      forget_updated(&restored);
+      if let Some(platform) = crate::platform() {
+         platform.notify(Notice::PluginsUpdated(&restored));
+      }
+   }
+   let Some(update) = found() else {
+      return;
+   };
    log::info!(
       "update available: loader {:?}, plugins {:?}",
       update.loader,
@@ -429,21 +440,7 @@ pub fn apply() {
                },
             }
          }
-         // Drop successfully updated plugins from FOUND.
-         {
-            let mut guard = FOUND.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(pending) = guard.as_mut() {
-               pending
-                  .plugins
-                  .retain(|name| !updated_plugins.contains(name));
-               pending
-                  .plugin_crcs
-                  .retain(|name, _| !updated_plugins.contains(name));
-               if pending.loader.is_none() && pending.plugins.is_empty() {
-                  *guard = None;
-               }
-            }
-         }
+         forget_updated(&updated_plugins);
       }
 
       // A failed plugin used to go unreported whenever the loader update below
@@ -465,8 +462,57 @@ pub fn apply() {
    });
 }
 
+/// Drops `updated` from what [`found`] still offers.
+fn forget_updated(updated: &[String]) {
+   let mut guard = FOUND.lock().unwrap_or_else(PoisonError::into_inner);
+   if let Some(pending) = guard.as_mut() {
+      pending.plugins.retain(|name| !updated.contains(name));
+      pending
+         .plugin_crcs
+         .retain(|name, _| !updated.contains(name));
+      if pending.loader.is_none() && pending.plugins.is_empty() {
+         *guard = None;
+      }
+   }
+}
+
+/// Copies from before the `@permissions` line load with no permissions, so an
+/// update that declares some installs at launch instead of waiting for a tap.
+fn restore_permissions(update: &Update) -> Vec<String> {
+   if update.loader.is_some() {
+      return Vec::new();
+   }
+   let declares = |source: &str| {
+      source
+         .parse::<Permissions>()
+         .is_ok_and(|permissions| !permissions.declared().is_empty())
+   };
+   let mut restored = Vec::new();
+   for name in &update.plugins {
+      if crate::source(name).is_none_or(|source| declares(&source)) {
+         continue;
+      }
+      let installed =
+         download_plugin(name, update.plugin_crcs.get(name).copied()).and_then(|source| {
+            if !declares(&source) {
+               return Ok(false);
+            }
+            install_update(name, source).map(|()| true)
+         });
+      match installed {
+         Ok(true) => restored.push(name.clone()),
+         Ok(false) => {},
+         Err(err) => log::error!("restoring {name}'s permissions failed: {err}"),
+      }
+   }
+   restored
+}
+
 fn update_plugin(name: &str, expected_crc: Option<u32>) -> Result<(), String> {
-   let source = download_plugin(name, expected_crc)?;
+   install_update(name, download_plugin(name, expected_crc)?)
+}
+
+fn install_update(name: &str, source: String) -> Result<(), String> {
    if let Some(min) = crate::Header::from(source.as_str()).min_sunbird
       && outdated(&min)
    {
