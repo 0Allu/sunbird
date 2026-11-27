@@ -125,6 +125,11 @@ mod windows {
       fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
    }
 
+   #[link(name = "advapi32")]
+   unsafe extern "system" {
+      fn RegDeleteKeyValueW(key: isize, sub_key: *const u16, value: *const u16) -> i32;
+   }
+
    #[link(name = "user32")]
    unsafe extern "system" {
       fn MessageBoxW(window: Handle, text: *const u16, caption: *const u16, kind: u32) -> i32;
@@ -307,10 +312,45 @@ mod windows {
       }
    }
 
+   /// `--wait-pid <pid>`, which an in-app restart passes so this starts
+   /// Discord only once the old one is gone.
+   fn wait_pid(
+      args: &mut std::iter::Peekable<impl Iterator<Item = OsString>>,
+   ) -> misstep::Result<Option<u32>> {
+      if args.next_if(|arg| arg == "--wait-pid").is_none() {
+         return Ok(None);
+      }
+      let pid = args
+         .next()
+         .and_then(|pid| pid.to_str()?.parse::<u32>().ok())
+         .context("--wait-pid needs a process id")?;
+      Ok(Some(pid))
+   }
+
+   /// Waits up to `timeout` for process `pid` to exit. One already gone, or
+   /// one this can't open, doesn't wait.
+   fn wait_for_exit(pid: u32, timeout: Duration) {
+      const SYNCHRONIZE: u32 = 0x0010_0000;
+      // SAFETY: opens by pid, checked for null below.
+      let process = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+      if process.is_null() {
+         return;
+      }
+      let millis = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
+      // SAFETY: opened with SYNCHRONIZE above, and closed once.
+      unsafe {
+         WaitForSingleObject(process, millis);
+         CloseHandle(process);
+      }
+   }
+
    pub fn run() -> misstep::Result<()> {
       let local = PathBuf::from(env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is unset")?);
       let home = local.join("Sunbird");
       let mut args = env::args_os().skip(1).peekable();
+      if let Some(pid) = wait_pid(&mut args)? {
+         wait_for_exit(pid, Duration::from_secs(15));
+      }
       if args.peek().is_some_and(|arg| arg == "--uninstall") {
          uninstall(&local, &home);
          return Ok(());
@@ -531,7 +571,10 @@ mod windows {
          fs::copy(&me, &launcher).context("copying the launcher")?;
       }
       let dll = home.join("phoenix.dll");
-      if let Err(err) = update(home, &dll)
+      // A missing DLL is always downloaded, whatever the setting says.
+      let skip = dll.is_file() && !auto_update(local);
+      if !skip
+         && let Err(err) = update(home, &dll)
          && !dll.is_file()
       {
          return Err(err.context("downloading phoenix.dll"));
@@ -542,6 +585,24 @@ mod windows {
          let _ = crate::shortcuts::sync(local, &launcher, false);
       }
       Ok(dll)
+   }
+
+   /// Whether `launcher.conf`, which Sunbird's settings write into its home
+   /// (`crates/runtime-desktop/src/config.rs`), leaves updates on.
+   fn auto_update(local: &Path) -> bool {
+      let conf = local
+         .join("DiscordPhoenix")
+         .join("sunbird")
+         .join("launcher.conf");
+      fs::read_to_string(conf).map_or(true, |text| auto_update_in(&text))
+   }
+
+   fn auto_update_in(conf: &str) -> bool {
+      !conf.lines().any(|line| {
+         line
+            .split_once('=')
+            .is_some_and(|(key, value)| key.trim() == "auto_update" && value.trim() == "false")
+      })
    }
 
    fn same_file(a: &Path, b: &Path) -> bool {
@@ -629,7 +690,18 @@ mod windows {
    /// Removes the shortcuts and `home`. Files a running Discord or launcher
    /// still holds stay until they exit, and the user is told so.
    fn uninstall(local: &Path, home: &Path) {
+      /// `HKEY_CURRENT_USER`, a sign-extended predefined handle.
+      const HKEY_CURRENT_USER: isize = 0x8000_0001_u32.cast_signed() as isize;
       let _ = crate::shortcuts::sync(local, &home.join("sunbird.exe"), true);
+      // SAFETY: both strings are NUL-terminated and outlive the call. A
+      // value that isn't there is not an error worth reporting.
+      unsafe {
+         RegDeleteKeyValueW(
+            HKEY_CURRENT_USER,
+            wide(r"Software\Microsoft\Windows\CurrentVersion\Run").as_ptr(),
+            wide("Sunbird").as_ptr(),
+         );
+      }
       match fs::remove_dir_all(home) {
          Err(err) if err.kind() != io::ErrorKind::NotFound => {
             alert(&format!(
@@ -666,6 +738,47 @@ mod windows {
             Some("2026.11.23.2353-b51d77c")
          );
          assert_eq!(super::loader_version("{}"), None);
+      }
+
+      #[test]
+      fn reads_auto_update_from_launcher_conf() {
+         assert!(super::auto_update_in(""));
+         assert!(super::auto_update_in("onboarded=true\nauto_update=true\n"));
+         assert!(!super::auto_update_in(
+            "onboarded=true\nauto_start=true\nauto_update=false\n"
+         ));
+         assert!(!super::auto_update_in("auto_update = false\r\n"));
+      }
+
+      #[test]
+      fn takes_a_wait_pid() {
+         let args = |list: &[&str]| {
+            list
+               .iter()
+               .map(std::ffi::OsString::from)
+               .collect::<Vec<_>>()
+               .into_iter()
+               .peekable()
+         };
+         let mut given = args(&["--wait-pid", "4242", "--uninstall"]);
+         assert_eq!(super::wait_pid(&mut given).unwrap(), Some(4242));
+         assert_eq!(given.next().as_deref(), Some("--uninstall".as_ref()));
+         assert_eq!(super::wait_pid(&mut args(&["--", "x"])).unwrap(), None);
+         assert!(super::wait_pid(&mut args(&["--wait-pid", "nope"])).is_err());
+         assert!(super::wait_pid(&mut args(&["--wait-pid"])).is_err());
+      }
+
+      #[test]
+      fn waits_for_a_process_to_exit() {
+         let started = std::time::Instant::now();
+         super::wait_for_exit(u32::MAX, std::time::Duration::from_secs(15));
+         assert!(started.elapsed() < std::time::Duration::from_secs(1));
+         let mut child = std::process::Command::new("cmd")
+            .args(["/c", "ping -n 2 127.0.0.1 >nul"])
+            .spawn()
+            .unwrap();
+         super::wait_for_exit(child.id(), std::time::Duration::from_secs(15));
+         assert!(child.try_wait().unwrap().is_some());
       }
 
       #[test]

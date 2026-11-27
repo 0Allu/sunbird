@@ -163,6 +163,25 @@ trait DesktopHost {
 
    /// Starts the tray and hotkeys after [`config`] is set.
    fn start_tray() {}
+
+   /// Shows a native warning box and waits until it is dismissed.
+   fn alert(_title: &str, _body: &str) {}
+
+   /// Asks a native yes or no question and waits for it, true for yes.
+   fn confirm(_title: &str, _body: &str) -> bool {
+      false
+   }
+
+   /// The installed Sunbird launcher that starts Discord with the loader:
+   /// `sunbird.exe`, the Linux `sunbird` script, or `Sunbird.app`.
+   fn launcher() -> Option<PathBuf> {
+      None
+   }
+
+   /// Starts [`Self::launcher`] when the user logs in, or stops doing so.
+   fn set_autostart(_enabled: bool) -> Result<(), Error> {
+      Err(Error::Unsupported)
+   }
 }
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
@@ -273,6 +292,31 @@ pub fn show_in_app(show: impl Fn(&str, Option<&str>) -> bool + Send + Sync + 'st
 
 fn in_app(title: &str, body: Option<&str>) -> bool {
    IN_APP.get().is_some_and(|show| show(title, body))
+}
+
+/// Shows a native warning box titled `title` and blocks until it is
+/// dismissed, so call it off Discord's UI thread.
+pub fn alert(title: &str, body: &str) {
+   log::warn!("[alert] {title}: {body}");
+   Os::alert(title, body);
+}
+
+/// Asks a native yes or no question and blocks for the answer, true for yes
+/// (false when the OS has no way to ask). Call it off Discord's UI thread.
+#[must_use]
+pub fn confirm(title: &str, body: &str) -> bool {
+   Os::confirm(title, body)
+}
+
+/// The installed Sunbird launcher, when there is one.
+#[must_use]
+pub fn launcher() -> Option<PathBuf> {
+   Os::launcher()
+}
+
+/// Adds or removes the OS entry that starts Sunbird's launcher at login.
+pub fn set_autostart(enabled: bool) -> Result<(), Error> {
+   Os::set_autostart(enabled)
 }
 
 /// Shows a short desktop toast / notification message.

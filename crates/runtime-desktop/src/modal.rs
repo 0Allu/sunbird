@@ -103,6 +103,8 @@ const COL_OK: u32 = 0xFF7E_E787;
 pub struct ModalButton {
    pub label:    String,
    pub danger:   bool,
+   /// Drawn as the page's main action.
+   pub primary:  bool,
    pub on_press: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -122,6 +124,15 @@ pub enum ModalSection {
       text:      String,
       monospace: bool,
       highlight: bool,
+   },
+   /// A Mana `Switch` row. The page is rebuilt from its spec every frame, so
+   /// `on_toggle` replaces the page with `checked` flipped to show the change.
+   Switch {
+      id:          String,
+      label:       String,
+      description: Option<String>,
+      checked:     bool,
+      on_toggle:   Arc<dyn Fn(bool) + Send + Sync>,
    },
 }
 
@@ -792,6 +803,7 @@ static FIELD_ENTITIES: LazyLock<Mutex<FieldEntities>> = LazyLock::new(|| {
 enum ModalAction {
    Close,
    PageButton(Arc<dyn Fn() + Send + Sync>),
+   Switch(Arc<dyn Fn(bool) + Send + Sync>),
    SaveCode(String),
    CopyCode,
    SubmitInstallUrl,
@@ -824,6 +836,16 @@ static MODAL_CLOSE_VTBL: RcFnVtbl = RcFnVtbl {
    call_once:     modal_close_callback as *const c_void,
    call_mut:      modal_close_callback as *const c_void,
    call:          modal_close_callback as *const c_void,
+   extra:         ptr::null(),
+};
+
+static MODAL_SWITCH_VTBL: RcFnVtbl = RcFnVtbl {
+   drop_in_place: ptr::null(),
+   size:          size_of::<u64>(),
+   align:         align_of::<u64>(),
+   call_once:     modal_switch_callback as *const c_void,
+   call_mut:      modal_switch_callback as *const c_void,
+   call:          modal_switch_callback as *const c_void,
    extra:         ptr::null(),
 };
 
@@ -1033,6 +1055,27 @@ unsafe extern "C" fn modal_close_callback(
    let _ = std::panic::catch_unwind(close_active);
 }
 
+/// A modal `Switch`'s `on_change`, with the Rust ABI of the `Fn::call` slot
+/// it fills, like `gpui::switch_callback`.
+unsafe fn modal_switch_callback(
+   self_ptr: *const u64,
+   checked: u8,
+   _window: *mut c_void,
+   _app: *mut c_void,
+) {
+   if self_ptr.is_null() {
+      return;
+   }
+   let _ = std::panic::catch_unwind(|| {
+      // SAFETY: `self_ptr` points to `RcInner.action_id`.
+      let id = unsafe { *self_ptr };
+      if let Some(ModalAction::Switch(on_toggle)) = lookup_modal_action(id) {
+         let on = checked != 0;
+         std::thread::spawn(move || on_toggle(on));
+      }
+   });
+}
+
 /// Mana `Button::on_click` invokes `Fn::call(&self, event, window, app)` — 4
 /// arguments, giving us a live `*mut App` for reading native `FieldState`s.
 unsafe extern "C" fn modal_button_callback(
@@ -1058,6 +1101,7 @@ unsafe extern "C" fn modal_button_callback(
          ModalAction::PageButton(cb) => {
             std::thread::spawn(move || cb());
          },
+         ModalAction::Switch(_) => {},
          ModalAction::CopyCode => {
             if let Some(code) = read_code_field(app) {
                match phoenix_ui_desktop::copy(&code) {
@@ -1181,6 +1225,23 @@ mod panel {
             }
          },
          ModalSection::Text { title, text } => PanelSection::Text { title, text },
+         // `AppKit` panels have no switch, so it is a button naming the state
+         // it changes to.
+         ModalSection::Switch {
+            label,
+            checked,
+            on_toggle,
+            ..
+         } => {
+            PanelSection::Buttons {
+               title:   Some(format!("{label}: {}", if checked { "on" } else { "off" })),
+               buttons: vec![PanelButton {
+                  label:    if checked { "Turn off" } else { "Turn on" }.to_owned(),
+                  danger:   false,
+                  on_press: Arc::new(move || on_toggle(!checked)),
+               }],
+            }
+         },
          ModalSection::Code {
             title,
             text,
@@ -1247,23 +1308,68 @@ mod panel {
 /// Opens a native GPUI modal for `phoenix.ui.openPage` and triggers a GPUI
 /// redraw immediately.
 pub fn open_page(spec: PageModalSpec) -> u64 {
+   open_page_closing(spec, None)
+}
+
+type OnClose = Arc<dyn Fn() + Send + Sync>;
+
+/// What runs when the user closes the page with this id (its Close button or
+/// the scrim), but not when [`close_page`] closes it.
+static ON_CLOSE: Mutex<Option<(u64, OnClose)>> = Mutex::new(None);
+
+/// [`open_page`], running `on_close` on a worker thread when the user closes
+/// it. Only the newest page keeps its `on_close`.
+pub fn open_page_closing(spec: PageModalSpec, on_close: Option<OnClose>) -> u64 {
    if cfg!(target_os = "macos") && ORIG_OVERLAY_RENDER.get().is_none() {
-      return open_panel(spec);
+      return open_panel(spec, on_close);
    }
    resolve_pending_choice();
    let id = NEXT_PAGE_ID.fetch_add(1, Ordering::Relaxed);
+   *ON_CLOSE.lock().unwrap_or_else(PoisonError::into_inner) = on_close.map(|run| (id, run));
    set_active(ActiveModal::Page { id, spec });
    id
 }
 
 #[cfg(target_os = "macos")]
-fn open_panel(spec: PageModalSpec) -> u64 {
-   panel::open(spec, None)
+fn open_panel(spec: PageModalSpec, on_close: Option<OnClose>) -> u64 {
+   // `AppKit` builds the panel on the main thread right after this, which the
+   // first-launch watchdog takes as drawn.
+   MODAL_RENDERED.store(true, Ordering::Release);
+   panel::open(spec, on_close)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn open_panel(_spec: PageModalSpec) -> u64 {
+fn open_panel(_spec: PageModalSpec, _on_close: Option<OnClose>) -> u64 {
    0
+}
+
+/// Takes page `id`'s `on_close`, if it still has one.
+fn take_on_close(id: u64) -> Option<OnClose> {
+   let mut slot = ON_CLOSE.lock().unwrap_or_else(PoisonError::into_inner);
+   if slot.as_ref().is_some_and(|(page, _)| *page == id) {
+      slot.take().map(|(_, run)| run)
+   } else {
+      None
+   }
+}
+
+/// Whether [`install`] hooked `Workspace::render_overlays`, which draws every
+/// GPUI modal.
+pub fn hooked() -> bool {
+   ORIG_OVERLAY_RENDER.get().is_some()
+}
+
+/// Set once `Workspace::render_overlays` runs: Discord's window is drawing.
+static WINDOW_SEEN: AtomicBool = AtomicBool::new(false);
+/// Set once a modal was built into a frame (or an `AppKit` panel opened).
+static MODAL_RENDERED: AtomicBool = AtomicBool::new(false);
+
+pub fn window_seen() -> bool {
+   WINDOW_SEEN.load(Ordering::Acquire)
+}
+
+pub fn rendered() -> bool {
+   MODAL_RENDERED.load(Ordering::Acquire)
 }
 
 fn set_active(modal: ActiveModal) {
@@ -1312,6 +1418,7 @@ pub fn open_choice(
             ModalButton {
                label:    option.label,
                danger:   option.danger,
+               primary:  false,
                on_press: Arc::new(move || {
                   finish_choice(&picked, i32::try_from(index).unwrap_or(-1));
                }),
@@ -1504,6 +1611,11 @@ fn save_setting(app: *mut c_void, field: &SettingField) {
 fn close_active() {
    resolve_pending_choice();
    let mut guard = active_modal();
+   if let Some(ActiveModal::Page { id, .. }) = guard.active.as_ref()
+      && let Some(on_close) = take_on_close(*id)
+   {
+      std::thread::spawn(move || on_close());
+   }
    let changed = guard.close(Instant::now());
    drop(guard);
    if changed {
@@ -1986,6 +2098,7 @@ unsafe extern "C" fn overlay_render_detour(
    };
    // SAFETY: always render Discord's own overlay stack first.
    let out = unsafe { orig(sret, workspace, arg3, window, cx) };
+   WINDOW_SEEN.store(true, Ordering::Release);
    push_modal(sret, window, cx);
    if !sret.is_null() && !settings_drawn_recently() {
       let _ = std::panic::catch_unwind(|| {
@@ -2054,6 +2167,7 @@ fn push_modal(sret: *mut RawVecAny, window: *mut c_void, cx: *mut c_void) {
       let app = unsafe { *(cx.cast::<*mut c_void>()) };
       if let Some(scrim) = build_overlay(window, app) {
          push_overlay(sret, scrim);
+         MODAL_RENDERED.store(true, Ordering::Release);
       }
    });
 }
@@ -2092,6 +2206,9 @@ unsafe extern "C" fn settings_layer_detour(
       let notices = crate::notices::build();
       if scrim.is_none() && notices.is_none() {
          return;
+      }
+      if scrim.is_some() {
+         MODAL_RENDERED.store(true, Ordering::Release);
       }
       let Some(mut over) = gpui::raw_div() else {
          return;
@@ -2336,6 +2453,8 @@ fn build_page_body(msym: &ModalSymbols, spec: &PageModalSpec) -> Option<RawDiv> 
                   &b.label,
                   if b.danger {
                      BtnVariant::Critical
+                  } else if b.primary {
+                     BtnVariant::Primary
                   } else {
                      BtnVariant::Secondary
                   },
@@ -2384,6 +2503,25 @@ fn build_page_body(msym: &ModalSymbols, spec: &PageModalSpec) -> Option<RawDiv> 
                block = gpui::push_div(block, code_box);
             }
             body = gpui::push_div(body, block);
+         },
+         ModalSection::Switch {
+            id,
+            label,
+            description,
+            checked,
+            on_toggle,
+         } => {
+            let action = register_modal_action(ModalAction::Switch(Arc::clone(on_toggle)));
+            if let Some(row) = gpui::build_raw_switch(
+               id,
+               label,
+               description.as_deref(),
+               *checked,
+               &raw const MODAL_SWITCH_VTBL,
+               action,
+            ) {
+               body = gpui::push_div(body, row);
+            }
          },
       }
    }

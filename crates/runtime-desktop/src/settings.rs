@@ -57,6 +57,11 @@ static PAGE_OFFSET: AtomicUsize = AtomicUsize::new(0);
 /// settings window once per visit rather than once per frame.
 static LAST_PAGE: AtomicUsize = AtomicUsize::new(usize::MAX);
 
+/// Whether [`install`] hooked the section render that draws Sunbird's page.
+pub fn hooked() -> bool {
+   ORIG_SECTION.get().is_some()
+}
+
 /// Installs the Desktop User Settings sidebar label, visibility patch, native
 /// GPUI builder bindings, and `host::section` render hook.
 pub fn install(image: &Image<'static>, ix: &Index<'_>) {

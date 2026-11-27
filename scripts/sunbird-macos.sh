@@ -27,7 +27,9 @@ fi
 bundle_id=com.discord.DesktopGpui
 
 if [ "${1:-}" = --uninstall ]; then
-   rm -rf "$home" /Applications/Sunbird.app "$HOME/Applications/Sunbird.app"
+   # The login item Sunbird's settings add (`crates/ui-desktop/src/macos.rs`).
+   rm -rf "$home" /Applications/Sunbird.app "$HOME/Applications/Sunbird.app" \
+      "$HOME/Library/LaunchAgents/tools.sunbird.launcher.plist"
    echo "Sunbird is uninstalled. Discord itself was not changed."
    exit 0
 fi
@@ -130,8 +132,15 @@ fail() {
    exit 1
 }
 
-version=\$(fetch --max-time 5 "\$site/version.json" |
-   sed -n 's/.*"loader": *"\([^"]*\)".*/\1/p')
+# Sunbird's settings write this into the runtime's home; a loader that is
+# already here is kept when they turn updates off. --update always checks.
+conf="\${LIBDISCORD_DATA_DIR:-\$HOME/Library/Application Support/libdiscord}/sunbird/launcher.conf"
+version=
+if [ "\${1:-}" = --update ] || [ ! -f "\$home/libphoenix.dylib" ] ||
+   ! grep -qx 'auto_update=false' "\$conf" 2>/dev/null; then
+   version=\$(fetch --max-time 5 "\$site/version.json" |
+      sed -n 's/.*"loader": *"\([^"]*\)".*/\1/p')
+fi
 if [ -n "\$version" ] && { [ ! -f "\$home/libphoenix.dylib" ] || [ "\$version" != "\$(cat "\$home/version" 2>/dev/null)" ]; }; then
    tmp=\$(mktemp "\$home/libphoenix.dylib.XXXXXX")
    if fetch --max-time 60 -o "\$tmp" "\$site/plugins/libphoenix-macos-arm64.dylib"; then

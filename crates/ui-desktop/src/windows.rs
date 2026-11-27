@@ -199,6 +199,7 @@ unsafe extern "system" {
    fn GetCursorPos(pt: *mut Point) -> i32;
    fn SetForegroundWindow(hwnd: *mut c_void) -> i32;
    fn PostQuitMessage(code: i32);
+   fn MessageBoxW(hwnd: *mut c_void, text: *const u16, caption: *const u16, kind: u32) -> i32;
 }
 
 #[link(name = "gdi32")]
@@ -770,9 +771,169 @@ fn pick_js_path() -> Option<PathBuf> {
    Some(PathBuf::from(String::from_utf16_lossy(&file_buf[..nul])))
 }
 
+/// `MB_SETFOREGROUND | MB_TOPMOST`, so a box opened from a worker thread
+/// shows over Discord instead of behind it.
+const MB_FRONT: u32 = 0x0001_0000 | 0x0004_0000;
+const MB_ICONWARNING: u32 = 0x30;
+const MB_YESNO: u32 = 0x4;
+const IDYES: i32 = 6;
+
+fn message_box(title: &str, body: &str, kind: u32) -> i32 {
+   let (title, body) = (wide(title), wide(body));
+   // SAFETY: both strings are NUL-terminated and outlive the call.
+   unsafe {
+      MessageBoxW(
+         ptr::null_mut(),
+         body.as_ptr(),
+         title.as_ptr(),
+         kind | MB_FRONT,
+      )
+   }
+}
+
+/// `HKEY_CURRENT_USER`, a sign-extended predefined handle.
+const HKEY_CURRENT_USER: isize = 0x8000_0001_u32.cast_signed() as isize;
+const KEY_SET_VALUE: u32 = 0x0002;
+const REG_SZ: u32 = 1;
+const ERROR_FILE_NOT_FOUND: i32 = 2;
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+const RUN_VALUE: &str = "Sunbird";
+
+#[link(name = "advapi32")]
+unsafe extern "system" {
+   fn RegCreateKeyExW(
+      key: isize,
+      sub_key: *const u16,
+      reserved: u32,
+      class: *const u16,
+      options: u32,
+      desired: u32,
+      security: *const c_void,
+      result: *mut isize,
+      disposition: *mut u32,
+   ) -> i32;
+   fn RegSetValueExW(
+      key: isize,
+      name: *const u16,
+      reserved: u32,
+      kind: u32,
+      data: *const u8,
+      len: u32,
+   ) -> i32;
+   fn RegDeleteValueW(key: isize, name: *const u16) -> i32;
+   fn RegCloseKey(key: isize) -> i32;
+}
+
+/// `%LOCALAPPDATA%\Sunbird\sunbird.exe`, or the launcher that started this
+/// Discord when it is an installed `sunbird.exe`.
+fn launcher() -> Option<PathBuf> {
+   let started = std::env::var_os("SUNBIRD_RESTART_EXE")
+      .map(PathBuf::from)
+      .filter(|path| {
+         path.is_file()
+            && path
+               .file_name()
+               .is_some_and(|name| name.eq_ignore_ascii_case("sunbird.exe"))
+      });
+   started.or_else(|| {
+      let installed = PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+         .join("Sunbird")
+         .join("sunbird.exe");
+      installed.is_file().then_some(installed)
+   })
+}
+
+fn set_autostart(enabled: bool) -> Result<(), Error> {
+   use std::os::windows::ffi::OsStrExt as _;
+
+   let command = if enabled {
+      let launcher = launcher().ok_or_else(|| {
+         Error::Platform {
+            message: "the Sunbird launcher is not installed".to_owned(),
+         }
+      })?;
+      let quoted = format!("\"{}\"", launcher.display());
+      Some(
+         std::ffi::OsStr::new(&quoted)
+            .encode_wide()
+            .chain([0])
+            .collect::<Vec<u16>>(),
+      )
+   } else {
+      None
+   };
+   let reg_err = |what: &str, code: i32| {
+      Error::Platform {
+         message: format!("{what}: {}", std::io::Error::from_raw_os_error(code)),
+      }
+   };
+   let (sub_key, name) = (wide(RUN_KEY), wide(RUN_VALUE));
+   let mut key = 0;
+   // SAFETY: `sub_key` is NUL-terminated and `key` receives the opened handle.
+   let opened = unsafe {
+      RegCreateKeyExW(
+         HKEY_CURRENT_USER,
+         sub_key.as_ptr(),
+         0,
+         ptr::null(),
+         0,
+         KEY_SET_VALUE,
+         ptr::null(),
+         &raw mut key,
+         ptr::null_mut(),
+      )
+   };
+   if opened != 0 {
+      return Err(reg_err("RegCreateKeyExW", opened));
+   }
+   let result = command.as_ref().map_or_else(
+      || {
+         // SAFETY: `key` is open for setting values and `name` is
+         // NUL-terminated.
+         let deleted = unsafe { RegDeleteValueW(key, name.as_ptr()) };
+         if deleted == 0 || deleted == ERROR_FILE_NOT_FOUND {
+            Ok(())
+         } else {
+            Err(reg_err("RegDeleteValueW", deleted))
+         }
+      },
+      |command| {
+         let len = u32::try_from(size_of_val(command.as_slice())).unwrap_or(u32::MAX);
+         // SAFETY: `key` is open for setting values and `command` is a
+         // NUL-terminated UTF-16 string of `len` bytes.
+         let set =
+            unsafe { RegSetValueExW(key, name.as_ptr(), 0, REG_SZ, command.as_ptr().cast(), len) };
+         if set == 0 {
+            Ok(())
+         } else {
+            Err(reg_err("RegSetValueExW", set))
+         }
+      },
+   );
+   // SAFETY: opened above and closed once.
+   unsafe { RegCloseKey(key) };
+   result
+}
+
 pub struct Host;
 
 impl DesktopHost for Host {
+   fn alert(title: &str, body: &str) {
+      message_box(title, body, MB_ICONWARNING);
+   }
+
+   fn confirm(title: &str, body: &str) -> bool {
+      message_box(title, body, MB_YESNO | MB_ICONWARNING) == IDYES
+   }
+
+   fn launcher() -> Option<PathBuf> {
+      launcher()
+   }
+
+   fn set_autostart(enabled: bool) -> Result<(), Error> {
+      set_autostart(enabled)
+   }
+
    fn copy(text: &str) -> Result<(), Error> {
       copy(text)
    }

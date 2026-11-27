@@ -697,6 +697,7 @@ fn open_page<'js>(
                      buttons.push(ModalButton {
                         label,
                         danger,
+                        primary: false,
                         on_press: Arc::new(move || invoke_page_button(btn_id, None)),
                      });
                   }
@@ -932,6 +933,7 @@ fn page_button<'js>(
    ModalButton {
       label,
       danger,
+      primary: false,
       on_press: Arc::new(move || invoke_page_button(btn_id, None)),
    }
 }
@@ -1054,6 +1056,7 @@ fn profile_sections<'js>(
                buttons: vec![ModalButton {
                   label,
                   danger: false,
+                  primary: false,
                   on_press: Arc::new(move || {
                      modal::open_prompt(Prompt {
                         title:     title.clone(),

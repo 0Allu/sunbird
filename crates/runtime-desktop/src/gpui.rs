@@ -343,6 +343,8 @@ enum Action {
    },
    ToggleCatalogGroup(CatalogGroup),
    ToggleStaff,
+   ToggleAutoStart,
+   ToggleAutoUpdate,
    ReloadAll,
    OpenDevTools,
    CheckUpdates,
@@ -403,6 +405,18 @@ unsafe fn switch_callback(
       };
       match action {
          Action::ToggleStaff => phoenix_runtime::set_staff_enabled(on),
+         Action::ToggleAutoStart | Action::ToggleAutoUpdate => {
+            let config = crate::config::update(|config| {
+               if matches!(action, Action::ToggleAutoStart) {
+                  config.auto_start = on;
+               } else {
+                  config.auto_update = on;
+               }
+            });
+            // The login entry is the registry or a file, so it is written off
+            // Discord's UI thread.
+            std::thread::spawn(move || crate::config::save_or_report(config));
+         },
          Action::TogglePlugin(name) => phoenix_runtime::set_enabled(&name, on),
          Action::ToggleSetting { plugin, key } => {
             phoenix_runtime::set_setting(&plugin, &key, Chosen::Switch(on));
@@ -530,6 +544,11 @@ unsafe extern "C" fn button_callback(
          _ => {},
       }
    });
+}
+
+/// Whether [`locate`] resolved the builders.
+pub fn located() -> bool {
+   SYMBOLS.get().is_some()
 }
 
 /// Resolves Discord's native GPUI / Mana widget builders from unique string
@@ -910,33 +929,16 @@ impl Builder {
       checked: bool,
       action: Action,
    ) -> RawDiv {
-      let at = &self.sym.layout.switch;
-      let id_static = intern(id);
-      let mut sw = RawSwitch::zeroed();
-      // SAFETY: creates a native Mana `Switch` in a buffer that fits it.
-      unsafe {
-         (self.sym.switch_new)(
-            &raw mut sw,
-            id_static.as_ptr(),
-            id_static.len(),
-            u8::from(checked),
-         );
-      }
-      // The defaults these overwrite are static `SharedString`s and `None`,
-      // which own nothing.
-      sw.put(at.label, SharedString::from_str(label));
-      if let Some(desc) = description
-         && !desc.is_empty()
-      {
-         sw.put(at.description, SharedString::from_str(desc));
-      }
-      sw.put(at.on_change, self.alloc_rc_action(action));
-      sw.put(at.on_change + 8, &raw const SWITCH_FN_VTBL);
-
-      let mut out = RawDiv::zeroed();
-      // SAFETY: moves the `Switch` into its `Div`.
-      unsafe { (self.sym.switch_into_div)(&raw mut out, &raw mut sw) };
-      out
+      let rc_ptr = self.alloc_rc_action(action);
+      new_switch(
+         self.sym,
+         id,
+         label,
+         description,
+         checked,
+         &raw const SWITCH_FN_VTBL,
+         rc_ptr,
+      )
    }
 
    #[expect(clippy::too_many_arguments, reason = "one per GPUI row part")]
@@ -1075,6 +1077,69 @@ pub fn build_raw_button(
    let sym = SYMBOLS.get()?;
    let rc_ptr = alloc_rc_u64(action_id)?;
    Some(new_button(sym, id, label, variant, size, vtbl, rc_ptr))
+}
+
+/// A Mana `Switch` row whose `on_change` calls `vtbl` with `action_id`, for
+/// switches outside the settings page (`crate::modal`).
+pub fn build_raw_switch(
+   id: &str,
+   label: &str,
+   description: Option<&str>,
+   checked: bool,
+   vtbl: *const RcFnVtbl,
+   action_id: u64,
+) -> Option<RawDiv> {
+   let sym = SYMBOLS.get()?;
+   let rc_ptr = alloc_rc_u64(action_id)?;
+   Some(new_switch(
+      sym,
+      id,
+      label,
+      description,
+      checked,
+      vtbl,
+      rc_ptr,
+   ))
+}
+
+/// A native Mana `Switch` in its `Div`, with our `Rc<dyn Fn(bool)>`
+/// `on_change`.
+fn new_switch(
+   sym: &GpuiSymbols,
+   id: &str,
+   label: &str,
+   description: Option<&str>,
+   checked: bool,
+   vtbl: *const RcFnVtbl,
+   rc_ptr: *mut RcInner,
+) -> RawDiv {
+   let at = &sym.layout.switch;
+   let id_static = intern(id);
+   let mut sw = RawSwitch::zeroed();
+   // SAFETY: creates a native Mana `Switch` in a buffer that fits it.
+   unsafe {
+      (sym.switch_new)(
+         &raw mut sw,
+         id_static.as_ptr(),
+         id_static.len(),
+         u8::from(checked),
+      );
+   }
+   // The defaults these overwrite are static `SharedString`s and `None`,
+   // which own nothing.
+   sw.put(at.label, SharedString::from_str(label));
+   if let Some(desc) = description
+      && !desc.is_empty()
+   {
+      sw.put(at.description, SharedString::from_str(desc));
+   }
+   sw.put(at.on_change, rc_ptr);
+   sw.put(at.on_change + 8, vtbl);
+
+   let mut out = RawDiv::zeroed();
+   // SAFETY: moves the `Switch` into its `Div`.
+   unsafe { (sym.switch_into_div)(&raw mut out, &raw mut sw) };
+   out
 }
 
 /// A native Mana `Button` with our `variant`, `size` and `Rc<dyn Fn>` click
@@ -2245,7 +2310,52 @@ fn render_general_tab(b: &Builder, mut root: RawDiv) -> RawDiv {
    );
    root = b.push_div(root, dev_card);
 
-   // Card 2: Updates
+   // Card 2: how the launcher starts Sunbird (`launcher.conf`)
+   let config = crate::config::load();
+   let mut start_card = b.card(12.0, 16.0, 8.0, 0.20);
+   start_card = b.push_div(
+      start_card,
+      b.switch_row(
+         "sunbird-auto-start",
+         "Start Sunbird on login",
+         Some("Open Discord with Sunbird when you sign in to your computer."),
+         config.auto_start,
+         Action::ToggleAutoStart,
+      ),
+   );
+   start_card = b.push_div(start_card, b.divider());
+   start_card = b.push_div(
+      start_card,
+      b.switch_row(
+         "sunbird-auto-update",
+         "Auto-update Sunbird on launch",
+         Some("Download the newest Sunbird loader each time the launcher starts Discord."),
+         config.auto_update,
+         Action::ToggleAutoUpdate,
+      ),
+   );
+   let failed = crate::health::snapshot().feature_failures();
+   if !failed.is_empty() {
+      let names = failed
+         .iter()
+         .map(|patch| patch.name)
+         .collect::<Vec<_>>()
+         .join(", ");
+      start_card = b.push_div(start_card, b.divider());
+      start_card = b.push_div(
+         start_card,
+         b.text_block(
+            "Patch Health",
+            &format!(
+               "Some features did not hook on this Discord build and are off: {names}. The rest \
+                of Sunbird works."
+            ),
+         ),
+      );
+   }
+   root = b.push_div(root, start_card);
+
+   // Card 3: Updates
    let (upd_desc, upd_btn, upd_var, upd_act) = updates_card_state();
 
    let mut upd_card = b.card(10.0, 16.0, 8.0, 0.20);

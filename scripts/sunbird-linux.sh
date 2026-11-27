@@ -18,7 +18,8 @@ entry=$data/applications/sunbird.desktop
 gate_entry=$data/applications/sunbird-gate-only.desktop
 
 if [ "${1:-}" = --uninstall ]; then
-   rm -rf "$home" "$entry" "$gate_entry"
+   # The login entry Sunbird's settings add (`crates/ui-desktop/src/linux.rs`).
+   rm -rf "$home" "$entry" "$gate_entry" "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/sunbird.desktop"
    echo "Sunbird is uninstalled. Discord itself was not changed."
    exit 0
 fi
@@ -91,8 +92,15 @@ cat >"$home/sunbird" <<EOF
 home=$(q "$home")
 site=$(q "$site")
 fetch() { curl -fsSL --proto $proto --proto-redir =https "\$@" 2>/dev/null; }
-version=\$(fetch --max-time 5 "\$site/version.json" |
-   sed -n 's/.*"loader": *"\([^"]*\)".*/\1/p')
+# Sunbird's settings write this into the runtime's home; a loader that is
+# already here is kept when they turn updates off. --update always checks.
+conf="\${LIBDISCORD_DATA_DIR:-\${XDG_DATA_HOME:-\$HOME/.local/share}/discord-phoenix}/sunbird/launcher.conf"
+version=
+if [ "\${1:-}" = --update ] || [ ! -f "\$home/libphoenix.so" ] ||
+   ! grep -qx 'auto_update=false' "\$conf" 2>/dev/null; then
+   version=\$(fetch --max-time 5 "\$site/version.json" |
+      sed -n 's/.*"loader": *"\([^"]*\)".*/\1/p')
+fi
 if [ -n "\$version" ] && [ "\$version" != "\$(cat "\$home/version" 2>/dev/null)" ]; then
    tmp=\$(mktemp "\$home/libphoenix.so.XXXXXX")
    if fetch --max-time 60 -o "\$tmp" "\$site/plugins/libphoenix-linux-x86_64.so"; then

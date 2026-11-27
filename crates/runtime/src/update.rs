@@ -235,6 +235,29 @@ fn query() -> Result<Option<Update>, String> {
    Ok(update)
 }
 
+/// Asks the site on this thread, for callers that act on the answer right
+/// away. `Ok(None)` means up to date.
+pub fn check_blocking() -> Result<Option<Update>, String> {
+   query()
+}
+
+/// Downloads loader `asset` for `version` and checks that it starts with
+/// `magic` (the platform's executable header) and passes [`verify_loader`].
+pub fn download_loader(
+   asset: &str,
+   magic: &[u8],
+   version: &str,
+   update: &Update,
+) -> Result<Vec<u8>, String> {
+   let bytes = crate::fetch::get(&format!("{ASSETS}plugins/{asset}"))
+      .map_err(|err| format!("download {asset}: {err}"))?;
+   if !bytes.starts_with(magic) {
+      return Err(format!("the downloaded {asset} is not a loader binary"));
+   }
+   verify_loader(asset, version, &bytes, update)?;
+   Ok(bytes)
+}
+
 /// Asks the site in the background. Failures (offline) are only logged.
 pub fn check() {
    thread::spawn(|| {

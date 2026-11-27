@@ -1,6 +1,7 @@
 //! The last lines phoenix logged, kept for the Console page.
 
 use std::{
+   cell::Cell,
    collections::VecDeque,
    sync::{
       Mutex,
@@ -71,6 +72,17 @@ fn scrub(mut line: String) -> String {
    line
 }
 
+thread_local! {
+   static PROBLEMS: Cell<u32> = const { Cell::new(0) };
+}
+
+/// How many warnings and errors this thread has logged, so a caller can tell
+/// whether a step it ran reported a problem.
+#[must_use]
+pub fn problems() -> u32 {
+   PROBLEMS.get()
+}
+
 /// Logs through `L` and keeps a copy of each line.
 pub struct Tee<L>(pub L);
 
@@ -82,6 +94,9 @@ impl<L: Log> Log for Tee<L> {
    fn log(&self, record: &Record<'_>) {
       if !self.enabled(record.metadata()) {
          return;
+      }
+      if record.level() <= log::Level::Warn {
+         PROBLEMS.set(PROBLEMS.get().saturating_add(1));
       }
       let text = scrub(record.args().to_string());
       self.0.log(

@@ -458,6 +458,11 @@ unsafe extern "C" fn owned_bytes_drop(data: *mut (), _ptr: *const u8, _len: usiz
 // Vtable installation & detours
 // ---------------------------------------------------------------------------
 
+/// Whether [`install`] hooked Discord's HTTP send.
+pub fn hooked() -> bool {
+   INSTALLED.get().is_some()
+}
+
 /// Locates Desktop Phoenix's `ReqwestTransport` and `SendFuture` vtable slots
 /// and installs request/response interception.
 pub fn install(image: &Image<'static>) {

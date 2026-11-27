@@ -50,9 +50,112 @@ fn spawn_reaped(command: &mut Command) -> Result<(), Error> {
    Ok(())
 }
 
+/// Runs an `AppleScript` that reads its text from `argv`, never from the
+/// script itself, so a quote in `title` or `body` can't change what runs.
+/// Returns what it printed, `None` when it failed or was cancelled.
+fn osascript(line: &str, title: &str, body: &str) -> Option<String> {
+   let output = Command::new("/usr/bin/osascript")
+      .args([
+         "-e",
+         "on run argv",
+         "-e",
+         line,
+         "-e",
+         "end run",
+         "--",
+         title,
+         body,
+      ])
+      .stdin(Stdio::null())
+      .stderr(Stdio::null())
+      .output()
+      .ok()?;
+   output
+      .status
+      .success()
+      .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+const AGENT_LABEL: &str = "tools.sunbird.launcher";
+
+fn launch_agent() -> Option<PathBuf> {
+   std::env::var_os("HOME")
+      .map(|home| PathBuf::from(home).join(format!("Library/LaunchAgents/{AGENT_LABEL}.plist")))
+}
+
+/// `&`, `<` and `>` escaped for a plist string.
+fn xml_text(text: &str) -> String {
+   text
+      .replace('&', "&amp;")
+      .replace('<', "&lt;")
+      .replace('>', "&gt;")
+}
+
+fn platform(message: String) -> Error {
+   Error::Platform { message }
+}
+
 pub struct Host;
 
 impl DesktopHost for Host {
+   fn alert(title: &str, body: &str) {
+      let _ = osascript(
+         "display alert (item 1 of argv) message (item 2 of argv) as warning",
+         title,
+         body,
+      );
+   }
+
+   fn confirm(title: &str, body: &str) -> bool {
+      osascript(
+         "return button returned of (display alert (item 1 of argv) message (item 2 of argv) as \
+          warning buttons {\"No\", \"Yes\"} default button \"Yes\")",
+         title,
+         body,
+      )
+      .is_some_and(|button| button == "Yes")
+   }
+
+   /// `$SUNBIRD`, which `sunbird-macos.sh` sets in the copy's
+   /// `LSEnvironment`, else where it installs `Sunbird.app`.
+   fn launcher() -> Option<PathBuf> {
+      let home = std::env::var_os("HOME").map(PathBuf::from);
+      std::env::var_os("SUNBIRD")
+         .map(PathBuf::from)
+         .into_iter()
+         .chain([PathBuf::from("/Applications/Sunbird.app")])
+         .chain(home.map(|home| home.join("Applications/Sunbird.app")))
+         .find(|app| app.join("Contents/MacOS/sunbird").is_file())
+   }
+
+   fn set_autostart(enabled: bool) -> Result<(), Error> {
+      let agent = launch_agent().ok_or_else(|| platform("HOME is unset".to_owned()))?;
+      if !enabled {
+         return match std::fs::remove_file(&agent) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+               Err(platform(format!("{}: {err}", agent.display())))
+            },
+            _ => Ok(()),
+         };
+      }
+      let app =
+         Self::launcher().ok_or_else(|| platform("Sunbird.app is not installed".to_owned()))?;
+      let plist = format!(
+         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST \
+          1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist \
+          version=\"1.0\">\n<dict>\n   <key>Label</key><string>{AGENT_LABEL}</string>\n   \
+          <key>ProgramArguments</key>\n   <array>\n      <string>/usr/bin/open</string>\n      \
+          <string>-a</string>\n      <string>{}</string>\n   </array>\n   \
+          <key>RunAtLoad</key><true/>\n</dict>\n</plist>\n",
+         xml_text(&app.to_string_lossy())
+      );
+      if let Some(dir) = agent.parent() {
+         std::fs::create_dir_all(dir)
+            .map_err(|err| platform(format!("{}: {err}", dir.display())))?;
+      }
+      std::fs::write(&agent, plist).map_err(|err| platform(format!("{}: {err}", agent.display())))
+   }
+
    fn copy(text: &str) -> Result<(), Error> {
       if copy_pasteboard(text) {
          return Ok(());

@@ -31,6 +31,8 @@ param(
    [string]$HotReload,
    [string]$Eval,
    [switch]$Logs,
+   [switch]$Health,
+   [switch]$ResetOnboarding,
    [switch]$Ops,
    [switch]$Events,
    [switch]$Tree,
@@ -110,6 +112,16 @@ if ($Logs) {
    Invoke-DebugGet "/logs"
    exit 0
 }
+if ($Health) {
+   Invoke-DebugGet "/health" | ConvertTo-Json -Depth 6
+   exit 0
+}
+if ($ResetOnboarding) {
+   $conf = Join-Path $env:LOCALAPPDATA "DiscordPhoenix\sunbird\launcher.conf"
+   Remove-Item $conf -ErrorAction SilentlyContinue
+   Write-Host "Removed $conf"
+   if (-not $Desktop) { exit 0 }
+}
 if ($Sigscan) {
    $tools = Join-Path (Split-Path $TargetDir -Parent) "wintools"
    if (Test-Path $tools) { $env:PATH = "$tools;$env:PATH" }
@@ -181,6 +193,9 @@ if ($Desktop) {
             Copy-Item (Get-Command as.exe).Source $tools -Force
          }
          $env:PATH = "$tools;$env:PATH"
+         if (-not (Get-Command gcc.exe -ErrorAction SilentlyContinue) -and (Test-Path "C:\Program Files\Git\mingw64\bin\gcc.exe")) {
+            $env:PATH = "$env:PATH;C:\Program Files\Git\mingw64\bin"
+         }
          $env:CARGO_TARGET_DIR = $TargetDir
          Write-Host "Building phoenix-loader and phoenix-inject (windows, profile=$profileName)..."
          $cargoArgs = @("+stable-x86_64-pc-windows-gnu", "build", "-p", "phoenix-loader", "-p", "phoenix-inject")

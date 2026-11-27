@@ -11,6 +11,7 @@
 mod accessories;
 mod badges;
 mod composer;
+mod config;
 mod context_menu;
 #[cfg(target_arch = "x86_64")]
 mod counts;
@@ -22,14 +23,17 @@ mod gateway_send;
 mod gpui;
 mod gpui_theme;
 mod headers;
+mod health;
 mod icons;
 mod js;
 mod members;
 mod message;
 mod modal;
 mod notices;
+mod onboarding;
 mod os;
 mod ready;
+mod recovery;
 #[cfg(windows)]
 mod restart;
 mod settings;
@@ -127,6 +131,15 @@ struct DialogAnswer {
    index: i32,
 }
 
+/// `GET /health`: what each patch came to, and whether the first-launch
+/// modal's watchdog saw Discord draw.
+#[derive(serde::Serialize)]
+struct HealthReply {
+   patches:        Vec<health::Patch>,
+   window_seen:    bool,
+   modal_rendered: bool,
+}
+
 /// Whether Discord's code is x86-64, which every locator in
 /// `phoenix_sigs::desktop` and `http` decodes. macOS Phoenix is arm64 only, so
 /// there they are never run, an x86 patch can never land in arm64 code, and
@@ -206,50 +219,89 @@ static PREPARED: Mutex<Option<(Image<'static>, &'static GatewayRegistry)>> = Mut
 /// later from [`start`]'s thread never run. [`start`] picks up what this
 /// hooked.
 pub fn prepare() -> Result<(), Error> {
+   use health::{
+      critical,
+      feature,
+      require,
+   };
+
    phoenix_runtime::set_platform(&Desktop);
    let image = phoenix_runtime::target()?;
    let ix = Index::new(&image, Isa::HOST);
-   open_access_gate(&image, &ix);
+   critical("access_gate", open_access_gate(&image, &ix));
+   open_gate_extras(&image);
    settings::install(&image, &ix);
+   // macOS falls back to a settings window and AppKit panels without them.
+   if X86_CODE {
+      critical(
+         "gpui",
+         require(gpui::located(), "GPUI builders did not decode"),
+      );
+   }
+   critical(
+      "settings",
+      require(
+         settings::hooked(),
+         "the User Settings section render is not hooked",
+      ),
+   );
    #[cfg(windows)]
-   restart::install(&image);
-   staff::prepare(&ix);
+   feature("restart", || restart::install(&image));
+   feature("staff", || staff::prepare(&ix));
    modal::install(&image);
-   context_menu::install(&image);
+   let modal = require(modal::hooked(), "Workspace::render_overlays is not hooked");
+   health::record("notices", health::Kind::Feature, modal.clone());
+   if X86_CODE {
+      critical("modal", modal);
+   } else {
+      health::record("modal", health::Kind::Feature, modal);
+   }
+   feature("context_menu", || context_menu::install(&image));
    // Before accessories hooks `MessageRow::render`, whose prologue the header
    // locators check.
    let header = X86_CODE.then(|| headers::locate(&image, &ix));
-   accessories::install(&image, &ix);
-   members::install(&image);
+   feature("accessories", || accessories::install(&image, &ix));
+   feature("members", || members::install(&image));
    if let Some(header) = header {
-      headers::install(&image, header);
-      message::install(&image);
+      feature("headers", || headers::install(&image, header));
+      feature("message", || message::install(&image));
       #[cfg(target_arch = "x86_64")]
-      counts::install(&image);
+      feature("counts", || counts::install(&image));
    } else {
       #[cfg(target_os = "macos")]
-      headers::arm64::install(&image);
+      feature("headers", || headers::arm64::install(&image));
    }
-   icons::install(&image);
-   composer::install(&image);
-   sidebar::install(&image);
-   toolbar::install(&image);
-   badges::install(&image, &ix);
-   emoji::install(&image, &ix);
+   feature("icons", || icons::install(&image));
+   feature("composer", || composer::install(&image));
+   feature("sidebar", || sidebar::install(&image));
+   feature("toolbar", || toolbar::install(&image));
+   feature("badges", || badges::install(&image, &ix));
+   feature("emoji", || emoji::install(&image, &ix));
    #[cfg(windows)]
-   gpui_theme::install(&image);
-   <os::Os as os::DesktopOs>::install(&image);
+   feature("gpui_theme", || gpui_theme::install(&image));
+   feature("os_redraw", || <os::Os as os::DesktopOs>::install(&image));
    let registry = phoenix_runtime::hook(&image);
+   critical(
+      "gateway",
+      registry.as_ref().map(|_| ()).map_err(ToString::to_string),
+   );
    if registry.is_ok() {
       #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-      route_direct_calls(&image);
+      feature("direct_calls", || route_direct_calls(&image));
       discord::install(&image);
-      gateway_send::install(&image);
-      accessories::install_optimistic_delete(&image, &ix);
-      ready::install(&image);
+      critical(
+         "discord",
+         require(discord::hooked(), "the HTTP transport is not hooked"),
+      );
+      feature("gateway_send", || gateway_send::install(&image));
+      feature("optimistic_delete", || {
+         accessories::install_optimistic_delete(&image, &ix);
+      });
+      feature("ready", || ready::install(&image));
    }
    #[cfg(target_os = "macos")]
-   message::writer::install(&image);
+   feature("message_writer", || message::writer::install(&image));
+   health::log_summary();
    // The indexes are tens of MB and nothing reads them after startup.
    drop(ix);
    phoenix_sigs::desktop::release_call_index();
@@ -262,7 +314,8 @@ pub fn prepare() -> Result<(), Error> {
 pub fn open_gate_only() -> Result<(), Error> {
    phoenix_runtime::set_platform(&Desktop);
    let image = phoenix_runtime::target()?;
-   open_access_gate(&image, &Index::new(&image, Isa::HOST));
+   let _ = open_access_gate(&image, &Index::new(&image, Isa::HOST));
+   open_gate_extras(&image);
    #[cfg(windows)]
    restart::install(&image);
    Ok(())
@@ -270,7 +323,7 @@ pub fn open_gate_only() -> Result<(), Error> {
 
 /// Starts phoenix inside Desktop Phoenix, on what [`prepare`] hooked.
 pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
-   #[cfg(target_os = "macos")]
+   // `recovery` stages plugins for the loader it installs on every OS.
    phoenix_runtime::update::adopt_staged(&home, &home.join("plugins"));
    let prepared = PREPARED
       .lock()
@@ -279,11 +332,19 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
    if let Some((image, registry)) = prepared {
       return phoenix_runtime::start_hooked(&Desktop, image, registry, home, bundled);
    }
-   let image = phoenix_runtime::target()?;
-   let registry = phoenix_runtime::hook(&image)?;
-   discord::install(&image);
-   gateway_send::install(&image);
-   phoenix_runtime::start_hooked(&Desktop, image, registry, home, bundled)
+   let started = (|| {
+      let image = phoenix_runtime::target()?;
+      let registry = phoenix_runtime::hook(&image)?;
+      discord::install(&image);
+      gateway_send::install(&image);
+      phoenix_runtime::start_hooked(&Desktop, image, registry, home, bundled)
+   })();
+   // Without a runtime `started` never runs, so the offer to update is made
+   // here.
+   if started.is_err() && !health::snapshot().critical_failures().is_empty() {
+      recovery::start();
+   }
+   started
 }
 
 /// Desktop Phoenix shows "This app isn't available for your account" from
@@ -293,33 +354,40 @@ pub fn start(home: PathBuf, bundled: Vec<Plugin>) -> Result<Started, Error> {
 /// its small caller is `signed_in && access(..) != 2`. This makes it return 2.
 /// Discord settles on the gate within its first frames, so the loader calls
 /// this from `DllMain` or the constructor, before Discord's own code.
-fn open_access_gate(image: &Image<'static>, ix: &Index<'_>) {
+fn open_access_gate(image: &Image<'static>, ix: &Index<'_>) -> Result<(), String> {
    /// `mov al, 2; ret`
    const ALLOWED: [u8; 3] = [0xB0, 0x02, 0xC3];
 
    let allowed = if X86_CODE {
       &ALLOWED[..]
    } else {
-      close_enforced(image);
-      keep_pages_over_frame(image);
       &phoenix_sigs::macos::NO_GATE[..]
    };
-   let found = phoenix_sigs::locate::access_gate(ix).map(|access| (access.start, allowed));
-   let (access, allowed) = match found {
-      Ok(found) => found,
-      Err(err) => {
-         log::warn!("access gate: {err}, leaving it");
-         return;
-      },
-   };
+   let access = phoenix_sigs::locate::access_gate(ix)
+      .inspect_err(|err| log::warn!("access gate: {err}, leaving it"))?
+      .start;
    // SAFETY: Discord's own code, written from `DllMain` or the constructor
    // before it runs.
    match unsafe { image.write_code(access, allowed) } {
-      Ok(()) => log::info!("access gate: open"),
-      Err(err) => log::error!("access gate: {err}"),
+      Ok(()) => {
+         log::info!("access gate: open");
+         Ok(())
+      },
+      Err(err) => {
+         log::error!("access gate: {err}");
+         Err(err.to_string())
+      },
    }
+}
+
+/// What opens beside the gate: message alerts a gated client drops, and on
+/// macOS the webview stacking hCaptcha needs.
+fn open_gate_extras(image: &Image<'static>) {
    if X86_CODE {
-      open_notification_gate(image);
+      health::feature("notification_gate", || open_notification_gate(image));
+   } else {
+      health::feature("notification_gate", || close_enforced(image));
+      health::feature("webview_pages", || keep_pages_over_frame(image));
    }
 }
 
@@ -486,7 +554,15 @@ impl Platform for Desktop {
          phoenix_ui_desktop::DEVTOOLS_SHORTCUT
       );
       phoenix_ui_desktop::notify("Sunbird ready", Some(&ready_body));
-      phoenix_runtime::update::check();
+      let config = config::load();
+      if config.auto_update {
+         phoenix_runtime::update::check();
+      }
+      if !health::snapshot().critical_failures().is_empty() {
+         recovery::start();
+      } else if !config.onboarded {
+         onboarding::start();
+      }
    }
 
    fn refresh(&self) {
@@ -559,12 +635,19 @@ impl Platform for Desktop {
          },
          ("POST", "/ui/choose") => Some(dialog(&request.body, false)),
          ("POST", "/ui/sheet") => Some(dialog(&request.body, true)),
+         ("GET", "/health") => {
+            Some(remote::ok_json(&HealthReply {
+               patches:        health::snapshot().patches,
+               window_seen:    modal::window_seen(),
+               modal_rendered: modal::rendered(),
+            }))
+         },
          _ => None,
       }
    }
 
    fn routes(&self) -> &'static str {
-      ", GET /ui, POST /ui/devtools, POST /ui/{choose,sheet}"
+      ", GET /ui, POST /ui/devtools, POST /ui/{choose,sheet}, GET /health"
    }
 }
 
@@ -657,38 +740,8 @@ fn update_macos_loader(
 ) -> Result<String, String> {
    use phoenix_runtime::update;
 
-   const ASSET: &str = "libphoenix-macos-arm64.dylib";
-
-   let dest = macos_loader_path().ok_or("could not locate loaded libphoenix.dylib")?;
-   let dir = dest
-      .parent()
-      .ok_or("loaded dylib has no parent directory")?;
-
    slot.step(format!("Downloading Sunbird {version}..."));
-   let url = format!("{}plugins/{ASSET}", update::ASSETS);
-   let bytes = phoenix_runtime::fetch::get(&url).map_err(|err| err.to_string())?;
-   if !bytes.starts_with(&[0xCF, 0xFA, 0xED, 0xFE]) {
-      return Err("downloaded dylib is not a 64-bit Mach-O binary".to_owned());
-   }
-   update::verify_loader(ASSET, version, &bytes, update)?;
-
-   let tmp = dir.join(format!("libphoenix.dylib.next.{}", std::process::id()));
-   std::fs::write(&tmp, &bytes).map_err(|err| format!("write temp dylib: {err}"))?;
-   let signed = std::process::Command::new("/usr/bin/codesign")
-      .args(["--force", "--sign", "-"])
-      .arg(&tmp)
-      .status()
-      .is_ok_and(|s| s.success());
-   if !signed {
-      let _ = std::fs::remove_file(&tmp);
-      return Err("codesign failed".to_owned());
-   }
-   if let Err(err) = std::fs::rename(&tmp, &dest) {
-      let _ = std::fs::remove_file(&tmp);
-      return Err(format!("swap dylib: {err}"));
-   }
-   let _ = std::fs::write(dir.join("version"), format!("{version}\n"));
-
+   recovery::install_loader(version, update)?;
    let failed_plugins = update::stage_plugins(version, update);
    Ok(if failed_plugins.is_empty() {
       format!("Updated to Sunbird {version}. Restart Sunbird to apply.")
