@@ -1,11 +1,14 @@
 //! The last lines phoenix logged, kept for the Console page.
 
 use std::{
-   cell::Cell,
    collections::VecDeque,
    sync::{
       Mutex,
       PoisonError,
+      atomic::{
+         AtomicU32,
+         Ordering,
+      },
    },
 };
 
@@ -72,15 +75,13 @@ fn scrub(mut line: String) -> String {
    line
 }
 
-thread_local! {
-   static PROBLEMS: Cell<u32> = const { Cell::new(0) };
-}
+static PROBLEMS: AtomicU32 = AtomicU32::new(0);
 
-/// How many warnings and errors this thread has logged, so a caller can tell
-/// whether a step it ran reported a problem.
+/// How many warnings and errors have been logged so far, so a caller during
+/// startup can tell whether a step it ran reported a problem.
 #[must_use]
 pub fn problems() -> u32 {
-   PROBLEMS.get()
+   PROBLEMS.load(Ordering::Relaxed)
 }
 
 /// Logs through `L` and keeps a copy of each line.
@@ -96,7 +97,7 @@ impl<L: Log> Log for Tee<L> {
          return;
       }
       if record.level() <= log::Level::Warn {
-         PROBLEMS.set(PROBLEMS.get().saturating_add(1));
+         PROBLEMS.fetch_add(1, Ordering::Relaxed);
       }
       let text = scrub(record.args().to_string());
       self.0.log(
