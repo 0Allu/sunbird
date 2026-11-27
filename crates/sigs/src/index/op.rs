@@ -112,6 +112,21 @@ pub enum Op {
       offset: isize,
       size:   u8,
    },
+   /// `regs = [base + offset]`, two `size`-byte registers from consecutive
+   /// slots, `ldp` or `ldrd`.
+   LoadPair {
+      regs:   [Reg; 2],
+      base:   Reg,
+      offset: isize,
+      size:   u8,
+   },
+   /// `[base + offset] = values`, `stp` or `strd`.
+   StorePair {
+      values: [Reg; 2],
+      base:   Reg,
+      offset: isize,
+      size:   u8,
+   },
    /// A load from or store to a fixed address, `[rip + d]` or `adrp`+`ldr`.
    Global {
       target: usize,
@@ -160,10 +175,13 @@ pub enum Value {
 /// shared [`Op`] cannot express.
 #[derive(Clone, Copy, Debug)]
 pub struct Step {
-   pub at:     usize,
-   pub len:    u8,
-   pub op:     Op,
-   pub native: Native,
+   pub at:        usize,
+   pub len:       u8,
+   pub op:        Op,
+   /// The base register a pre- or post-indexed access, `push` or `pop` moves
+   /// after it, and by how much.
+   pub writeback: Option<(Reg, isize)>,
+   pub native:    Native,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -396,6 +414,7 @@ fn x86(image: &Image<'_>, code: &[u8], ip: usize) -> Vec<Step> {
          at,
          len: instruction.len() as u8,
          op,
+         writeback: None,
          native: Native::X86(instruction.mnemonic()),
       });
    }
@@ -418,6 +437,7 @@ fn aarch64(code: &[u8], pc: usize) -> Vec<Step> {
          let (set, page) = pages[usize::from(rn)];
          (set != usize::MAX && index - set <= PAIR_REACH).then_some(page)
       };
+      let mut writeback = None;
       let op = match insn {
          Insn::Adrp { rd, page } => {
             pages[usize::from(rd)] = (index, page);
@@ -530,16 +550,111 @@ fn aarch64(code: &[u8], pc: usize) -> Vec<Step> {
                offset: 0,
             }
          },
+         Insn::Other(word) => {
+            let (op, moved) = arm64_other(word);
+            writeback = moved;
+            op
+         },
          _ => Op::Other,
       };
       steps.push(Step {
          at,
          len: 4,
          op,
+         writeback,
          native: Native::Arm64(insn),
       });
    }
    steps
+}
+
+/// The forms [`arm64::decode`] leaves as [`Insn::Other`] that track stack and
+/// field values: general register pairs, unscaled and indexed single loads and
+/// stores, and `sub` of an immediate. Each comes with the base register an
+/// indexed form moves.
+#[allow(
+   clippy::cast_possible_truncation,
+   clippy::cast_possible_wrap,
+   reason = "each field is masked to its encoded width before the cast"
+)]
+fn arm64_other(word: u32) -> (Op, Option<(Reg, isize)>) {
+   let rt = (word & 0x1F) as Reg;
+   let rn = ((word >> 5) & 0x1F) as Reg;
+   let signed =
+      |value: u32, bits: u32| ((value << (32 - bits)).cast_signed() >> (32 - bits)) as isize;
+   // `ldp`/`stp`/`ldpsw`: opc 101 V mode L imm7 Rt2 Rn Rt, mode 1 post, 2
+   // offset, 3 pre. SIMD pairs only matter for moving `sp`.
+   let (mode, opc, load) = ((word >> 23) & 7, word >> 30, word & (1 << 22) != 0);
+   if word & 0x3E00_0000 == 0x2C00_0000 && matches!(mode, 1 | 3) {
+      let imm = signed((word >> 15) & 0x7F, 7) * (4 << opc);
+      return (Op::Other, Some((rn, imm)));
+   }
+   if word & 0x3A00_0000 == 0x2800_0000
+      && matches!(mode, 1..=3)
+      && (opc == 0 || opc == 2 || (opc == 1 && load))
+   {
+      let size: u8 = if opc == 2 { 8 } else { 4 };
+      let imm = signed((word >> 15) & 0x7F, 7) * isize::from(size);
+      let regs = [rt, ((word >> 10) & 0x1F) as Reg];
+      let offset = if mode == 1 { 0 } else { imm };
+      let op = if load {
+         Op::LoadPair {
+            regs,
+            base: rn,
+            offset,
+            size,
+         }
+      } else {
+         Op::StorePair {
+            values: regs,
+            base: rn,
+            offset,
+            size,
+         }
+      };
+      return (op, (mode != 2).then_some((rn, imm)));
+   }
+   // `ldur`/`stur` and the indexed `ldr`/`str`: size 111 0 00 opc 0 imm9 mode
+   // Rn Rt, mode 0 unscaled, 1 post, 3 pre.
+   let (mode, opc, scale) = ((word >> 10) & 3, (word >> 22) & 3, word >> 30);
+   let prefetch = (scale == 3 && opc >= 2) || (scale == 2 && opc == 3);
+   if word & 0x3F20_0000 == 0x3C00_0000 && matches!(mode, 1 | 3) {
+      return (Op::Other, Some((rn, signed((word >> 12) & 0x1FF, 9))));
+   }
+   if word & 0x3F20_0000 == 0x3800_0000 && mode != 2 && !prefetch {
+      let size = 1u8 << scale;
+      let imm = signed((word >> 12) & 0x1FF, 9);
+      let offset = if mode == 1 { 0 } else { imm };
+      let op = if opc == 0 {
+         Op::Store {
+            value: Value::Reg(rt),
+            base: rn,
+            offset,
+            size,
+         }
+      } else {
+         Op::Load {
+            reg: rt,
+            base: rn,
+            offset,
+            size,
+         }
+      };
+      return (op, (mode != 0).then_some((rn, imm)));
+   }
+   // `sub rd, rn, #imm{, lsl #12}`.
+   if word & 0x7F80_0000 == 0x5100_0000 {
+      let imm = (((word >> 10) & 0xFFF) as isize) << if word & (1 << 22) != 0 { 12 } else { 0 };
+      return (
+         Op::Offset {
+            reg:    rt,
+            base:   rn,
+            offset: -imm,
+         },
+         None,
+      );
+   }
+   (Op::Other, None)
 }
 
 /// How far after an `adrp` its `add` or `ldr` is looked for, as in
