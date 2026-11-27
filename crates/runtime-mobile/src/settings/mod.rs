@@ -16,6 +16,7 @@ mod render;
 mod rows;
 mod theme;
 mod tree;
+#[cfg(target_os = "android")] mod updater;
 
 use std::{
    collections::{

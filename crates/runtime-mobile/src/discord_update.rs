@@ -9,7 +9,10 @@
 //! login.
 
 use std::{
-   collections::BTreeMap,
+   collections::{
+      BTreeMap,
+      HashSet,
+   },
    ffi::CStr,
    fmt::Write as _,
    sync::{
@@ -25,12 +28,16 @@ use std::{
 };
 
 use patcher::{
+   LOADER,
+   Library,
    PackageName,
    Payload,
    Runtime,
    manifest::Info,
+   zip,
 };
 use phoenix_runtime::fetch;
+use phoenix_sigs::PLUGIN_BUNDLE;
 use sha2::{
    Digest,
    Sha256,
@@ -42,12 +49,13 @@ const BUILDS: &str =
    "https://raw.githubusercontent.com/sunbird-tools/sunbird/main/web/discord.json";
 /// Under [`fetch::LIMIT`], which caps one response.
 const CHUNK: usize = 4 << 20;
-const ABI: &str = if cfg!(target_arch = "x86_64") {
-   "config.x86_64"
+/// This phone's ABI split and the directory its libraries sit in.
+const ABI: (&str, &str) = if cfg!(target_arch = "x86_64") {
+   ("config.x86_64", "x86_64")
 } else if cfg!(target_arch = "arm") {
-   "config.armeabi_v7a"
+   ("config.armeabi_v7a", "armeabi-v7a")
 } else {
-   "config.arm64_v8a"
+   ("config.arm64_v8a", "arm64-v8a")
 };
 /// Android's density buckets, by split name.
 const DENSITIES: [(&str, u32); 7] = [
@@ -76,17 +84,22 @@ struct Split {
    size:   usize,
 }
 
+/// A running update: its steps in order, the one under way, and the bytes
+/// downloaded of all its splits.
+#[derive(Clone)]
+pub struct Progress {
+   pub steps: Vec<String>,
+   pub at:    usize,
+   pub done:  usize,
+   pub total: usize,
+}
+
 #[derive(Clone)]
 pub enum State {
    /// Unchecked, or no newer build.
    Current,
    Available(Build),
-   Running {
-      build: Build,
-      step:  String,
-      done:  usize,
-      total: usize,
-   },
+   Running(Build, Progress),
    Failed {
       build: Build,
       error: String,
@@ -96,6 +109,8 @@ pub enum State {
 }
 
 static STATE: Mutex<State> = Mutex::new(State::Current);
+/// The installed version's name, from the check.
+static INSTALLED: Mutex<String> = Mutex::new(String::new());
 /// Set by the banner, so the update page opens once Settings shows.
 static OPEN_PAGE: AtomicBool = AtomicBool::new(false);
 
@@ -111,6 +126,23 @@ fn set(state: State) {
 #[must_use]
 pub fn state() -> State {
    state_mut().clone()
+}
+
+/// The installed Discord's version name, once checked.
+#[must_use]
+pub fn installed_name() -> String {
+   INSTALLED
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .clone()
+}
+
+/// The bytes this phone downloads for `build`.
+#[must_use]
+pub fn download_size(build: &Build) -> usize {
+   wanted(build).map_or(0, |names| {
+      names.iter().map(|name| build.splits[name].size).sum()
+   })
 }
 
 /// Whether Settings should open the update page, once.
@@ -135,6 +167,11 @@ pub fn check() {
             log::info!("discord update: {} is ready", build.version_code);
             let name = build.version_name.clone();
             set(State::Available(build));
+            // Sunbird's own update banner shows for 8 s at startup, and one
+            // banner shows at a time.
+            if phoenix_runtime::update::found().is_some() {
+               thread::sleep(std::time::Duration::from_secs(9));
+            }
             crate::patches::banners::show_banner(
                "Discord update available".to_owned(),
                Some(format!("{name}, checked for Sunbird. Tap to update")),
@@ -157,7 +194,9 @@ fn newer() -> Result<Option<Build>, String> {
    if !build.url.starts_with("https://") {
       return Err(format!("discord.json: {} is not https", build.url));
    }
-   Ok((build.version_code > installed()?.version_code).then_some(build))
+   let installed = installed()?;
+   *INSTALLED.lock().unwrap_or_else(PoisonError::into_inner) = installed.version_name;
+   Ok((build.version_code > installed.version_code).then_some(build))
 }
 
 /// What the running APK's manifest says.
@@ -167,17 +206,34 @@ fn installed() -> Result<Info, String> {
    patcher::manifest_info(map.bytes()).map_err(|err| err.to_string())
 }
 
-/// Starts the update the page offers, unless one runs.
+/// Starts the update the page offers, unless one runs. One already handed to
+/// the installer opens it again.
 pub fn start() {
    let build = {
       let mut state = state_mut();
       let build = match &*state {
-         State::Available(build) | State::Failed { build, .. } | State::Handed(build) => {
+         State::Handed(build) => {
+            if let Ok(path) = crate::loader::update_path()
+               && path.exists()
+            {
+               let build = build.clone();
+               drop(state);
+               if let Err(err) = crate::install::open(&path) {
+                  set(State::Failed { build, error: err });
+               }
+               return;
+            }
             build.clone()
          },
-         State::Current | State::Running { .. } => return,
+         State::Available(build) | State::Failed { build, .. } => build.clone(),
+         State::Current | State::Running(..) => return,
       };
-      *state = running(&build, "Starting...", 0, 0);
+      *state = State::Running(build.clone(), Progress {
+         steps: vec!["Getting ready".to_owned()],
+         at:    0,
+         done:  0,
+         total: 0,
+      });
       build
    };
    phoenix_runtime::refresh_settings();
@@ -192,26 +248,48 @@ pub fn start() {
    });
 }
 
-fn running(build: &Build, step: &str, done: usize, total: usize) -> State {
-   State::Running {
-      build: build.clone(),
-      step: step.to_owned(),
-      done,
-      total,
+/// What a split holds, for the step list.
+fn label(name: &str) -> String {
+   match name.strip_prefix("config.") {
+      None => "Discord".to_owned(),
+      Some(config) if config == ABI.0.trim_start_matches("config.") => {
+         "Native libraries".to_owned()
+      },
+      Some(config) if DENSITIES.iter().any(|(density, _)| *density == config) => {
+         "Images for your screen".to_owned()
+      },
+      Some(language) => format!("Language pack ({language})"),
    }
 }
 
 fn update(build: &Build) -> Result<(), String> {
    let installed = installed()?;
    let names = wanted(build)?;
-   let total = names.iter().map(|name| build.splits[name].size).sum();
-   let mut done = 0;
+   let mut progress = Progress {
+      steps: names
+         .iter()
+         .map(|name| label(name))
+         .chain(
+            [
+               "Sunbird loader",
+               "Building and signing",
+               "Opening the installer",
+            ]
+            .map(str::to_owned),
+         )
+         .collect(),
+      at:    0,
+      done:  0,
+      total: names.iter().map(|name| build.splits[name].size).sum(),
+   };
    let mut apks = Vec::with_capacity(names.len());
-   for name in &names {
-      apks.push(download(build, name, &mut done, total)?);
+   for (at, name) in names.iter().enumerate() {
+      progress.at = at;
+      apks.push(download(build, name, &mut progress)?);
    }
 
-   set(running(build, "Downloading the loader...", done, total));
+   progress.at = names.len();
+   set(State::Running(build.clone(), progress.clone()));
    let loader = crate::loader::download()?;
    // Installed plugins live in the app's files and outlast the update, so only
    // the bundled ones ride along.
@@ -221,11 +299,11 @@ fn update(build: &Build) -> Result<(), String> {
          phoenix_runtime::bundled_source(&plugin.name).map(|source| (plugin.name, source))
       })
       .collect();
+   // `wanted` puts the ABI split second.
+   let mut libraries = carried(&apks[1])?;
+   libraries.push(loader);
    let prepared = Payload {
-      runtime: Some(Runtime {
-         libraries: vec![loader],
-         plugins,
-      }),
+      runtime: Some(Runtime { libraries, plugins }),
       frida:   None,
    }
    .prepare()
@@ -235,7 +313,8 @@ fn update(build: &Build) -> Result<(), String> {
       .parse::<PackageName>()
       .map_err(|err| err.to_string())?;
 
-   set(running(build, "Building the update...", done, total));
+   progress.at += 1;
+   set(State::Running(build.clone(), progress.clone()));
    let apk = patcher::merge(
       &mut apks,
       &prepared,
@@ -249,20 +328,47 @@ fn update(build: &Build) -> Result<(), String> {
    drop(apk);
    drop(apks);
 
-   set(running(
-      build,
-      "Opening Android's installer...",
-      done,
-      total,
-   ));
+   progress.at += 1;
+   set(State::Running(build.clone(), progress));
    crate::install::open(&path)
+}
+
+/// The libraries the installed APK carries beside the loader that Discord's
+/// own ABI split lacks, like `ShadowHook`'s probe, so the update keeps them.
+/// The loader and the plugin bundle are made anew.
+fn carried(abi: &[u8]) -> Result<Vec<Library>, String> {
+   let base = crate::host::base_apk().map_err(|err| err.to_string())?;
+   let map = crate::host::Map::open(&base).map_err(|err| format!("{base}: {err}"))?;
+   let installed = map.bytes();
+   let dir = format!("lib/{}/", ABI.1);
+   let shipped = zip::read(abi)
+      .map_err(|err| err.to_string())?
+      .into_iter()
+      .map(|record| record.name)
+      .collect::<HashSet<String>>();
+   let mut libraries = Vec::new();
+   for record in zip::read(installed).map_err(|err| err.to_string())? {
+      let Some(name) = record.name.strip_prefix(&dir) else {
+         continue;
+      };
+      if name == LOADER || name == PLUGIN_BUNDLE || shipped.contains(&record.name) {
+         continue;
+      }
+      let data = record
+         .entry(installed)
+         .data()
+         .map_err(|err| err.to_string())?
+         .into_owned();
+      libraries.push(Library::new(name, data).map_err(|err| format!("{name}: {err}"))?);
+   }
+   Ok(libraries)
 }
 
 /// The base, this phone's ABI and nearest density, and its language plus
 /// English, as far as the build has them.
 fn wanted(build: &Build) -> Result<Vec<String>, String> {
    let mut names = Vec::new();
-   for need in ["base", ABI] {
+   for need in ["base", ABI.0] {
       if !build.splits.contains_key(need) {
          return Err(format!(
             "Discord {} has no {need} split",
@@ -313,12 +419,11 @@ fn property(name: &CStr) -> Option<String> {
 
 /// Downloads split `name` in ranges, each within one response's limit, and
 /// checks it against the build's hash.
-fn download(build: &Build, name: &str, done: &mut usize, total: usize) -> Result<Vec<u8>, String> {
+fn download(build: &Build, name: &str, progress: &mut Progress) -> Result<Vec<u8>, String> {
    let split = &build.splits[name];
    let url = format!("{}{name}", build.url);
    let mut bytes = Vec::with_capacity(split.size);
    let mut hash = Sha256::new();
-   let step = format!("Downloading {name}...");
    while bytes.len() < split.size {
       let end = (bytes.len() + CHUNK).min(split.size) - 1;
       let range = format!("bytes={}-{end}", bytes.len());
@@ -329,8 +434,8 @@ fn download(build: &Build, name: &str, done: &mut usize, total: usize) -> Result
       }
       hash.update(&chunk);
       bytes.extend_from_slice(&chunk);
-      *done += chunk.len();
-      set(running(build, &step, *done, total));
+      progress.done += chunk.len();
+      set(State::Running(build.clone(), progress.clone()));
    }
    let found = hash
       .finalize()

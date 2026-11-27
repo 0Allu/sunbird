@@ -154,7 +154,9 @@ fn discord_update_row() -> Option<Tree> {
       let title = match crate::discord_update::state() {
          State::Current => return None,
          State::Available(build) => format!("Discord {} is ready", build.version_name),
-         State::Running { step, .. } => step,
+         State::Running(_, progress) => {
+            progress.steps.get(progress.at).cloned().unwrap_or_default()
+         },
          State::Failed { .. } => "Discord update failed".to_owned(),
          State::Handed(build) => format!("Install Discord {}", build.version_name),
       };
@@ -167,158 +169,6 @@ fn discord_update_row() -> Option<Tree> {
    }
    #[cfg(not(target_os = "android"))]
    None
-}
-
-/// The Discord update page: the build on offer, then the update's progress,
-/// failure or hand-off to Android's installer.
-pub fn discord_update_sections() -> Vec<Tree> {
-   #[cfg(target_os = "android")]
-   {
-      use crate::discord_update::State;
-      let note = |line: &str, color: Color| {
-         let mut node = log_line(&[(line.to_owned(), color.argb())]);
-         node.set(Prop::FONT_FAMILY, None);
-         node.set(Prop::FONT_SIZE, Some(Value::F64(13.0)));
-         node.set(Prop::LINE_HEIGHT, Some(Value::F64(18.0)));
-         node
-      };
-      let start =
-         |label: &str| button_row(label, ICON_RELOAD, Some(Press::StartDiscordUpdate), true);
-      match crate::discord_update::state() {
-         State::Current => {
-            vec![section("Discord", vec![note(
-               "Discord is on the newest build Sunbird has checked.",
-               Color::Muted,
-            )])]
-         },
-         State::Available(build) => {
-            vec![section(
-               "Update available",
-               vec![
-                  value_row("Version", &build.version_name),
-                  start("Download and install"),
-                  note(
-                     "Sunbird checked this build: signed by Discord, and every patch and plugin \
-                      hook                 finds its place. It downloads from Discord's servers, \
-                      each file is checked                 against what Sunbird verified, then \
-                      Android's installer opens. You stay logged                 in.",
-                     Color::Muted,
-                  ),
-               ],
-            )]
-         },
-         State::Running {
-            build,
-            step,
-            done,
-            total,
-         } => {
-            let megabytes = |bytes: usize| bytes / (1 << 20);
-            let line = if total == 0 {
-               step
-            } else {
-               format!("{step} {} of {} MB", megabytes(done), megabytes(total))
-            };
-            vec![section(
-               &format!("Updating to {}", build.version_name),
-               vec![
-                  progress(done, total),
-                  note(&line, Color::Accent),
-                  note(
-                     "Keep Discord open until Android's installer shows.",
-                     Color::Muted,
-                  ),
-               ],
-            )]
-         },
-         State::Failed { build, error } => {
-            vec![section(&build.version_name, vec![
-               note(&format!("The update failed: {error}"), Color::Error),
-               start("Try again"),
-            ])]
-         },
-         State::Handed(build) => {
-            vec![section(&build.version_name, vec![
-               note(
-                  "Android's installer has the update. Tap Install there to finish.",
-                  Color::Accent,
-               ),
-               start("Build it again"),
-            ])]
-         },
-      }
-   }
-   #[cfg(not(target_os = "android"))]
-   Vec::new()
-}
-
-/// A bar filled `done` of `total`, as two flex weights.
-#[cfg(target_os = "android")]
-fn progress(done: usize, total: usize) -> Tree {
-   use phoenix_ui_mobile::{
-      ViewKind,
-      prop,
-   };
-
-   #[expect(
-      clippy::cast_precision_loss,
-      reason = "a bar's width needs no byte precision"
-   )]
-   let fraction = if total == 0 {
-      0.0
-   } else {
-      (done as f64 / total as f64).clamp(0.0, 1.0)
-   };
-   let part = |weight: f64, color: Option<i64>| {
-      let mut props = vec![(prop!("flex"), Value::F64(weight))];
-      if let Some(color) = color {
-         props.push((prop!("background"), Value::I64(color)));
-         props.push((Prop::RADIUS, Value::F64(3.0)));
-      }
-      Tree {
-         id: 0,
-         kind: ViewKind::View,
-         props,
-         kids: Vec::new(),
-         src: None,
-         press: None,
-         slot: None,
-         animate: None,
-      }
-   };
-   let bar = Tree {
-      id:      0,
-      kind:    ViewKind::View,
-      props:   vec![
-         (prop!("direction"), Value::Str("row".to_owned())),
-         (prop!("width"), Value::Str("fill".to_owned())),
-         (Prop::HEIGHT, Value::F64(6.0)),
-         (Prop::RADIUS, Value::F64(3.0)),
-         (prop!("clip"), Value::Bool(true)),
-         (
-            prop!("background"),
-            Value::I64(Color::Muted.argb() & 0x40FF_FFFF),
-         ),
-      ],
-      kids:    vec![
-         part(fraction, Some(Color::Accent.argb())),
-         part(1.0 - fraction, None),
-      ],
-      src:     None,
-      press:   None,
-      slot:    None,
-      animate: None,
-   };
-   Tree {
-      id:      0,
-      kind:    ViewKind::View,
-      props:   vec![(Prop::PADDING, Value::Rect([16.0, 12.0, 16.0, 4.0]))],
-      kids:    vec![bar],
-      src:     None,
-      press:   None,
-      slot:    None,
-      animate: None,
-   }
 }
 
 /// The site's plugins, each with a switch that installs or uninstalls it.

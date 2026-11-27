@@ -33,7 +33,6 @@ use crate::settings::{
       log_lines,
    },
    pages::{
-      discord_update_sections,
       install_sections,
       main_sections,
    },
@@ -320,7 +319,13 @@ impl Settings {
                |plugin| (plugin.name.clone(), plugin_sections(index, plugin)),
             )
          },
-         PageKind::DiscordUpdate => ("Discord update".to_owned(), discord_update_sections()),
+         PageKind::DiscordUpdate => {
+            #[cfg(target_os = "android")]
+            let sections = super::updater::sections();
+            #[cfg(not(target_os = "android"))]
+            let sections = Vec::new();
+            ("Discord update".to_owned(), sections)
+         },
       }
    }
 

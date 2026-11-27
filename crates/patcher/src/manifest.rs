@@ -38,6 +38,7 @@ const ATTR_LABEL: u32 = 0x0101_0001;
 const ATTR_AUTHORITIES: u32 = 0x0101_0018;
 const ATTR_TASK_AFFINITY: u32 = 0x0101_0012;
 const ATTR_VERSION_CODE: u32 = 0x0101_021B;
+const ATTR_VERSION_NAME: u32 = 0x0101_021C;
 
 const TYPE_REFERENCE: u8 = 0x01;
 const TYPE_STRING: u8 = 0x03;
@@ -58,6 +59,7 @@ pub struct Patched {
 pub struct Info {
    pub package:      String,
    pub version_code: u32,
+   pub version_name: String,
    /// The `<application>` label when it is text, as [`patch`] writes one,
    /// rather than a resource.
    pub label:        Option<String>,
@@ -93,6 +95,8 @@ pub fn read(source: &[u8]) -> Result<Info, Error> {
                      && bytes.u8(attribute + 15)? == TYPE_INT_DEC
                   {
                      info.version_code = bytes.u32(attribute + 16)?;
+                  } else if id == Some(ATTR_VERSION_NAME) {
+                     info.version_name = element.value(attribute)?.unwrap_or_default();
                   }
                } else if element.is("application") && id == Some(ATTR_LABEL) {
                   info.label = element.value(attribute)?;
@@ -552,6 +556,7 @@ mod tests {
       let original = crate::manifest_info(&apk).unwrap();
       assert_eq!(original.package, super::ORIGINAL);
       assert!(original.version_code > 0);
+      assert!(original.version_name.ends_with("Alpha"));
       assert_eq!(original.label, None);
 
       let record = crate::zip::read(&apk)
@@ -564,6 +569,7 @@ mod tests {
       assert_eq!(super::read(&patched.data).unwrap(), super::Info {
          package:      "com.discord.phoenix".to_owned(),
          version_code: original.version_code,
+         version_name: original.version_name,
          label:        Some("Phoenix".to_owned()),
       });
    }
