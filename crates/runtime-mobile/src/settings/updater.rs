@@ -1,13 +1,11 @@
-//! The Discord update page, drawn as cards from plain views: what the update
-//! brings and what Sunbird checked, then a progress bar over each step, and
-//! the failure or the hand-off to Android's installer.
+//! The Discord update page: what the update brings and what Sunbird checked,
+//! then a progress bar over each step with its size, and the failure or the
+//! hand-off to Android's installer.
 
 use phoenix_ui_mobile::{
    Prop,
-   Props,
    ViewKind,
    prop,
-   templates,
 };
 use phoenix_wire::Value;
 
@@ -16,331 +14,234 @@ use crate::{
       self,
       Build,
       Progress,
+      Stage,
       State,
    },
    settings::{
       ICON_RELOAD,
       Press,
+      cards::{
+         BLURPLE,
+         GREEN,
+         badge,
+         bar,
+         button,
+         card,
+         column,
+         fixed,
+         grow,
+         heading,
+         label,
+         line,
+         node,
+         row,
+      },
       theme::{
          Color,
          template_color,
       },
-      tree::{
-         Tree,
-         text,
-      },
+      tree::Tree,
    },
 };
 
-const BLURPLE: i64 = 0xFF58_65F2;
-const GREEN: i64 = 0xFF23_A55A;
-const WHITE: i64 = 0xFFFF_FFFF;
-/// The settings rows' translucent surface and the track under a bar, as the
-/// captured dark layouts have them; [`template_color`] maps them for light.
-const SURFACE: i64 = 0x1497_979F;
-const TRACK: i64 = 0x1F97_979F;
-
 pub fn sections() -> Vec<Tree> {
+   let installed = discord_update::installed_name();
    let card = match discord_update::state() {
       State::Current => {
-         card(vec![line(
-            "Discord is on the newest build Sunbird has checked.",
-            Color::Muted.argb(),
+         card(vec![heading(
+            badge(GREEN, 52.0, "\u{2713}"),
+            "Discord is up to date",
+            &installed,
+            None,
          )])
       },
-      State::Available(build) => offer(&build),
-      State::Running(build, progress) => running(&build, &progress),
+      State::Available(build) => offer(&build, &installed),
+      State::Running(build, progress) => running(&build, &progress, &installed),
       State::Failed { build, error } => {
          card(vec![
             heading(
-               Color::Error.argb(),
-               "!",
+               badge(Color::Error.argb(), 52.0, "!"),
                "Update failed",
-               &build.version_name,
+               &format!("Discord {}", build.version_name),
+               None,
             ),
             line(&error, Color::Muted.argb()),
-            button("Try again", BLURPLE),
+            button("Try again", Press::StartDiscordUpdate),
          ])
       },
       State::Handed(build) => {
          card(vec![
-            heading(GREEN, "\u{2713}", "Ready to install", &build.version_name),
+            heading(
+               badge(GREEN, 52.0, "\u{2713}"),
+               "Ready to install",
+               &format!("Discord {}", build.version_name),
+               None,
+            ),
             line(
-               "Android's installer has the update. Tap Update there to finish, and Discord \
-                restarts on the new version.",
+               "Android's installer has the update. Tap Update there, and Discord restarts on the \
+                new version.",
                Color::Muted.argb(),
             ),
-            button("Open the installer", BLURPLE),
+            button("Open the installer", Press::StartDiscordUpdate),
          ])
       },
    };
    vec![card]
 }
 
-fn offer(build: &Build) -> Tree {
-   let from = discord_update::installed_name();
-   let subtitle = if from.is_empty() {
+fn offer(build: &Build, installed: &str) -> Tree {
+   let size = discord_update::download_size(build) >> 20;
+   let subtitle = if installed.is_empty() {
+      "A newer Discord is ready".to_owned()
+   } else {
+      format!("You have {installed}")
+   };
+   card(vec![
+      heading(
+         badge(BLURPLE, 52.0, ICON_RELOAD),
+         &format!("Discord {}", build.version_name),
+         &subtitle,
+         None,
+      ),
+      row(8.0, vec![
+         chip(&format!("{size} MB")),
+         chip("Signed by Discord"),
+         chip("Login kept"),
+      ]),
+      column(10.0, vec![
+         label("What Sunbird checked", 13.0, 700, Color::Muted.argb()),
+         check("Discord's own signature on every file"),
+         check("Sunbird's patches and plugin hooks fit this build"),
+         check("Each download matches before it installs"),
+      ]),
+      button(
+         &format!("Download and install \u{00B7} {size} MB"),
+         Press::StartDiscordUpdate,
+      ),
+   ])
+}
+
+fn running(build: &Build, progress: &Progress, installed: &str) -> Tree {
+   let step = progress.steps.get(progress.at);
+   let stage = step.map_or(Stage::Download, |step| step.stage);
+   let action = step.map_or("Getting ready", |step| step.action.as_str());
+   let versions = if installed.is_empty() {
       build.version_name.clone()
    } else {
-      format!("{from}  \u{2192}  {}", build.version_name)
+      format!("{installed}  \u{2192}  {}", build.version_name)
    };
-   let size = discord_update::download_size(build) >> 20;
-   card(vec![
-      heading(BLURPLE, "", "Discord update", &subtitle),
-      column(6.0, vec![
-         check("Signed by Discord"),
-         check("Sunbird's patches and plugin hooks fit this build"),
-         check("Every download is checked before it installs"),
-         check("You stay logged in"),
+   let pace = progress.pace().map_or_else(String::new, |(speed, left)| {
+      let left = if left < 60 {
+         format!("{left} s left")
+      } else {
+         format!("{} min left", left.div_ceil(60))
+      };
+      format!("{:.1} MB/s \u{00B7} {left}", speed / f64::from(1 << 20))
+   });
+   centered(vec![
+      badge(BLURPLE, 64.0, ICON_RELOAD),
+      column(4.0, vec![
+         center(label("Updating Discord", 20.0, 700, Color::Text.argb())),
+         center(label(&versions, 14.0, 400, Color::Muted.argb())),
       ]),
-      button(&format!("Download and install \u{00B7} {size} MB"), BLURPLE),
-   ])
-}
-
-fn running(build: &Build, progress: &Progress) -> Tree {
-   #[expect(
-      clippy::cast_precision_loss,
-      reason = "a bar's width needs no byte precision"
-   )]
-   let fraction = if progress.total == 0 {
-      0.0
-   } else {
-      (progress.done as f64 / progress.total as f64).clamp(0.0, 1.0)
-   };
-   #[expect(
-      clippy::cast_possible_truncation,
-      clippy::cast_sign_loss,
-      reason = "a percentage between 0 and 100"
-   )]
-   let percent = (fraction * 100.0).round() as u32;
-   let steps = progress
-      .steps
-      .iter()
-      .enumerate()
-      .map(|(at, step)| {
-         let (glyph, glyph_color, label_color, weight) = match at.cmp(&progress.at) {
-            std::cmp::Ordering::Less => ("\u{2713}", GREEN, Color::Muted.argb(), 400),
-            std::cmp::Ordering::Equal => ("\u{25CF}", BLURPLE, Color::Text.argb(), 600),
-            std::cmp::Ordering::Greater => {
-               ("\u{25CB}", Color::Muted.argb(), Color::Muted.argb(), 400)
-            },
-         };
-         row(10.0, vec![
-            fixed(label_node(glyph, 15.0, 700, glyph_color), 18.0),
-            grow(label_node(step, 15.0, weight, label_color)),
-         ])
-      })
-      .collect();
-   card(vec![
+      center(label(
+         &format!("{}%", progress.percent()),
+         44.0,
+         700,
+         BLURPLE,
+      )),
+      column(8.0, vec![
+         bar(progress.fraction(), 12.0),
+         row(8.0, vec![
+            grow(label(
+               &format!(
+                  "{} of {}",
+                  megabytes(progress.done),
+                  megabytes(progress.total)
+               ),
+               13.0,
+               400,
+               Color::Muted.argb(),
+            )),
+            label(&pace, 13.0, 400, Color::Muted.argb()),
+         ]),
+      ]),
+      center(label(action, 15.0, 600, Color::Text.argb())),
       row(8.0, vec![
-         grow(label_node(
-            &format!("Updating to {}", build.version_name),
-            17.0,
-            700,
-            Color::Text.argb(),
-         )),
-         label_node(&format!("{percent}%"), 17.0, 700, BLURPLE),
+         stage_chip("Download", Stage::Download, stage),
+         stage_chip("Build", Stage::Build, stage),
+         stage_chip("Install", Stage::Install, stage),
       ]),
-      bar(fraction),
-      line(
-         &format!("{} of {} MB", progress.done >> 20, progress.total >> 20),
+      center(label(
+         "Keep Discord open, the installer opens when it is ready.",
+         13.0,
+         400,
          Color::Muted.argb(),
-      ),
-      column(10.0, steps),
-      line(
-         "Keep Discord open until Android's installer shows.",
-         Color::Muted.argb(),
-      ),
+      )),
    ])
 }
 
-/// A badge holding `glyph` (or the update icon), a title and a subtitle.
-fn heading(color: i64, glyph: &str, title: &str, subtitle: &str) -> Tree {
-   let inner = if glyph.is_empty() {
-      node(
-         ViewKind::Image,
-         vec![
-            (Prop::URI, text(ICON_RELOAD)),
-            (prop!("width"), Value::F64(26.0)),
-            (Prop::HEIGHT, Value::F64(26.0)),
-            (Prop::TINT, Value::I64(WHITE)),
-            (prop!("scale"), Value::Str("fit".to_owned())),
-         ],
-         Vec::new(),
-      )
-   } else {
-      label_node(glyph, 22.0, 700, WHITE)
+/// One of the update's three stages, marked done, under way or waiting.
+fn stage_chip(name: &str, this: Stage, at: Stage) -> Tree {
+   let (glyph, text_color, background) = match this.cmp(&at) {
+      std::cmp::Ordering::Less => ("\u{2713} ", GREEN, GREEN & 0x33FF_FFFF),
+      std::cmp::Ordering::Equal => ("", BLURPLE, BLURPLE & 0x33FF_FFFF),
+      std::cmp::Ordering::Greater => ("", Color::Muted.argb(), template_color(0x1F97_979F)),
    };
-   let badge = node(
+   grow(node(
       ViewKind::View,
       vec![
-         (prop!("width"), Value::F64(48.0)),
-         (Prop::HEIGHT, Value::F64(48.0)),
-         (Prop::RADIUS, Value::F64(24.0)),
-         (prop!("background"), Value::I64(color)),
-         (prop!("align"), Value::Str("center".to_owned())),
-         (prop!("justify"), Value::Str("center".to_owned())),
-      ],
-      vec![inner],
-   );
-   row(14.0, vec![
-      badge,
-      grow(column(2.0, vec![
-         label_node(title, 18.0, 700, Color::Text.argb()),
-         label_node(subtitle, 14.0, 400, Color::Muted.argb()),
-      ])),
-   ])
-}
-
-fn check(label: &str) -> Tree {
-   row(8.0, vec![
-      fixed(label_node("\u{2713}", 14.0, 700, GREEN), 16.0),
-      grow(label_node(label, 14.0, 400, Color::Muted.argb())),
-   ])
-}
-
-/// A full-width button that starts the update, or retries or reopens it.
-fn button(label: &str, color: i64) -> Tree {
-   let on = templates()
-      .button_row
-      .props
-      .iter()
-      .find(|(key, _)| *key == Prop::ON)
-      .map_or_else(
-         || Value::Arr(vec![text("press")]),
-         |(_, value)| value.clone(),
-      );
-   let mut button = node(
-      ViewKind::View,
-      vec![
-         (prop!("width"), Value::Str("fill".to_owned())),
-         (Prop::HEIGHT, Value::F64(48.0)),
+         (Prop::HEIGHT, Value::F64(36.0)),
          (Prop::RADIUS, Value::F64(10.0)),
-         (prop!("background"), Value::I64(color)),
-         (prop!("activeBackground"), Value::I64(color & 0xCCFF_FFFF)),
+         (prop!("background"), Value::I64(background)),
          (prop!("align"), Value::Str("center".to_owned())),
          (prop!("justify"), Value::Str("center".to_owned())),
-         (Prop::ROLE, text("button")),
-         (Prop::ACCESSIBILITY_LABEL, text(label)),
-         (Prop::ACCESSIBILITY_ID, text(&format!("phoenix-{label}"))),
-         (Prop::ON, on),
       ],
-      vec![label_node(label, 16.0, 700, WHITE)],
-   );
-   button.press = Some(Press::StartDiscordUpdate);
-   button
+      vec![label(&format!("{glyph}{name}"), 14.0, 700, text_color)],
+   ))
 }
 
-/// A bar filled `fraction` of the way, as two flex weights.
-fn bar(fraction: f64) -> Tree {
-   let part = |weight: f64, color: i64| {
-      node(
-         ViewKind::View,
-         vec![
-            (prop!("flex"), Value::F64(weight)),
-            (Prop::HEIGHT, Value::F64(8.0)),
-            (prop!("background"), Value::I64(color)),
-            (Prop::RADIUS, Value::F64(4.0)),
-         ],
-         Vec::new(),
-      )
-   };
-   node(
-      ViewKind::View,
-      vec![
-         (prop!("direction"), Value::Str("row".to_owned())),
-         (prop!("width"), Value::Str("fill".to_owned())),
-         (Prop::HEIGHT, Value::F64(8.0)),
-         (Prop::RADIUS, Value::F64(4.0)),
-         (prop!("clip"), Value::Bool(true)),
-         (prop!("background"), Value::I64(template_color(TRACK))),
-      ],
-      vec![part(fraction, BLURPLE), part(1.0 - fraction, 0)],
-   )
+/// A card whose items sit centered.
+fn centered(kids: Vec<Tree>) -> Tree {
+   let mut card = card(kids);
+   card.set(prop!("align"), Some(Value::Str("center".to_owned())));
+   card.set(Prop::PADDING, Some(Value::Rect([20.0, 28.0, 20.0, 24.0])));
+   card.set(Prop::GAP, Some(Value::F64(18.0)));
+   card
 }
 
-fn card(kids: Vec<Tree>) -> Tree {
-   node(
-      ViewKind::View,
-      vec![
-         (prop!("direction"), Value::Str("column".to_owned())),
-         (prop!("width"), Value::Str("fill".to_owned())),
-         (prop!("align"), Value::Str("stretch".to_owned())),
-         (prop!("background"), Value::I64(template_color(SURFACE))),
-         (Prop::RADIUS, Value::F64(16.0)),
-         (Prop::PADDING, Value::Rect([18.0, 18.0, 18.0, 18.0])),
-         (Prop::GAP, Value::F64(16.0)),
-      ],
-      kids,
-   )
-}
-
-fn row(gap: f64, kids: Vec<Tree>) -> Tree {
-   node(
-      ViewKind::View,
-      vec![
-         (prop!("direction"), Value::Str("row".to_owned())),
-         (prop!("width"), Value::Str("fill".to_owned())),
-         (prop!("align"), Value::Str("center".to_owned())),
-         (Prop::GAP, Value::F64(gap)),
-      ],
-      kids,
-   )
-}
-
-fn column(gap: f64, kids: Vec<Tree>) -> Tree {
-   node(
-      ViewKind::View,
-      vec![
-         (prop!("direction"), Value::Str("column".to_owned())),
-         (prop!("width"), Value::Str("fill".to_owned())),
-         (prop!("align"), Value::Str("stretch".to_owned())),
-         (Prop::GAP, Value::F64(gap)),
-      ],
-      kids,
-   )
-}
-
-/// A paragraph across the card.
-fn line(value: &str, color: i64) -> Tree {
-   let mut node = label_node(value, 14.0, 400, color);
-   node.set(prop!("width"), Some(Value::Str("fill".to_owned())));
-   node
-}
-
-fn label_node(value: &str, size: f64, weight: i32, color: i64) -> Tree {
-   node(
-      ViewKind::Text,
-      vec![
-         (Prop::TEXT, text(value)),
-         (Prop::COLOR, Value::I64(color)),
-         (Prop::FONT_SIZE, Value::F64(size)),
-         (prop!("fontWeight"), Value::I32(weight)),
-         (Prop::LINE_HEIGHT, Value::F64(size + 6.0)),
-      ],
-      Vec::new(),
-   )
-}
-
-fn grow(mut tree: Tree) -> Tree {
-   tree.set(prop!("flex"), Some(Value::F64(1.0)));
+/// A text centered across its parent.
+fn center(mut tree: Tree) -> Tree {
+   tree.set(prop!("width"), Some(Value::Str("fill".to_owned())));
+   tree.set(prop!("textAlign"), Some(Value::Str("center".to_owned())));
    tree
 }
 
-fn fixed(mut tree: Tree, width: f64) -> Tree {
-   tree.set(prop!("width"), Some(Value::F64(width)));
-   tree
-}
-
-const fn node(kind: ViewKind, props: Props, kids: Vec<Tree>) -> Tree {
-   Tree {
-      id: 0,
-      kind,
-      props,
-      kids,
-      src: None,
-      press: None,
-      slot: None,
-      animate: None,
+/// `bytes` in MB, or KB under one.
+fn megabytes(bytes: usize) -> String {
+   if bytes < 1 << 20 {
+      format!("{} KB", bytes.div_ceil(1 << 10))
+   } else {
+      format!("{} MB", bytes >> 20)
    }
+}
+
+fn check(text_value: &str) -> Tree {
+   row(10.0, vec![
+      fixed(label("\u{2713}", 14.0, 700, GREEN), 16.0),
+      grow(label(text_value, 14.0, 400, Color::Text.argb())),
+   ])
+}
+
+/// A small tinted tag.
+fn chip(text_value: &str) -> Tree {
+   node(
+      ViewKind::View,
+      vec![
+         (Prop::PADDING, Value::Rect([10.0, 4.0, 10.0, 4.0])),
+         (Prop::RADIUS, Value::F64(12.0)),
+         (prop!("background"), Value::I64(template_color(0x1F97_979F))),
+      ],
+      vec![label(text_value, 12.0, 600, Color::Text.argb())],
+   )
 }

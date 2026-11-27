@@ -8,6 +8,7 @@
 
 mod actions;
 mod batch;
+mod cards;
 mod code;
 mod console;
 mod pages;

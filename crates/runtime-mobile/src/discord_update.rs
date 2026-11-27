@@ -25,6 +25,7 @@ use std::{
       },
    },
    thread,
+   time::Instant,
 };
 
 use patcher::{
@@ -88,10 +89,76 @@ struct Split {
 /// downloaded of all its splits.
 #[derive(Clone)]
 pub struct Progress {
-   pub steps: Vec<String>,
-   pub at:    usize,
-   pub done:  usize,
-   pub total: usize,
+   pub steps:   Vec<Step>,
+   pub at:      usize,
+   pub done:    usize,
+   pub total:   usize,
+   /// When the downloads began, for their speed.
+   pub started: Option<Instant>,
+}
+
+#[derive(Clone)]
+pub struct Step {
+   /// What it does, like "Downloading native libraries".
+   pub action: String,
+   pub stage:  Stage,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Stage {
+   Download,
+   Build,
+   Install,
+}
+
+impl Progress {
+   /// How much of the download is done, from 0 to 1.
+   #[must_use]
+   pub fn fraction(&self) -> f64 {
+      #[expect(
+         clippy::cast_precision_loss,
+         reason = "a bar's width needs no byte precision"
+      )]
+      let fraction = if self.total == 0 {
+         0.0
+      } else {
+         self.done as f64 / self.total as f64
+      };
+      fraction.clamp(0.0, 1.0)
+   }
+
+   #[must_use]
+   pub fn percent(&self) -> u32 {
+      #[expect(
+         clippy::cast_possible_truncation,
+         clippy::cast_sign_loss,
+         reason = "a percentage between 0 and 100"
+      )]
+      let percent = (self.fraction() * 100.0).round() as u32;
+      percent
+   }
+
+   /// Bytes a second so far, and the seconds left at that pace.
+   #[must_use]
+   pub fn pace(&self) -> Option<(f64, u64)> {
+      let seconds = self.started?.elapsed().as_secs_f64();
+      if seconds < 1.0 || self.done == 0 || self.done >= self.total {
+         return None;
+      }
+      #[expect(
+         clippy::cast_precision_loss,
+         reason = "a download's speed needs no byte precision"
+      )]
+      let speed = self.done as f64 / seconds;
+      #[expect(
+         clippy::cast_precision_loss,
+         clippy::cast_possible_truncation,
+         clippy::cast_sign_loss,
+         reason = "whole seconds left, never negative"
+      )]
+      let left = ((self.total - self.done) as f64 / speed).ceil() as u64;
+      Some((speed, left))
+   }
 }
 
 #[derive(Clone)]
@@ -229,10 +296,14 @@ pub fn start() {
          State::Current | State::Running(..) => return,
       };
       *state = State::Running(build.clone(), Progress {
-         steps: vec!["Getting ready".to_owned()],
-         at:    0,
-         done:  0,
-         total: 0,
+         steps:   vec![Step {
+            action: "Getting ready".to_owned(),
+            stage:  Stage::Download,
+         }],
+         at:      0,
+         done:    0,
+         total:   0,
+         started: None,
       });
       build
    };
@@ -264,25 +335,47 @@ fn label(name: &str) -> String {
    }
 }
 
+/// What downloading a split is called on the page.
+fn download_action(name: &str) -> String {
+   match name.strip_prefix("config.") {
+      None => "Downloading Discord".to_owned(),
+      Some(language) if label(name).starts_with("Language") => {
+         format!("Downloading the {language} language pack")
+      },
+      Some(_) => format!("Downloading {}", label(name).to_lowercase()),
+   }
+}
+
 fn update(build: &Build) -> Result<(), String> {
    let installed = installed()?;
    let names = wanted(build)?;
    let mut progress = Progress {
-      steps: names
+      steps:   names
          .iter()
-         .map(|name| label(name))
+         .map(|name| {
+            Step {
+               action: download_action(name),
+               stage:  Stage::Download,
+            }
+         })
          .chain(
             [
-               "Sunbird loader",
-               "Building and signing",
-               "Opening the installer",
+               ("Downloading the Sunbird loader", Stage::Download),
+               ("Building and signing the update", Stage::Build),
+               ("Opening Android's installer", Stage::Install),
             ]
-            .map(str::to_owned),
+            .map(|(action, stage)| {
+               Step {
+                  action: action.to_owned(),
+                  stage,
+               }
+            }),
          )
          .collect(),
-      at:    0,
-      done:  0,
-      total: names.iter().map(|name| build.splits[name].size).sum(),
+      at:      0,
+      done:    0,
+      total:   names.iter().map(|name| build.splits[name].size).sum(),
+      started: Some(Instant::now()),
    };
    let mut apks = Vec::with_capacity(names.len());
    for (at, name) in names.iter().enumerate() {
