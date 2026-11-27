@@ -1,7 +1,3 @@
-// @description Sends messages without notifying anyone, always or when they start with a prefix
-// @version 1.0.0
-// @author Lil Poop
-
 const settings = phoenix.settings.define({
   always: {
     type: "switch",
