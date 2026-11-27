@@ -3,10 +3,10 @@
 //! `LD_PRELOAD` on Linux and `DYLD_INSERT_LIBRARIES` on macOS.
 //!
 //! On Unix the constructor runs once the host library is mapped and relocated.
-//! Desktop hooks Discord synchronously, from `DllMain` or the constructor, then
-//! starts on a thread so startup never runs under the OS loader lock. Plugins
-//! come from the bundle stored beside this library (when present) plus
-//! `$PHOENIX_HOME/plugins`.
+//! Desktop hooks Discord synchronously, from an APC queued by `DllMain` or the
+//! constructor, then starts on a thread so startup never runs under the OS
+//! loader lock. Plugins come from the bundle stored beside this library (when
+//! present) plus `$PHOENIX_HOME/plugins`.
 
 use std::{
    env,
@@ -48,12 +48,34 @@ pub unsafe extern "system" fn DllMain(
    #[link(name = "kernel32")]
    unsafe extern "system" {
       fn DisableThreadLibraryCalls(module: *mut std::ffi::c_void) -> i32;
+      fn GetCurrentThread() -> *mut std::ffi::c_void;
+      fn QueueUserAPC(
+         function: unsafe extern "system" fn(usize),
+         thread: *mut std::ffi::c_void,
+         data: usize,
+      ) -> u32;
+   }
+
+   // Indexing joins threads, which block on the loader lock DllMain holds
+   // until it returns. The injector loads this library from an APC on
+   // Discord's suspended main thread, so an APC queued here runs right after
+   // LoadLibraryW returns, still before Discord's entry point.
+   unsafe extern "system" fn hook(_: usize) {
+      desktop();
    }
 
    if reason == DLL_PROCESS_ATTACH {
       // SAFETY: `module` is the HINSTANCE handed to DllMain.
       unsafe { DisableThreadLibraryCalls(module) };
-      desktop();
+      // SAFETY: `hook` lives as long as the process (this library is never
+      // unloaded), and the pseudo handle names the calling thread.
+      if unsafe { QueueUserAPC(hook, GetCurrentThread(), 0) } == 0 {
+         logging();
+         log::error!(
+            "phoenix could not queue its hooks: {}",
+            std::io::Error::last_os_error()
+         );
+      }
    }
    1
 }

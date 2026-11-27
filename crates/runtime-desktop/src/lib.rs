@@ -211,7 +211,8 @@ pub(crate) unsafe fn hook_sret<F: Copy>(
 /// The target and its swapped gateway registry, once [`prepare`] hooked them.
 static PREPARED: Mutex<Option<(Image<'static>, &'static GatewayRegistry)>> = Mutex::new(None);
 
-/// Hooks Discord from `DllMain` on Windows or the constructor on Linux and
+/// Hooks Discord from an APC queued by `DllMain` on Windows (outside the
+/// loader lock, since indexing joins threads) or the constructor on Linux and
 /// macOS, before its own code runs.
 ///
 /// Desktop Phoenix settles on the access gate in its first frames and stops
