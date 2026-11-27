@@ -467,7 +467,7 @@ fn update_plugin(name: &str, expected_crc: Option<u32>) -> Result<(), String> {
    if let Some(min) = crate::Header::from(source.as_str()).min_sunbird
       && outdated(&min)
    {
-      return Err(format!("needs Sunbird {min}, update Phoenix Unlock first"));
+      return Err(format!("needs Sunbird {min}, update Sunbird first"));
    }
    same_reach(name, &source)?;
    crate::save_source(name, source).map_err(|err| err.to_string())

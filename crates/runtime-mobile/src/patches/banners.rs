@@ -473,6 +473,12 @@ fn banner_dismiss(id: u32) -> Draft {
    }
 }
 
+/// Whether a banner shows or waits to, since a new one replaces it.
+pub fn busy() -> bool {
+   let patches = patches();
+   !patches.banner_actions.is_empty() || !patches.banner_queue.pending.is_empty()
+}
+
 pub fn dismiss(id: u32) -> Vec<Op> {
    let (ops, notify_js) = patches().close_banner(id);
    if notify_js && let Some(engine) = phoenix_runtime::engine() {

@@ -99,7 +99,7 @@ pub enum Error {
    NotUtf8 { url: String },
    #[error(transparent)]
    Fetch(#[from] fetch::FetchError),
-   #[error("update Phoenix Unlock to {version} first, the site's plugins need it")]
+   #[error("update Sunbird to {version} first, the site's plugins need it")]
    LoaderOutdated { version: String },
 }
 

@@ -153,38 +153,38 @@ pub fn take_open_page() -> bool {
 /// Opens Settings, which then shows the update page.
 pub fn open_page() {
    OPEN_PAGE.store(true, Ordering::Release);
-   if let Err(err) = crate::picker::open("discord://app/settings") {
+   if let Err(err) = crate::install::open_in_app("discord://app/settings") {
       OPEN_PAGE.store(false, Ordering::Release);
       log::warn!("discord update: opening Settings: {err}");
    }
 }
 
-/// Looks for a newer checked build in the background, and offers it.
+/// Looks for a newer checked build, and offers it once no other banner shows.
 pub fn check() {
-   thread::spawn(|| {
-      match newer() {
-         Ok(Some(build)) => {
-            log::info!("discord update: {} is ready", build.version_code);
-            let name = build.version_name.clone();
-            set(State::Available(build));
-            // Sunbird's own update banner shows for 8 s at startup, and one
-            // banner shows at a time.
-            if phoenix_runtime::update::found().is_some() {
-               thread::sleep(std::time::Duration::from_secs(9));
+   match newer() {
+      Ok(Some(build)) => {
+         log::info!("discord update: {} is ready", build.version_code);
+         let name = build.version_name.clone();
+         set(State::Available(build));
+         // A banner replaces the one showing, so this waits its turn.
+         for _ in 0..60 {
+            if !crate::patches::banners::busy() {
+               break;
             }
-            crate::patches::banners::show_banner(
-               "Discord update available".to_owned(),
-               Some(format!("{name}, checked for Sunbird. Tap to update")),
-               Some("res://ic_mana_puzzle_piece_retry".to_owned()),
-               Some(crate::ACCENT),
-               8000,
-               crate::patches::banners::BannerAction::OpenDiscordUpdate,
-            );
-         },
-         Ok(None) => {},
-         Err(err) => log::info!("discord update check: {err}"),
-      }
-   });
+            thread::sleep(std::time::Duration::from_millis(500));
+         }
+         crate::patches::banners::show_banner(
+            "Discord update available".to_owned(),
+            Some(format!("{name}, checked for Sunbird. Tap to update")),
+            Some("res://ic_mana_puzzle_piece_retry".to_owned()),
+            Some(crate::ACCENT),
+            8000,
+            crate::patches::banners::BannerAction::OpenDiscordUpdate,
+         );
+      },
+      Ok(None) => {},
+      Err(err) => log::info!("discord update check: {err}"),
+   }
 }
 
 fn newer() -> Result<Option<Build>, String> {
@@ -238,6 +238,8 @@ pub fn start() {
    };
    phoenix_runtime::refresh_settings();
    thread::spawn(move || {
+      // A retry takes a build CI listed since, if any.
+      let build = newer().ok().flatten().unwrap_or(build);
       match update(&build) {
          Ok(()) => set(State::Handed(build)),
          Err(error) => {
@@ -427,8 +429,17 @@ fn download(build: &Build, name: &str, progress: &mut Progress) -> Result<Vec<u8
    while bytes.len() < split.size {
       let end = (bytes.len() + CHUNK).min(split.size) - 1;
       let range = format!("bytes={}-{end}", bytes.len());
-      let chunk = fetch::get_with(&url, vec![("Range".to_owned(), range)])
-         .map_err(|err| format!("{name}: {err}"))?;
+      let chunk = fetch::get_with(&url, vec![("Range".to_owned(), range)]).map_err(|err| {
+         match err {
+            fetch::FetchError::Status { status, .. } => {
+               format!(
+                  "{} did not download: Discord's server answered {status}",
+                  label(name)
+               )
+            },
+            other => format!("{} did not download: {other}", label(name)),
+         }
+      })?;
       if chunk.is_empty() || bytes.len() + chunk.len() > split.size {
          return Err(format!("{name}: the server sent {} bytes", chunk.len()));
       }
@@ -445,7 +456,10 @@ fn download(build: &Build, name: &str, progress: &mut Progress) -> Result<Vec<u8
          hex
       });
    if found != split.sha256 {
-      return Err(format!("{name} differs from the checked build"));
+      return Err(format!(
+         "{} differs from the build Sunbird checked",
+         label(name)
+      ));
    }
    Ok(bytes)
 }

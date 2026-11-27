@@ -478,7 +478,7 @@ impl Engine {
          .and_then(|source| {
             if let Some(min) = Header::from(source).min_sunbird.filter(|min| outdated(min)) {
                return Err(Error::Js(format!(
-                  "needs Sunbird {min}, update Phoenix Unlock first"
+                  "needs Sunbird {min}, update Sunbird first"
                )));
             }
             source

@@ -254,7 +254,7 @@ impl Platform for Mobile {
                |version| format!("Build {version}, tap to update in-app"),
             );
             banners::show_banner(
-               "Phoenix Unlock update available".to_owned(),
+               "Sunbird update available".to_owned(),
                Some(body),
                Some("res://ic_mana_puzzle_piece_retry".to_owned()),
                Some(ACCENT),

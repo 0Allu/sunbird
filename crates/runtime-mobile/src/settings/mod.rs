@@ -318,9 +318,14 @@ pub fn start() {
          }
       }
    });
-   phoenix_runtime::update::check();
    #[cfg(target_os = "android")]
-   crate::discord_update::check();
+   thread::spawn(|| {
+      // Sunbird's banner first, since a banner replaces the one showing.
+      phoenix_runtime::update::check_and_notify();
+      crate::discord_update::check();
+   });
+   #[cfg(not(target_os = "android"))]
+   phoenix_runtime::update::check();
 }
 
 /// Opens the Discord update page on the worker, over the main page.

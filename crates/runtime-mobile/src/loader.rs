@@ -71,7 +71,7 @@ fn run_loader_self_update(slot: Slot) {
 
 fn self_update(slot: &Slot) -> Result<(), String> {
    slot.step("Downloading loader...");
-   let _ = crate::picker::toast("Downloading Phoenix Unlock update...");
+   let _ = crate::picker::toast("Downloading Sunbird update...");
 
    let loader = download()?;
    let base = crate::host::base_apk().map_err(|err| format!("Self-update failed: {err}"))?;
