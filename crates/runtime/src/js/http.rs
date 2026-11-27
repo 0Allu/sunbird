@@ -22,7 +22,10 @@ use crate::{
       intercept::add_discord_hooks,
       state,
    },
-   permissions::Permissions,
+   permissions::{
+      Permission,
+      Permissions,
+   },
    store,
 };
 
@@ -146,12 +149,12 @@ fn allow(
    method: &str,
    path: &str,
 ) -> rquickjs::Result<()> {
-   if permissions.discord(method, path) {
+   if permissions.allows(Permission::Discord) {
       return Ok(());
    }
    Err(Exception::throw_message(
       ctx,
-      &format!("{method} {path}: add the route to the plugin's // @discord lines"),
+      &format!("{method} {path}: add discord to the plugin's // @permissions line"),
    ))
 }
 

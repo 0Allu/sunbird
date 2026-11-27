@@ -96,6 +96,7 @@ use crate::{
    },
    permissions::{
       Links,
+      Permission,
       Permissions,
       UrlHost,
       url_host,
@@ -459,7 +460,7 @@ impl Engine {
                   permissions: loaded
                      .source
                      .parse::<Permissions>()
-                     .map_or_else(|_| Vec::new(), |permissions| permissions.grants()),
+                     .map_or_else(|_| Vec::new(), |permissions| permissions.declared()),
                }
             })
             .collect()
@@ -743,7 +744,7 @@ pub fn rewrite_refused(
    }) else {
       return false;
    };
-   log::error!("[{plugin}] {what}: dropped a rewrite adding {host}, not on its // @fetch line");
+   log::error!("[{plugin}] {what}: dropped a rewrite adding {host}, and it lacks http");
    true
 }
 
@@ -780,7 +781,7 @@ pub fn checked_icon(
          Err(Exception::throw_type(
             ctx,
             &format!(
-               "{}: images load only from Discord's CDN or a host on the plugin's // @fetch line",
+               "{}: images off Discord's CDN need http on the plugin's // @permissions line",
                url_host(&uri).as_deref().unwrap_or("icon")
             ),
          ))
@@ -869,7 +870,7 @@ fn api<'js>(
    if let Some(platform) = crate::platform() {
       platform.api(ctx, plugin, permissions, &api, &messages)?;
    }
-   if permissions.messages() {
+   if permissions.allows(Permission::Messages) {
       api.set("messages", messages)?;
    }
    api.set("log", log_object(ctx, plugin)?)?;
@@ -889,7 +890,7 @@ fn api<'js>(
          Ok::<_, rquickjs::Error>(())
       })?,
    )?;
-   if permissions.stores() {
+   if permissions.allows(Permission::Gateway) {
       api.set("stores", stores_object(ctx)?)?;
    }
    api.set("discord", discord_object(ctx, plugin, permissions)?)?;
@@ -903,7 +904,7 @@ fn api<'js>(
                return Err(Exception::throw_message(
                   &ctx,
                   &format!(
-                     "{}: add this host to the plugin's // @fetch line",
+                     "{}: add http to the plugin's // @permissions line",
                      url_host(&url).as_deref().unwrap_or("fetch")
                   ),
                ));

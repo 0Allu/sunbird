@@ -28,7 +28,10 @@ use std::{
 
 use crate::{
    fetch::Response,
-   permissions::Permissions,
+   permissions::{
+      Permission,
+      Permissions,
+   },
 };
 
 pub const TIMEOUT: Duration = Duration::from_secs(30);
@@ -107,7 +110,7 @@ struct RequestHook {
 
 impl RequestHook {
    fn matches(&self, method: &str, path: &str) -> bool {
-      self.filter.matches(method, path) && self.permissions.discord(method, path)
+      self.filter.matches(method, path) && self.permissions.allows(Permission::Discord)
    }
 }
 

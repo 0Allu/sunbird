@@ -175,7 +175,7 @@ pub struct PluginInfo {
    pub settings:    Vec<Setting>,
    /// Empty when the plugin declares nothing or its lines do not parse, which
    /// its failed `state` then says.
-   pub permissions: Vec<permissions::Grant>,
+   pub permissions: Vec<permissions::Permission>,
 }
 
 /// The `// @key value` lines a bundle starts with.

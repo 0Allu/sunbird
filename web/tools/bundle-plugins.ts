@@ -27,7 +27,7 @@ interface Listed {
 
 // The `// @` lines crates/runtime reads in Header and permissions.rs.
 const banner = (manifest: Phoenix.Manifest): string => {
-  const { permissions: granted = {} } = manifest;
+  const { permissions = [] } = manifest;
   return [
     `// @description ${manifest.description}`,
     `// @version ${manifest.version}`,
@@ -36,14 +36,7 @@ const banner = (manifest: Phoenix.Manifest): string => {
     manifest.warning && `// @warning ${manifest.warning}`,
     manifest.unlisted && '// @unlisted',
     manifest.minSunbird && `// @min-sunbird ${manifest.minSunbird}`,
-    granted.gateway?.length && `// @gateway ${granted.gateway.join(' ')}`,
-    granted.gatewaySend?.length && `// @gateway-send ${granted.gatewaySend.join(' ')}`,
-    ...(granted.discord ?? []).map((route) => `// @discord ${route}`),
-    granted.fetch?.length && `// @fetch ${granted.fetch.join(' ')}`,
-    granted.stores && '// @stores',
-    granted.messages && '// @messages',
-    granted.bridge && '// @bridge',
-    granted.uiTree && '// @ui-tree',
+    permissions.length > 0 && `// @permissions ${permissions.join(' ')}`,
   ].filter((line): line is string => typeof line === 'string').join('\n');
 };
 

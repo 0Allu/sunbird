@@ -1,20 +1,10 @@
-//! What a plugin's banner lets it reach. A plugin's `phoenix` object leaves out
-//! what it did not declare, and the calls that take a route, host or event
-//! refuse the ones outside its lines.
+//! What a plugin's `// @permissions` line lets it reach, like
+//! `// @permissions gateway discord`. A plugin's `phoenix` object leaves out
+//! what it did not declare.
 //!
-//! - `// @gateway messageCreate messageUpdate` for gateway hook points.
-//! - `// @gateway-send 4` for outgoing gateway opcodes.
-//! - `// @discord GET /channels/*/messages` for `phoenix.discord` requests and
-//!   interceptors, one route a line. `*` is one path segment, a final `**` the
-//!   rest, and `*` in place of the method any method.
-//! - `// @fetch translate.googleapis.com *.example.com` for `phoenix.fetch`.
-//! - `// @stores`, `// @messages` and `// @bridge` for those namespaces whole.
-//! - `// @ui-tree` for the raw view tree, which holds whatever the screen
-//!   shows.
-//!
-//! Images Discord draws reach the network too. An icon a plugin draws, and a
-//! URL host a hook adds to what Discord renders, must be one of its `@fetch`
-//! hosts or Discord's own.
+//! Images Discord draws reach the network too, so an icon a plugin draws, and
+//! a URL host a hook adds to what Discord renders, must be Discord's own unless
+//! the plugin holds `http`.
 
 use std::{
    collections::{
@@ -39,48 +29,96 @@ use crate::banner;
 
 #[derive(Debug, flub::Error)]
 pub enum PermissionError {
-   #[error("@gateway-send {0}: opcodes are integers")]
-   Opcode(String),
-   #[error("@discord {0}: write a method and a path starting with /, like GET /users/@me")]
-   Route(String),
-   #[error("@discord {0}: ** only ends a route")]
-   Rest(String),
-   #[error("@fetch: {0} is not a host name")]
-   Host(String),
+   #[error("@permissions: {0} is not one of gateway, discord, http, messages, hooks")]
+   Unknown(String),
+}
+
+/// One thing a plugin reaches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Permission {
+   /// Every gateway event and the message cache.
+   Gateway,
+   /// Any `phoenix.discord` request or interceptor, made as the user.
+   Discord,
+   /// `phoenix.fetch` to any host, and images and links from any host.
+   Http,
+   /// Reading and rewriting message and composer text.
+   Messages,
+   /// Host modules, the raw view tree and outgoing gateway frames. Implies the
+   /// rest.
+   Hooks,
+}
+
+impl Permission {
+   #[must_use]
+   pub const fn label(self) -> &'static str {
+      match self {
+         Self::Gateway => "Gateway events",
+         Self::Discord => "Discord API",
+         Self::Http => "Web requests",
+         Self::Messages => "Messages",
+         Self::Hooks => "Hooks",
+      }
+   }
+
+   #[must_use]
+   pub const fn summary(self) -> &'static str {
+      match self {
+         Self::Gateway => "every event and the message cache",
+         Self::Discord => "any request as you",
+         Self::Http => "any host",
+         Self::Messages => "read and rewrite",
+         Self::Hooks => "full access",
+      }
+   }
+}
+
+impl fmt::Display for Permission {
+   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+      formatter.write_str(match self {
+         Self::Gateway => "gateway",
+         Self::Discord => "discord",
+         Self::Http => "http",
+         Self::Messages => "messages",
+         Self::Hooks => "hooks",
+      })
+   }
+}
+
+impl FromStr for Permission {
+   type Err = PermissionError;
+
+   fn from_str(name: &str) -> Result<Self, Self::Err> {
+      match name {
+         "gateway" => Ok(Self::Gateway),
+         "discord" => Ok(Self::Discord),
+         "http" => Ok(Self::Http),
+         "messages" => Ok(Self::Messages),
+         "hooks" => Ok(Self::Hooks),
+         _ => Err(PermissionError::Unknown(name.to_owned())),
+      }
+   }
 }
 
 pub enum Permissions {
    /// The debug shell's prompt, which reaches everything.
    Console,
-   Declared(Declared),
+   Declared(BTreeSet<Permission>),
 }
 
-#[derive(Default)]
-pub struct Declared {
-   gateway:      BTreeSet<String>,
-   gateway_send: BTreeSet<u32>,
-   discord:      Vec<Route>,
-   fetch:        Vec<Host>,
-   whole:        BTreeSet<Namespace>,
-}
+impl FromStr for Permissions {
+   type Err = PermissionError;
 
-/// The namespaces a plugin reaches whole or not at all.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Namespace {
-   Stores,
-   Messages,
-   Bridge,
-   UiTree,
-}
-
-impl Namespace {
-   const fn key(self) -> &'static str {
-      match self {
-         Self::Stores => "stores",
-         Self::Messages => "messages",
-         Self::Bridge => "bridge",
-         Self::UiTree => "ui-tree",
+   fn from_str(source: &str) -> Result<Self, Self::Err> {
+      let mut declared = BTreeSet::new();
+      for (key, value) in banner(source) {
+         if key == "permissions" {
+            for name in value.split_whitespace() {
+               declared.insert(name.parse()?);
+            }
+         }
       }
+      Ok(Self::Declared(declared))
    }
 }
 
@@ -341,356 +379,36 @@ impl<'de> Visitor<'de> for Strings<'_> {
    }
 }
 
-struct Route {
-   method:   Option<String>,
-   segments: Vec<Segment>,
-}
-
-/// One thing a plugin reaches, as its settings page lists it.
-#[derive(Clone, Debug)]
-pub enum Grant {
-   Events(Vec<String>),
-   GatewaySend(Vec<u32>),
-   Discord(String),
-   Fetch(Vec<String>),
-   Stores,
-   Messages,
-   Bridge,
-   UiTree,
-}
-
-impl Grant {
-   #[must_use]
-   pub const fn label(&self) -> &'static str {
-      match self {
-         Self::Events(_) => "Gateway events",
-         Self::GatewaySend(_) => "Gateway sends",
-         Self::Discord(_) => "Discord API",
-         Self::Fetch(_) => "Web hosts",
-         Self::Stores => "Message cache",
-         Self::Messages => "Outgoing messages",
-         Self::Bridge => "Host modules",
-         Self::UiTree => "Screen contents",
-      }
-   }
-}
-
-impl fmt::Display for Grant {
-   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-      match self {
-         Self::Events(names) | Self::Fetch(names) => formatter.write_str(&names.join(", ")),
-         Self::GatewaySend(ops) => {
-            let ops = ops.iter().map(u32::to_string).collect::<Vec<_>>();
-            write!(formatter, "opcode {}", ops.join(", "))
-         },
-         Self::Discord(route) => formatter.write_str(route),
-         Self::Stores => formatter.write_str("read"),
-         Self::Messages => formatter.write_str("read and rewrite"),
-         Self::Bridge => formatter.write_str("full access"),
-         Self::UiTree => formatter.write_str("read and change"),
-      }
-   }
-}
-
-impl fmt::Display for Route {
-   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-      formatter.write_str(self.method.as_deref().unwrap_or("*"))?;
-      formatter.write_str(" ")?;
-      for segment in &self.segments {
-         formatter.write_str("/")?;
-         match segment {
-            Segment::Literal(literal) => formatter.write_str(literal)?,
-            Segment::Any => formatter.write_str("*")?,
-            Segment::Rest => formatter.write_str("**")?,
-         }
-      }
-      Ok(())
-   }
-}
-
-impl fmt::Display for Host {
-   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-      match self {
-         Self::Exact(name) => formatter.write_str(name),
-         Self::Under(name) => write!(formatter, "*.{name}"),
-      }
-   }
-}
-
-enum Segment {
-   Literal(String),
-   Any,
-   Rest,
-}
-
-enum Host {
-   Exact(String),
-   /// `*.example.com`, which matches `cdn.example.com` and not `example.com`.
-   Under(String),
-}
-
-impl FromStr for Permissions {
-   type Err = PermissionError;
-
-   fn from_str(source: &str) -> Result<Self, Self::Err> {
-      let mut declared = Declared::default();
-      for (key, value) in banner(source) {
-         match key {
-            "gateway" => {
-               declared
-                  .gateway
-                  .extend(value.split_whitespace().map(str::to_owned));
-            },
-            "gateway-send" => {
-               for op in value.split_whitespace() {
-                  let op = op
-                     .parse()
-                     .map_err(|_| PermissionError::Opcode(op.to_owned()))?;
-                  declared.gateway_send.insert(op);
-               }
-            },
-            "discord" => declared.discord.push(value.parse()?),
-            "fetch" => {
-               for host in value.split_whitespace() {
-                  declared.fetch.push(host.parse()?);
-               }
-            },
-            "stores" => _ = declared.whole.insert(Namespace::Stores),
-            "messages" => _ = declared.whole.insert(Namespace::Messages),
-            "bridge" => _ = declared.whole.insert(Namespace::Bridge),
-            "ui-tree" => _ = declared.whole.insert(Namespace::UiTree),
-            _ => {},
-         }
-      }
-      Ok(Self::Declared(declared))
-   }
-}
-
-impl FromStr for Route {
-   type Err = PermissionError;
-
-   fn from_str(value: &str) -> Result<Self, Self::Err> {
-      let invalid = || PermissionError::Route(value.to_owned());
-      let (method, path) = value.split_once(' ').ok_or_else(invalid)?;
-      let path = path.trim().strip_prefix('/').ok_or_else(invalid)?;
-      let parts = path.split('/').collect::<Vec<_>>();
-      let segments = parts
-         .iter()
-         .enumerate()
-         .map(|(index, part)| {
-            match *part {
-               "**" if index + 1 == parts.len() => Ok(Segment::Rest),
-               "**" => Err(PermissionError::Rest(value.to_owned())),
-               "*" => Ok(Segment::Any),
-               literal => Ok(Segment::Literal(literal.to_owned())),
-            }
-         })
-         .collect::<Result<_, _>>()?;
-      Ok(Self {
-         method: (method != "*").then(|| method.to_ascii_uppercase()),
-         segments,
-      })
-   }
-}
-
-impl Route {
-   fn matches(&self, method: &str, path: &str) -> bool {
-      if self
-         .method
-         .as_ref()
-         .is_some_and(|expected| !method.eq_ignore_ascii_case(expected))
-      {
-         return false;
-      }
-      let path = path.split(['?', '#']).next().unwrap_or(path);
-      let Some(path) = path.strip_prefix('/') else {
-         return false;
-      };
-      let lower = path.to_ascii_lowercase();
-      if ["\\", "%2f", "%5c"]
-         .iter()
-         .any(|slash| lower.contains(slash))
-      {
-         return false;
-      }
-      let dots = |part: &str| {
-         let decoded = part.replace("%2e", ".");
-         decoded == "." || decoded == ".."
-      };
-      if lower.split('/').any(dots) {
-         return false;
-      }
-      let mut parts = path.split('/');
-      for segment in &self.segments {
-         match (segment, parts.next()) {
-            (Segment::Rest, _) => return true,
-            (Segment::Any, Some(part)) if !part.is_empty() => {},
-            (Segment::Literal(literal), Some(part)) if literal == part => {},
-            _ => return false,
-         }
-      }
-      parts.next().is_none()
-   }
-}
-
-impl FromStr for Host {
-   type Err = PermissionError;
-
-   fn from_str(value: &str) -> Result<Self, Self::Err> {
-      let host = value.to_ascii_lowercase();
-      let (under, name) = host
-         .strip_prefix("*.")
-         .map_or((false, host.as_str()), |name| (true, name));
-      let valid = name.contains('.')
-         && name.split('.').all(|label| {
-            !label.is_empty()
-               && label
-                  .bytes()
-                  .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-         });
-      if !valid {
-         return Err(PermissionError::Host(value.to_owned()));
-      }
-      let name = name.to_owned();
-      Ok(if under {
-         Self::Under(name)
-      } else {
-         Self::Exact(name)
-      })
-   }
-}
-
-impl Host {
-   fn matches(&self, host: &str) -> bool {
-      match self {
-         Self::Exact(name) => host == name,
-         Self::Under(name) => {
-            host
-               .strip_suffix(name.as_str())
-               .is_some_and(|sub| sub.len() > 1 && sub.ends_with('.'))
-         },
-      }
-   }
-}
-
 impl Permissions {
    /// What the plugin declared. The console declares nothing.
    #[must_use]
-   pub fn grants(&self) -> Vec<Grant> {
-      let Self::Declared(declared) = self else {
-         return Vec::new();
-      };
-      let mut grants = Vec::new();
-      if !declared.gateway.is_empty() {
-         grants.push(Grant::Events(declared.gateway.iter().cloned().collect()));
-      }
-      if !declared.gateway_send.is_empty() {
-         grants.push(Grant::GatewaySend(
-            declared.gateway_send.iter().copied().collect(),
-         ));
-      }
-      grants.extend(
-         declared
-            .discord
-            .iter()
-            .map(|route| Grant::Discord(route.to_string())),
-      );
-      if !declared.fetch.is_empty() {
-         grants.push(Grant::Fetch(
-            declared.fetch.iter().map(Host::to_string).collect(),
-         ));
-      }
-      grants.extend(declared.whole.iter().map(|namespace| {
-         match namespace {
-            Namespace::Stores => Grant::Stores,
-            Namespace::Messages => Grant::Messages,
-            Namespace::Bridge => Grant::Bridge,
-            Namespace::UiTree => Grant::UiTree,
-         }
-      }));
-      grants
-   }
-
-   #[must_use]
-   pub fn event(&self, name: &str) -> bool {
+   pub fn declared(&self) -> Vec<Permission> {
       match self {
-         Self::Console => true,
-         Self::Declared(declared) => declared.gateway.contains(name),
+         Self::Console => Vec::new(),
+         Self::Declared(declared) => declared.iter().copied().collect(),
       }
    }
 
    #[must_use]
-   pub fn gateway_send(&self, op: u32) -> bool {
-      match self {
-         Self::Console => true,
-         Self::Declared(declared) => declared.gateway_send.contains(&op),
-      }
-   }
-
-   #[must_use]
-   pub fn discord(&self, method: &str, path: &str) -> bool {
+   pub fn allows(&self, permission: Permission) -> bool {
       match self {
          Self::Console => true,
          Self::Declared(declared) => {
-            declared
-               .discord
-               .iter()
-               .any(|route| route.matches(method, path))
+            declared.contains(&permission) || declared.contains(&Permission::Hooks)
          },
       }
    }
 
+   /// Whether the plugin may fetch `url`, an `http(s)` URL.
    #[must_use]
    pub fn fetch(&self, url: &str) -> bool {
-      match self {
-         Self::Console => true,
-         Self::Declared(declared) => {
-            url_hosts(url).is_some_and(|found| {
-               found.iter().all(|host| {
-                  matches!(host, UrlHost::Named(name)
-                     if declared.fetch.iter().any(|allowed| allowed.matches(name)))
-               })
-            })
-         },
-      }
-   }
-
-   #[must_use]
-   pub fn stores(&self) -> bool {
-      self.whole(Namespace::Stores)
-   }
-
-   #[must_use]
-   pub fn messages(&self) -> bool {
-      self.whole(Namespace::Messages)
-   }
-
-   #[must_use]
-   pub fn bridge(&self) -> bool {
-      self.whole(Namespace::Bridge)
-   }
-
-   #[must_use]
-   pub fn ui_tree(&self) -> bool {
-      self.whole(Namespace::UiTree)
-   }
-
-   fn whole(&self, namespace: Namespace) -> bool {
-      match self {
-         Self::Console => true,
-         Self::Declared(declared) => declared.whole.contains(&namespace),
-      }
+      self.allows(Permission::Http) && url_hosts(url).is_some()
    }
 
    /// Whether the plugin may point Discord at `host`.
    #[must_use]
    pub fn host(&self, host: &str) -> bool {
-      match self {
-         Self::Console => true,
-         Self::Declared(declared) => {
-            discord_host(host) || declared.fetch.iter().any(|allowed| allowed.matches(host))
-         },
-      }
+      discord_host(host) || self.allows(Permission::Http)
    }
 
    /// The first host in `found` the plugin may not point Discord at.
@@ -698,11 +416,10 @@ impl Permissions {
       found.iter().find(|host| {
          match host {
             UrlHost::Named(name) => !self.host(name),
-            UrlHost::Unreadable => !matches!(self, Self::Console),
+            UrlHost::Unreadable => !self.allows(Permission::Http),
          }
       })
    }
-
    /// Whether the plugin may draw an image from `uri`. Names like
    /// `res://ic_mana_id` and inline SVG paths load nothing.
    #[must_use]
@@ -751,50 +468,11 @@ impl Permissions {
    /// What `newer` declares that this does not, so an update cannot widen
    /// what a plugin reaches unasked.
    #[must_use]
-   pub fn widened(&self, newer: &Self) -> Vec<String> {
-      let (Self::Declared(old), Self::Declared(new)) = (self, newer) else {
-         return Vec::new();
-      };
-      let routes = old
-         .discord
-         .iter()
-         .map(Route::to_string)
-         .collect::<BTreeSet<_>>();
-      let hosts = old
-         .fetch
-         .iter()
-         .map(Host::to_string)
-         .collect::<BTreeSet<_>>();
-      let mut added = Vec::new();
-      added.extend(
-         new.gateway
-            .difference(&old.gateway)
-            .map(|event| format!("@gateway {event}")),
-      );
-      added.extend(
-         new.gateway_send
-            .difference(&old.gateway_send)
-            .map(|op| format!("@gateway-send {op}")),
-      );
-      added.extend(
-         new.discord
-            .iter()
-            .map(Route::to_string)
-            .filter(|route| !routes.contains(route))
-            .map(|route| format!("@discord {route}")),
-      );
-      added.extend(
-         new.fetch
-            .iter()
-            .map(Host::to_string)
-            .filter(|host| !hosts.contains(host))
-            .map(|host| format!("@fetch {host}")),
-      );
-      added.extend(
-         new.whole
-            .difference(&old.whole)
-            .map(|namespace| format!("@{}", namespace.key())),
-      );
-      added
+   pub fn widened(&self, newer: &Self) -> Vec<Permission> {
+      newer
+         .declared()
+         .into_iter()
+         .filter(|&permission| !self.allows(permission))
+         .collect()
    }
 }

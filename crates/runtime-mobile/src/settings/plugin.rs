@@ -91,7 +91,7 @@ pub fn plugin_sections(index: usize, plugin: &PluginInfo) -> Vec<Tree> {
       plugin
          .permissions
          .iter()
-         .map(|grant| value_row(grant.label(), &grant.to_string()))
+         .map(|permission| value_row(permission.label(), permission.summary()))
          .collect()
    };
    sections.push(section("Permissions", permissions));

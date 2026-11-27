@@ -7,7 +7,10 @@ use phoenix_runtime::{
       checked_icon,
       restart_budget,
    },
-   permissions::Permissions,
+   permissions::{
+      Permission,
+      Permissions,
+   },
 };
 use rquickjs::{
    CatchResultExt,
@@ -174,7 +177,10 @@ pub fn patch_api<'js>(
          move |ctx: Ctx<'js>, function: Function<'js>| on_emoji_pick(&ctx, &name, function),
       )?,
    )?;
-   api.set("ui", ui_object(ctx, plugin, permissions.ui_tree())?)?;
+   api.set(
+      "ui",
+      ui_object(ctx, plugin, permissions.allows(Permission::Hooks))?,
+   )?;
    api.set("commands", commands_object(ctx, plugin)?)
 }
 

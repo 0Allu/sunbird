@@ -28,6 +28,7 @@ use crate::{
    },
    permissions::{
       Links,
+      Permission,
       Permissions,
    },
 };
@@ -211,11 +212,17 @@ fn event_of<'js>(
    sig: &Value<'js>,
    permissions: &Permissions,
 ) -> rquickjs::Result<EventId> {
+   if !permissions.allows(Permission::Gateway) {
+      return Err(Exception::throw_type(
+         ctx,
+         "add gateway to the plugin's // @permissions line",
+      ));
+   }
    ctx.userdata::<Registry<'js>>()
       .ok_or_else(|| Exception::throw_internal(ctx, "no registry"))?
       .handles
       .iter()
-      .find(|(_, name, handle)| handle.as_value() == sig && permissions.event(name))
+      .find(|(_, _, handle)| handle.as_value() == sig)
       .map(|(event, ..)| *event)
       .ok_or_else(|| Exception::throw_type(ctx, "expected a hook point from phoenix.gateway"))
 }
@@ -326,7 +333,7 @@ fn refuse_foreign(ctx: &Ctx<'_>, plugin: &str, json: &str) -> rquickjs::Result<(
    foreign_host(ctx, plugin, json).map_or(Ok(()), |host| {
       Err(Exception::throw_type(
          ctx,
-         &format!("{host}: add it to the plugin's // @fetch line"),
+         &format!("{host}: add http to the plugin's // @permissions line"),
       ))
    })
 }
@@ -337,12 +344,12 @@ pub fn gateway_object<'js>(
    permissions: &Arc<Permissions>,
 ) -> rquickjs::Result<Object<'js>> {
    let gateway = Object::new(ctx.clone())?;
-   for (_, name, handle) in &ctx
-      .userdata::<Registry<'js>>()
-      .ok_or_else(|| Exception::throw_internal(ctx, "no registry"))?
-      .handles
-   {
-      if permissions.event(name) {
+   if permissions.allows(Permission::Gateway) {
+      for (_, name, handle) in &ctx
+         .userdata::<Registry<'js>>()
+         .ok_or_else(|| Exception::throw_internal(ctx, "no registry"))?
+         .handles
+      {
          gateway.set(name.as_str(), handle.clone())?;
       }
    }
@@ -386,10 +393,10 @@ pub fn add_gateway_send_api<'js>(
                "Identify (2) and Resume (6) carry credentials and cannot be hooked",
             ));
          }
-         if !granted.gateway_send(op) {
+         if !granted.allows(Permission::Hooks) {
             return Err(Exception::throw_type(
                &ctx,
-               &format!("add {op} to the plugin's // @gateway-send line"),
+               "add hooks to the plugin's // @permissions line",
             ));
          }
          let id = gateway::register_send_hook(&name, op);

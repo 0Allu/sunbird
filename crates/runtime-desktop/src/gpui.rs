@@ -1844,8 +1844,8 @@ fn render_plugins_tab(
       if plugin.permissions.is_empty() {
          desc_parts.push("No permissions".to_owned());
       } else {
-         let grants = plugin.permissions.iter().map(ToString::to_string);
-         desc_parts.push(format!("Reaches {}", grants.collect::<Vec<_>>().join(", ")));
+         let labels = plugin.permissions.iter().map(|permission| permission.label());
+         desc_parts.push(format!("Reaches {}", labels.collect::<Vec<_>>().join(", ")));
       }
       if let Some(err) = plugin.state.error() {
          desc_parts.push(format!("Error: {err}"));

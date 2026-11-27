@@ -4,8 +4,5 @@ export default {
    author: "amaanq",
    enabled: false,
    unlisted: true,
-   permissions: {
-      gateway: ["messageCreate"],
-      messages: true,
-   },
+   permissions: ["gateway", "messages"],
 } satisfies Phoenix.Manifest;

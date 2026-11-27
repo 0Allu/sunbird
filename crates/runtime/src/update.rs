@@ -7,7 +7,10 @@
 //! ([`crate::Platform::update_loader`]).
 
 use std::{
-   collections::BTreeMap,
+   collections::{
+      BTreeMap,
+      BTreeSet,
+   },
    fs,
    path::Path,
    sync::{
@@ -21,7 +24,7 @@ use std::{
 use crate::{
    Notice,
    permissions::{
-      Declared,
+      Permission,
       Permissions,
    },
 };
@@ -475,8 +478,8 @@ fn update_plugin(name: &str, expected_crc: Option<u32>) -> Result<(), String> {
 
 /// Refuses an update that declares more than the running copy and the
 /// bundled one, since the user agreed only to what those reach. A running
-/// copy that declares nothing was installed before permission lines existed,
-/// when every plugin reached everything, so its update takes what it declares.
+/// copy that declares nothing was installed before the `@permissions` line,
+/// so its update takes what it declares.
 fn same_reach(name: &str, source: &str) -> Result<(), String> {
    let Some(running) = crate::source(name) else {
       return Ok(());
@@ -487,23 +490,27 @@ fn same_reach(name: &str, source: &str) -> Result<(), String> {
    let parse = |copy: &str| {
       copy
          .parse::<Permissions>()
-         .unwrap_or_else(|_| Permissions::Declared(Declared::default()))
+         .unwrap_or_else(|_| Permissions::Declared(BTreeSet::new()))
    };
    let current = parse(&running);
-   if current.grants().is_empty() {
+   if current.declared().is_empty() {
       return Ok(());
    }
    let mut added = current.widened(&newer);
    if let Some(bundled) = crate::bundled_source(name) {
       let past_bundled = parse(&bundled).widened(&newer);
-      added.retain(|grant| past_bundled.contains(grant));
+      added.retain(|permission| past_bundled.contains(permission));
    }
    if added.is_empty() {
       return Ok(());
    }
    Err(format!(
       "the update asks for {}, remove it and install it again from the plugin list to allow that",
-      added.join(", ")
+      added
+         .iter()
+         .map(Permission::to_string)
+         .collect::<Vec<_>>()
+         .join(" ")
    ))
 }
 
