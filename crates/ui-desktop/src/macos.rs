@@ -91,7 +91,7 @@ fn xml_text(text: &str) -> String {
       .replace('>', "&gt;")
 }
 
-fn platform(message: String) -> Error {
+const fn platform(message: String) -> Error {
    Error::Platform { message }
 }
 

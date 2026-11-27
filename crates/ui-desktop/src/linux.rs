@@ -113,7 +113,7 @@ fn autostart_entry() -> Option<PathBuf> {
       .map(|config| config.join("autostart/sunbird.desktop"))
 }
 
-fn platform(message: String) -> Error {
+const fn platform(message: String) -> Error {
    Error::Platform { message }
 }
 
