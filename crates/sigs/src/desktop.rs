@@ -84,7 +84,7 @@ pub fn windows_restart_script(image: &Image<'_>) -> Found<usize> {
 
 /// A function entry [`Image::hook_entry`] can displace: whole instructions
 /// with no RIP-relative operand, at least 14 bytes.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Prologue {
    pub pattern: Pattern,
    pub len:     usize,
@@ -820,11 +820,12 @@ pub const FRIENDS_BADGE: &[u8] = b"dm-friends-badge";
 pub const MESSAGE_REQUESTS_BADGE: &[u8] = b"dm-message-requests-badge";
 
 /// What draws Phoenix's pending friend and message request counts.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct PendingCounts {
    /// The DM list's row badge, `fn(out, id: &str, count: u32, _, _) -> out`,
-   /// which draws [`FRIENDS_BADGE`] and [`MESSAGE_REQUESTS_BADGE`] only.
-   pub badge:           usize,
+   /// which draws [`FRIENDS_BADGE`] and [`MESSAGE_REQUESTS_BADGE`] only. Linux
+   /// builds give each id its own copy of it.
+   pub badges:          Vec<usize>,
    /// `u32 f(&RelationshipStore)`, the incoming friend and game friend
    /// requests the DM list's Friends row and the inbox's Friends tab show.
    pub friend_requests: usize,
@@ -836,11 +837,15 @@ pub struct PendingCounts {
 pub fn pending_counts(image: &Image<'_>) -> Found<PendingCounts> {
    let (friends_call, badge) = badge_call(image, FRIENDS_BADGE)?;
    let (_, requests_badge) = badge_call(image, MESSAGE_REQUESTS_BADGE)?;
-   if badge != requests_badge {
+   let badges = if badge == requests_badge {
+      vec![badge]
+   } else if same_shape(image, badge, requests_badge) {
+      vec![badge, requests_badge]
+   } else {
       return Err(format!(
          "the DM badges are drawn by {badge:#x} and {requests_badge:#x}"
       ));
-   }
+   };
    let friend_requests = count_source(image, friends_call)?;
    function_code(image, friend_requests, "friend requests count")?;
    if !counts_incoming(image, friend_requests) {
@@ -849,9 +854,28 @@ pub fn pending_counts(image: &Image<'_>) -> Found<PendingCounts> {
       ));
    }
    Ok(PendingCounts {
-      badge,
+      badges,
       friend_requests,
    })
+}
+
+/// Whether `first` and `second` run the same instructions, whatever they
+/// branch to or call. Each copy of a generic calls its own copies of others.
+fn same_shape(image: &Image<'_>, first: usize, second: usize) -> bool {
+   let shape = |func: usize| {
+      function_code(image, func, "").map(|code| {
+         phoenix_hook::x86::disasm(code, func, usize::MAX)
+            .into_iter()
+            .map(|line| {
+               match line.target {
+                  Some(_) => line.text.split(' ').next().unwrap_or_default().to_owned(),
+                  None => line.text,
+               }
+            })
+            .collect::<Vec<String>>()
+      })
+   };
+   matches!((shape(first), shape(second)), (Ok(first), Ok(second)) if first == second)
 }
 
 /// `u32 f(&RelationshipStore)`, the number on the Home button.
@@ -978,8 +1002,8 @@ fn count_source(image: &Image<'_>, site: usize) -> Found<usize> {
       let before = lines[..at].iter().rev().find(|prev| prev.text != "nop");
       return match before {
          Some(call) if call.text.starts_with("call ") => {
-            call
-               .target
+            call_target(image, &code[call.addr - func..], call.addr)
+               .map(|(_, target)| target)
                .ok_or_else(|| format!("call at {:#x} has no target", call.addr))
          },
          _ => Err(format!("{reg} at {:#x} is no call's result", line.addr)),
@@ -1025,6 +1049,36 @@ pub fn entry_prologue(image: &Image<'_>, func: usize) -> Found<Prologue> {
       return Ok(Prologue { pattern, len });
    }
    Err(format!("{func:#x} opens with less than a jump's bytes"))
+}
+
+/// How the runtime sends a function's calls to a detour.
+#[derive(Clone, Debug)]
+pub enum HookPoint {
+   /// Its opening instructions move to a trampoline.
+   Entry(Prologue),
+   /// Its opening cannot move, and code only reaches it through these slots.
+   /// The function itself stays callable as the original.
+   Slots(Vec<usize>),
+}
+
+/// [`entry_prologue`], or else the slots every call to `func` reads.
+pub fn hook_point(image: &Image<'_>, func: usize) -> Found<HookPoint> {
+   let entry = match entry_prologue(image, func) {
+      Ok(prologue) => return Ok(HookPoint::Entry(prologue)),
+      Err(err) => err,
+   };
+   if !image.rip_refs(func..func + 1).is_empty() {
+      return Err(entry);
+   }
+   let slots = image
+      .pointers_to(func)
+      .into_iter()
+      .filter(|&slot| !image.rip_refs(slot..slot + 1).is_empty())
+      .collect::<Vec<usize>>();
+   if slots.is_empty() {
+      return Err(format!("{entry}, and no code reads a pointer to it"));
+   }
+   Ok(HookPoint::Slots(slots))
 }
 
 /// Discord's own GPUI and Mana builders the settings page calls.

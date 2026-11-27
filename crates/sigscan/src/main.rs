@@ -538,15 +538,28 @@ fn check(
          }
          let pending = desktop::pending_counts(image);
          let moved = |func: usize| {
-            desktop::entry_prologue(image, func)
-               .map(|prologue| format!("{} ({} bytes moved)", at(func), prologue.len))
+            desktop::hook_point(image, func).map(|point| {
+               match point {
+                  desktop::HookPoint::Entry(prologue) => {
+                     format!("{} ({} bytes moved)", at(func), prologue.len)
+                  },
+                  desktop::HookPoint::Slots(slots) => {
+                     format!("{} (through slots {slots:x?})", at(func))
+                  },
+               }
+            })
          };
          report(
             "pending counts",
             pending.as_ref().map_err(Clone::clone).and_then(|found| {
+               let badges = found
+                  .badges
+                  .iter()
+                  .map(|&badge| moved(badge))
+                  .collect::<Found<Vec<String>>>()?;
                Ok(format!(
-                  "badge {}, friend requests {}",
-                  moved(found.badge)?,
+                  "badges {}, friend requests {}",
+                  badges.join(", "),
                   moved(found.friend_requests)?
                ))
             }),
