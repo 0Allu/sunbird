@@ -2,15 +2,23 @@
 //! Sunbird. This asks, through native dialogs that need none of the patches,
 //! whether to fetch a newer Sunbird, installs its loader over the running one
 //! and restarts Discord through the launcher.
+//!
+//! It also brings the installed launcher up to the site's, for installs from
+//! before launchers replaced themselves.
 
 use std::{
+   collections::BTreeMap,
    path::{
       Path,
       PathBuf,
    },
-   sync::atomic::{
-      AtomicBool,
-      Ordering,
+   sync::{
+      Mutex,
+      PoisonError,
+      atomic::{
+         AtomicBool,
+         Ordering,
+      },
    },
 };
 
@@ -98,6 +106,9 @@ fn run() {
          failed_plugins.join("; ")
       );
    }
+   // An old Windows launcher ignores `--wait-pid` and would find this
+   // Discord still running.
+   refresh_launcher();
    log::info!("recovery: installed Sunbird {version}, restarting");
    if let Err(err) = restart() {
       alert(
@@ -154,6 +165,151 @@ fn spawn_after_exit(launcher: &Path, pid: u32) -> std::io::Result<()> {
       .process_group(0)
       .spawn()
       .map(drop)
+}
+
+/// [`update_launcher`] with the last check's CRC-32s, only logged.
+pub fn refresh_launcher() {
+   match update_launcher(&update::launcher_crcs()) {
+      Ok(true) => log::info!("launcher: replaced with the site's"),
+      Ok(false) => {},
+      Err(err) => log::warn!("launcher: {err}"),
+   }
+}
+
+/// Replaces the installed launcher when the site lists a different one.
+/// True when it did. A loader without the launcher's version file beside it
+/// is a dev build, whose launcher is left alone.
+pub fn update_launcher(crcs: &BTreeMap<String, u32>) -> Result<bool, String> {
+   // The background check and recovery may both get here, and they share the
+   // temporary file names.
+   static ONE: Mutex<()> = Mutex::new(());
+   let Some(&expected) = crcs.get(LAUNCHER) else {
+      return Ok(false);
+   };
+   // A macOS dev build's loader has no path to report.
+   let Ok(loader) = loaded_path() else {
+      return Ok(false);
+   };
+   let home = loader
+      .parent()
+      .ok_or("the loader path has no parent directory")?;
+   if !home.join(STAMP).is_file() {
+      return Ok(false);
+   }
+   let launcher = phoenix_ui_desktop::launcher().ok_or("the Sunbird launcher is not installed")?;
+   let _one = ONE.lock().unwrap_or_else(PoisonError::into_inner);
+   replace_launcher(home, &launcher, expected)
+}
+
+#[cfg(windows)]
+const LAUNCHER: &str = "sunbird-windows-x86_64.exe";
+#[cfg(target_os = "linux")]
+const LAUNCHER: &str = "sunbird-linux.sh";
+#[cfg(target_os = "macos")]
+const LAUNCHER: &str = "sunbird-macos.sh";
+
+#[cfg(windows)]
+fn replace_launcher(_home: &Path, launcher: &Path, expected: u32) -> Result<bool, String> {
+   let have =
+      std::fs::read(launcher).map_err(|err| format!("read {}: {err}", launcher.display()))?;
+   if crc32fast::hash(&have) == expected {
+      return Ok(false);
+   }
+   let bytes = update::download_verified(LAUNCHER, b"MZ", expected)?;
+   swap(launcher, &bytes)?;
+   // Held only when a launcher still runs; its next start removes it then.
+   let _ = std::fs::remove_file(launcher.with_file_name("sunbird.exe.old"));
+   Ok(true)
+}
+
+/// Runs the site's installer with `--launcher-only`, which rewrites the
+/// launcher and records the installer's CRC-32 in `installer.crc`.
+#[cfg(unix)]
+fn replace_launcher(home: &Path, launcher: &Path, expected: u32) -> Result<bool, String> {
+   use std::process::{
+      Command,
+      Stdio,
+   };
+
+   let have = std::fs::read_to_string(home.join("installer.crc")).unwrap_or_default();
+   if have.trim() == expected.to_string() {
+      return Ok(false);
+   }
+   let script = if cfg!(target_os = "macos") {
+      // Sunbird.app in /Applications belongs to the admin who installed it.
+      let contents = launcher.join("Contents");
+      if !writable(&contents) || !writable(&contents.join("MacOS")) {
+         return Ok(false);
+      }
+      contents.join("MacOS/sunbird")
+   } else {
+      launcher.to_path_buf()
+   };
+   let text = std::fs::read_to_string(&script)
+      .map_err(|err| format!("read {}: {err}", script.display()))?;
+   let discord = script_value(&text, "discord")
+      .ok_or_else(|| format!("{} names no Discord", script.display()))?;
+   let bytes = update::download_verified(LAUNCHER, b"#!/bin/sh", expected)?;
+   let tmp = home.join(format!("installer.{}.sh", std::process::id()));
+   std::fs::write(&tmp, &bytes).map_err(|err| format!("write {}: {err}", tmp.display()))?;
+   let mut command = Command::new("/bin/sh");
+   command
+      .arg(&tmp)
+      .arg("--launcher-only")
+      .arg(&discord)
+      // Not this process's loader in the installer and the tools it runs.
+      .env_remove("LD_PRELOAD")
+      .env_remove("DYLD_INSERT_LIBRARIES")
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null());
+   if let Some(site) = script_value(&text, "site") {
+      command.env("SUNBIRD_SITE", site);
+   }
+   let status = command.status();
+   let _ = std::fs::remove_file(&tmp);
+   match status {
+      Ok(status) if status.success() => Ok(true),
+      Ok(status) => Err(format!("the launcher installer failed ({status})")),
+      Err(err) => Err(format!("run the launcher installer: {err}")),
+   }
+}
+
+#[cfg(target_os = "macos")]
+fn writable(dir: &Path) -> bool {
+   use std::os::unix::ffi::OsStrExt as _;
+
+   std::ffi::CString::new(dir.as_os_str().as_bytes()).is_ok_and(|path| {
+      // SAFETY: `path` is NUL-terminated and outlives the call.
+      unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
+   })
+}
+
+#[cfg(target_os = "linux")]
+const fn writable(_dir: &Path) -> bool {
+   true
+}
+
+/// `key`'s value in a launcher `sunbird-{linux,macos}.sh` generated, where
+/// it is written single-quoted, with `'\''` for each quote inside.
+#[cfg(any(unix, test))]
+fn script_value(script: &str, key: &str) -> Option<String> {
+   let mut rest = script
+      .lines()
+      .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))?;
+   let mut value = String::new();
+   while !rest.is_empty() {
+      if let Some(after) = rest.strip_prefix("\\'") {
+         value.push('\'');
+         rest = after;
+         continue;
+      }
+      let inner = rest.strip_prefix('\'')?;
+      let end = inner.find('\'')?;
+      value.push_str(&inner[..end]);
+      rest = &inner[end + 1..];
+   }
+   Some(value)
 }
 
 /// Writes `bytes` beside `dest` and renames it over `dest`. The mapped old
@@ -349,4 +505,33 @@ fn loaded_path() -> Result<PathBuf, String> {
 fn loaded_path() -> Result<PathBuf, String> {
    crate::macos_loader_path()
       .ok_or_else(|| "could not locate the loaded libphoenix.dylib".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+   #[test]
+   fn reads_values_from_generated_launchers() {
+      let linux = "#!/bin/sh\nhome='/home/a/.local/share/sunbird'\nsite='https://assets.sunbird.tools'\n\
+                   fetch() { curl; }\ndiscord='/home/a/Apps/it'\\''s Discord.AppImage'\npids= sunbird=\n";
+      assert_eq!(
+         super::script_value(linux, "discord").as_deref(),
+         Some("/home/a/Apps/it's Discord.AppImage")
+      );
+      assert_eq!(
+         super::script_value(linux, "site").as_deref(),
+         Some("https://assets.sunbird.tools")
+      );
+      let macos = "#!/bin/sh\nhome='/Users/a/Library/Application \
+                   Support/Sunbird'\ndiscord='/Applications/Discord \
+                   Phoenix.app'\ncopy=\"$home/Sunbird.app\"\n      source=$discord\n";
+      assert_eq!(
+         super::script_value(macos, "discord").as_deref(),
+         Some("/Applications/Discord Phoenix.app")
+      );
+      assert_eq!(super::script_value(macos, "missing"), None);
+      assert_eq!(
+         super::script_value("discord=$(q \"$discord\")\n", "discord"),
+         None
+      );
+   }
 }

@@ -556,7 +556,10 @@ impl Platform for Desktop {
       phoenix_ui_desktop::notify("Sunbird ready", Some(&ready_body));
       let config = config::load();
       if config.auto_update {
-         phoenix_runtime::update::check();
+         std::thread::spawn(|| {
+            phoenix_runtime::update::check_and_notify();
+            recovery::refresh_launcher();
+         });
       }
       if !health::snapshot().critical_failures().is_empty() {
          recovery::start();

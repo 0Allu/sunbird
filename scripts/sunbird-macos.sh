@@ -8,6 +8,9 @@
 #   curl -fsSL https://assets.sunbird.tools/plugins/sunbird-macos.sh | sh -s -- "/path/to/Discord Phoenix.app"
 #   curl -fsSL https://assets.sunbird.tools/plugins/sunbird-macos.sh | sh -s -- --uninstall
 #
+# The launcher runs a newer copy of this with --launcher-only, which rewrites
+# Sunbird.app where it is and keeps the loader it has.
+#
 # SUNBIRD_SITE points it at a local server for testing.
 #
 # Phoenix is signed with the hardened runtime, which ignores
@@ -18,8 +21,18 @@ set -eu
 
 site=${SUNBIRD_SITE:-https://assets.sunbird.tools}
 home="$HOME/Library/Application Support/Sunbird"
-# /Applications is writable by admin accounts only.
-if [ -w /Applications ]; then
+launcher_only=
+if [ "${1:-}" = --launcher-only ]; then
+   launcher_only=1
+   shift
+fi
+# /Applications is writable by admin accounts only. A refresh keeps Sunbird.app
+# where it is.
+if [ -n "$launcher_only" ] && [ -d /Applications/Sunbird.app ]; then
+   app=/Applications/Sunbird.app
+elif [ -n "$launcher_only" ] && [ -d "$HOME/Applications/Sunbird.app" ]; then
+   app="$HOME/Applications/Sunbird.app"
+elif [ -w /Applications ]; then
    app=/Applications/Sunbird.app
 else
    app="$HOME/Applications/Sunbird.app"
@@ -108,23 +121,27 @@ q() { printf "'%s'" "$(printf %s "$1" | sed "s/'/'\\\\''/g")"; }
 
 # An earlier install may have used the other folder.
 for other in /Applications/Sunbird.app "$HOME/Applications/Sunbird.app"; do
-   [ "$other" = "$app" ] || rm -rf "$other"
+   [ -n "$launcher_only" ] || [ "$other" = "$app" ] || rm -rf "$other"
 done
 mkdir -p "$home" "$app/Contents/MacOS" "$app/Contents/Resources"
 
 # The launcher brings the loader up to the site's version and the copy up to
 # Discord's before each start, and keeps what it has when offline. Each run
 # downloads and copies to its own name, so two starts at once never use a
-# half-written file.
-cat >"$app/Contents/MacOS/sunbird" <<EOF
+# half-written file. It is written beside and renamed into place, since a
+# running launcher may be what rewrites it.
+cat >"$app/Contents/MacOS/sunbird.new" <<EOF
 #!/bin/sh
 home=$(q "$home")
 site=$(q "$site")
 discord=$(q "$discord")
+app=$(q "$app")
 copy="\$home/Sunbird.app"
 # Bumped when the copy's branding changes, so existing copies are rebuilt.
 brand=4
 fetch() { /usr/bin/curl -fsSL --proto $proto --proto-redir =https "\$@" 2>/dev/null; }
+# CRC-32 as version.json lists it: gzip's trailer holds it, little-endian.
+crc32() { gzip -c <"\$1" | tail -c8 | od -An -N4 -tu4 | tr -d ' \\n'; }
 fail() {
    /usr/bin/osascript -e 'on run argv' -e 'display alert "Sunbird" message (item 1 of argv)' \\
       -e 'end run' -- "\$1" >/dev/null 2>&1
@@ -135,12 +152,29 @@ fail() {
 # Sunbird's settings write this into the runtime's home; a loader that is
 # already here is kept when they turn updates off. --update always checks.
 conf="\${LIBDISCORD_DATA_DIR:-\$HOME/Library/Application Support/libdiscord}/sunbird/launcher.conf"
-version=
+manifest= version=
 if [ "\${1:-}" = --update ] || [ ! -f "\$home/libphoenix.dylib" ] ||
    ! grep -qx 'auto_update=false' "\$conf" 2>/dev/null; then
-   version=\$(fetch --max-time 5 "\$site/version.json" |
-      sed -n 's/.*"loader": *"\([^"]*\)".*/\1/p')
+   manifest=\$(fetch --max-time 5 "\$site/version.json")
+   version=\$(printf '%s\\n' "\$manifest" | sed -n 's/.*"loader": *"\([^"]*\)".*/\1/p')
 fi
+# A changed installer on the site rewrites this launcher, and the new one
+# carries on with this start. Any failure keeps this one.
+crc=\$(printf '%s\\n' "\$manifest" | sed -n 's/.*"sunbird-macos.sh": *\([0-9]*\).*/\1/p')
+if [ -n "\$crc" ] && [ "\${1:-}" != --update ] && [ -z "\${SUNBIRD_SELF_UPDATED:-}" ] &&
+   ! grep -qx 'auto_update=false' "\$conf" 2>/dev/null &&
+   [ -w "\$app/Contents" ] && [ -w "\$app/Contents/MacOS" ] &&
+   [ "\$crc" != "\$(cat "\$home/installer.crc" 2>/dev/null)" ]; then
+   tmp=\$(mktemp "\$home/installer.XXXXXX")
+   if fetch --max-time 30 -o "\$tmp" "\$site/plugins/sunbird-macos.sh" &&
+      [ "\$(head -c 9 "\$tmp")" = '#!/bin/sh' ] && [ "\$(crc32 "\$tmp")" = "\$crc" ] &&
+      SUNBIRD_SITE=\$site sh "\$tmp" --launcher-only "\$discord" >/dev/null 2>&1; then
+      rm -f "\$tmp"
+      exec env SUNBIRD_SELF_UPDATED=1 "\$app/Contents/MacOS/sunbird" "\$@"
+   fi
+   rm -f "\$tmp"
+fi
+unset SUNBIRD_SELF_UPDATED
 if [ -n "\$version" ] && { [ ! -f "\$home/libphoenix.dylib" ] || [ "\$version" != "\$(cat "\$home/version" 2>/dev/null)" ]; }; then
    tmp=\$(mktemp "\$home/libphoenix.dylib.XXXXXX")
    if fetch --max-time 60 -o "\$tmp" "\$site/plugins/libphoenix-macos-arm64.dylib"; then
@@ -261,7 +295,16 @@ if [ -n "\$pids" ] && [ -z "\$sunbird" ]; then
 fi
 exec /usr/bin/open -a "\$copy" --args "\$@"
 EOF
-chmod +x "$app/Contents/MacOS/sunbird"
+chmod +x "$app/Contents/MacOS/sunbird.new"
+mv -f "$app/Contents/MacOS/sunbird.new" "$app/Contents/MacOS/sunbird"
+# The launcher compares this with the site's installer to know when to
+# replace itself. A piped install has no file to hash, so its first start
+# fetches the installer once.
+if [ "${0#*/}" != "$0" ] && [ -f "$0" ]; then
+   gzip -c <"$0" | tail -c8 | od -An -N4 -tu4 | tr -d ' \n' >"$home/installer.crc"
+else
+   rm -f "$home/installer.crc"
+fi
 
 # Sunbird's mark, the dashboard's sun, drawn with AppKit so no image ships.
 make_icon() {
@@ -293,7 +336,10 @@ JS
    rm -rf "$work"
    return $status
 }
-if make_icon "$home/Sunbird.icns"; then
+# A refresh reuses the icon drawn at install.
+if [ -n "$launcher_only" ] && [ -f "$home/Sunbird.icns" ]; then
+   cp "$home/Sunbird.icns" "$app/Contents/Resources/Sunbird.icns"
+elif make_icon "$home/Sunbird.icns"; then
    cp "$home/Sunbird.icns" "$app/Contents/Resources/Sunbird.icns"
 else
    echo "Couldn't draw Sunbird's icon; it keeps a plain one." >&2
@@ -318,6 +364,10 @@ EOF
 /usr/bin/codesign --force --sign - "$app" >/dev/null 2>&1 || true
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app" 2>/dev/null || true
 
+if [ -n "$launcher_only" ] && [ -f "$home/libphoenix.dylib" ]; then
+   echo "Sunbird's launcher is refreshed."
+   exit 0
+fi
 # First download now, so a missing network shows up here rather than as a
 # Discord without Sunbird.
 echo "Downloading Sunbird..."

@@ -627,6 +627,7 @@ dependencies = [
 name = "phoenix-inject"
 version = "0.2.0"
 dependencies = [
+ "crc32fast",
  "misstep",
 ]
 
@@ -667,6 +668,7 @@ dependencies = [
 name = "phoenix-runtime-desktop"
 version = "0.2.0"
 dependencies = [
+ "crc32fast",
  "flub",
  "libc",
  "log",

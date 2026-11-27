@@ -36,23 +36,27 @@ static MARKER: &str = concat!("phoenix-version:", env!("PHOENIX_VERSION"), ";");
 
 #[derive(serde::Deserialize)]
 struct Site {
-   loader:      String,
+   loader:        String,
    #[serde(default)]
-   loader_crcs: BTreeMap<String, u32>,
-   plugins:     BTreeMap<String, u32>,
+   loader_crcs:   BTreeMap<String, u32>,
+   #[serde(default)]
+   launcher_crcs: BTreeMap<String, u32>,
+   plugins:       BTreeMap<String, u32>,
 }
 
 /// What the site has that this install lacks.
 #[derive(Clone)]
 pub struct Update {
    /// The site's version, when it is newer than [`VERSION`].
-   pub loader:      Option<String>,
+   pub loader:        Option<String>,
    /// Expected CRC-32 for each loader binary listed in `version.json`.
-   pub loader_crcs: BTreeMap<String, u32>,
+   pub loader_crcs:   BTreeMap<String, u32>,
+   /// Expected CRC-32 for each desktop launcher listed in `version.json`.
+   pub launcher_crcs: BTreeMap<String, u32>,
    /// Installed plugins whose code differs from the site's.
-   pub plugins:     Vec<String>,
+   pub plugins:       Vec<String>,
    /// Expected CRC-32 for each plugin in [`Self::plugins`].
-   pub plugin_crcs: BTreeMap<String, u32>,
+   pub plugin_crcs:   BTreeMap<String, u32>,
 }
 
 /// A plugin the site offers, as `plugins/index.json` lists it.
@@ -75,6 +79,9 @@ pub enum Catalog {
 
 static CATALOG: Mutex<Catalog> = Mutex::new(Catalog::Unfetched);
 static FOUND: Mutex<Option<Update>> = Mutex::new(None);
+/// The launchers' CRC-32s from the last `version.json`, kept apart from
+/// [`FOUND`] since a launcher refresh alone is no update to tell anyone about.
+static LAUNCHERS: Mutex<BTreeMap<String, u32>> = Mutex::new(BTreeMap::new());
 static PROGRESS: Mutex<Progress> = Mutex::new(Progress::Idle);
 
 /// What the one update slot is doing. Only a [`Slot`] leaves `Idle`.
@@ -221,9 +228,14 @@ fn query() -> Result<Option<Update>, String> {
          plugins.push(plugin.name);
       }
    }
+   LAUNCHERS
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .clone_from(&site.launcher_crcs);
    let update = (loader.is_some() || !plugins.is_empty()).then_some(Update {
       loader,
       loader_crcs: site.loader_crcs,
+      launcher_crcs: site.launcher_crcs,
       plugins,
       plugin_crcs,
    });
@@ -239,6 +251,38 @@ fn query() -> Result<Option<Update>, String> {
 /// away. `Ok(None)` means up to date.
 pub fn check_blocking() -> Result<Option<Update>, String> {
    query()
+}
+
+/// The desktop launchers' CRC-32s from the last check, empty before one.
+#[must_use]
+pub fn launcher_crcs() -> BTreeMap<String, u32> {
+   LAUNCHERS
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .clone()
+}
+
+/// Downloads `plugins/<asset>` and checks that it starts with `magic` and
+/// has CRC-32 `expected_crc`, for files `version.json` lists without a
+/// version marker (the desktop launchers).
+pub fn download_verified(asset: &str, magic: &[u8], expected_crc: u32) -> Result<Vec<u8>, String> {
+   let bytes = crate::fetch::get(&format!("{ASSETS}plugins/{asset}"))
+      .map_err(|err| format!("download {asset}: {err}"))?;
+   verify_asset(asset, magic, expected_crc, &bytes)?;
+   Ok(bytes)
+}
+
+fn verify_asset(asset: &str, magic: &[u8], expected: u32, bytes: &[u8]) -> Result<(), String> {
+   if !bytes.starts_with(magic) {
+      return Err(format!("the downloaded {asset} is not what the site lists"));
+   }
+   let actual = crc32fast::hash(bytes);
+   if actual != expected {
+      return Err(format!(
+         "CRC mismatch for {asset} (got {actual:#x}, expected {expected:#x})"
+      ));
+   }
+   Ok(())
 }
 
 /// Downloads loader `asset` for `version` and checks that it starts with
@@ -260,27 +304,30 @@ pub fn download_loader(
 
 /// Asks the site in the background. Failures (offline) are only logged.
 pub fn check() {
-   thread::spawn(|| {
-      let update = match query() {
-         Ok(Some(update)) => update,
-         Ok(None) => {
-            log::info!("up to date ({VERSION})");
-            return;
-         },
-         Err(err) => {
-            log::info!("update check: {err}");
-            return;
-         },
-      };
-      log::info!(
-         "update available: loader {:?}, plugins {:?}",
-         update.loader,
-         update.plugins
-      );
-      if let Some(platform) = crate::platform() {
-         platform.notify(Notice::UpdateAvailable(&update));
-      }
-   });
+   thread::spawn(check_and_notify);
+}
+
+/// [`check`] on this thread, for callers with more to do once it answers.
+pub fn check_and_notify() {
+   let update = match query() {
+      Ok(Some(update)) => update,
+      Ok(None) => {
+         log::info!("up to date ({VERSION})");
+         return;
+      },
+      Err(err) => {
+         log::info!("update check: {err}");
+         return;
+      },
+   };
+   log::info!(
+      "update available: loader {:?}, plugins {:?}",
+      update.loader,
+      update.plugins
+   );
+   if let Some(platform) = crate::platform() {
+      platform.notify(Notice::UpdateAvailable(&update));
+   }
 }
 
 /// Checks the site on demand for a user click, updating status and showing a
@@ -566,4 +613,54 @@ pub fn adopt_staged(home: &Path, plugins: &Path) {
    }
    let _ = fs::remove_dir_all(&dir);
    log::info!("moved in the plugins staged for {}", version.trim());
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   fn update(loader_crcs: &[(&str, u32)]) -> Update {
+      Update {
+         loader:        None,
+         loader_crcs:   loader_crcs
+            .iter()
+            .map(|&(name, crc)| (name.to_owned(), crc))
+            .collect(),
+         launcher_crcs: BTreeMap::new(),
+         plugins:       Vec::new(),
+         plugin_crcs:   BTreeMap::new(),
+      }
+   }
+
+   #[test]
+   fn reads_launcher_crcs() {
+      let site = serde_json::from_str::<Site>(
+         r#"{"loader": "1", "launcher_crcs": {"sunbird-linux.sh": 42}, "plugins": {}}"#,
+      )
+      .unwrap();
+      assert_eq!(site.launcher_crcs.get("sunbird-linux.sh"), Some(&42));
+      let old = serde_json::from_str::<Site>(r#"{"loader": "1", "plugins": {}}"#).unwrap();
+      assert!(old.launcher_crcs.is_empty() && old.loader_crcs.is_empty());
+   }
+
+   #[test]
+   fn verifies_assets() {
+      let script = b"#!/bin/sh\necho hi\n";
+      let crc = crc32fast::hash(script);
+      assert!(verify_asset("a.sh", b"#!/bin/sh", crc, script).is_ok());
+      assert!(verify_asset("a.sh", b"#!/bin/sh", crc ^ 1, script).is_err());
+      assert!(verify_asset("a.sh", b"MZ", crc, script).is_err());
+   }
+
+   #[test]
+   fn verifies_loaders() {
+      let dll = b"MZ...phoenix-version:2026.1-abc;...";
+      let crc = crc32fast::hash(dll);
+      let listed = update(&[("phoenix-windows-x86_64.dll", crc)]);
+      assert!(verify_loader("phoenix-windows-x86_64.dll", "2026.1-abc", dll, &listed).is_ok());
+      assert!(verify_loader("phoenix-windows-x86_64.dll", "2026.2-def", dll, &listed).is_err());
+      assert!(verify_loader("libphoenix-linux-x86_64.so", "2026.1-abc", dll, &listed).is_err());
+      let wrong = update(&[("phoenix-windows-x86_64.dll", crc ^ 1)]);
+      assert!(verify_loader("phoenix-windows-x86_64.dll", "2026.1-abc", dll, &wrong).is_err());
+   }
 }

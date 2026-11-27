@@ -4,7 +4,7 @@
 //        node web/tools/bundle-plugins.ts --out <dir> [name...]   bundles only, unlisted ones too, for dev builds
 // The bundles are not committed: CI runs this for the `site` release that sunbird-tools/site deploys.
 // It also writes web/version.json, what the site ships, for the runtime's update check (crates/runtime/src/update.rs):
-// the loader's baked version and each plugin bundle's CRC-32.
+// the loader's baked version and the CRC-32 of each loader, desktop launcher and plugin bundle.
 // The native artifacts next to them come from `nu scripts/site.nu web`, which CI also runs:
 //   libphoenix-{arm64,armv7}.so and libshadowhook_nothing-{arm64,armv7}.so. The site job adds
 //   libphoenix-ios.dylib from the macOS ios workflow.
@@ -73,12 +73,18 @@ if (existsSync(so)) {
   const loader = readFileSync(so, 'latin1').match(/phoenix-version:([\w.-]+);/)?.[1] ?? '0';
   const loader_crcs = Object.fromEntries(
     readdirSync(out)
-      .filter((name) => /^libphoenix-.*\.(so|dylib)$/.test(name))
+      .filter((name) => /^(libphoenix-.*\.(so|dylib)|phoenix-.*\.dll)$/.test(name))
       .sort()
       .map((name) => [name, crc32(readFileSync(`${out}${name}`))]),
   );
+  // The desktop launchers compare these with their own copy and replace themselves before starting Discord.
+  const launcher_crcs = Object.fromEntries(
+    ['sunbird-linux.sh', 'sunbird-macos.sh', 'sunbird-windows-x86_64.exe']
+      .filter((name) => existsSync(`${out}${name}`))
+      .map((name) => [name, crc32(readFileSync(`${out}${name}`))]),
+  );
   const plugins = Object.fromEntries(index.map(({ name }) => [name, crc32(readFileSync(`${out}${name}.js`))]));
-  writeFileSync(fileURLToPath(new URL('../version.json', import.meta.url)), JSON.stringify({ loader, loader_crcs, plugins }, null, 2) + '\n');
+  writeFileSync(fileURLToPath(new URL('../version.json', import.meta.url)), JSON.stringify({ loader, loader_crcs, launcher_crcs, plugins }, null, 2) + '\n');
 } else {
   console.log('no libphoenix-arm64.so, leaving web/version.json as it is');
 }
