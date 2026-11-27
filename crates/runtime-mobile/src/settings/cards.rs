@@ -48,9 +48,11 @@ const EASE: Spring = Spring {
 /// spans its card, so one width serves them all.
 static BAR_WIDTH: AtomicU64 = AtomicU64::new(0);
 
-/// Records a bar track's width, and whether it changed.
+/// Records a bar track's width, and whether it is the first, which the bars
+/// drawn before it need a refresh for. Later ones apply on the next render,
+/// so bars of slightly different widths cannot refresh each other forever.
 pub fn measured(width: f64) -> bool {
-   width > 0.0 && BAR_WIDTH.swap(width.to_bits(), Ordering::Relaxed) != width.to_bits()
+   width > 0.0 && BAR_WIDTH.swap(width.to_bits(), Ordering::Relaxed) == 0
 }
 
 pub fn card(kids: Vec<Tree>) -> Tree {

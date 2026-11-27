@@ -32,6 +32,9 @@ use phoenix_runtime::update::{
 /// Where the signed update waits for Android's installer, under the app's
 /// `files` directory, which Discord's `FileProvider` shares.
 const UPDATE_APK: &str = "phoenix-update.apk";
+/// Where a Discord update waits, apart from the loader's so neither updater
+/// overwrites what the other handed to the installer.
+pub const DISCORD_UPDATE_APK: &str = "discord-update.apk";
 
 const LOADER_ASSET: &str = if cfg!(target_arch = "x86_64") {
    "plugins/libphoenix-x86_64.so"
@@ -81,7 +84,7 @@ fn self_update(slot: &Slot) -> Result<(), String> {
    }
 
    slot.step("Signing the update...");
-   let path = update_path().map_err(|err| format!("Self-update failed: {err}"))?;
+   let path = update_path(UPDATE_APK).map_err(|err| format!("Self-update failed: {err}"))?;
    write_update(&base, &loader, &path).map_err(|err| format!("Self-update failed: {err}"))?;
    slot.step("Opening Android's installer...");
    crate::install::open(&path).map_err(|err| format!("Self-update failed: {err}"))
@@ -99,12 +102,13 @@ pub fn download() -> Result<patcher::Library, String> {
       .map_err(|err| format!("Downloaded loader is invalid: {err}"))
 }
 
-/// Where a signed update waits for Android's installer, its directory made.
-pub fn update_path() -> Result<PathBuf, String> {
+/// Where signed update `name` waits for Android's installer, its directory
+/// made.
+pub fn update_path(name: &str) -> Result<PathBuf, String> {
    let state = phoenix_runtime::state().ok_or("phoenix has not started")?;
    let files = crate::install::files_dir().unwrap_or_else(|| state.files_dir());
    fs::create_dir_all(&files).map_err(|err| format!("{}: {err}", files.display()))?;
-   Ok(files.join(UPDATE_APK))
+   Ok(files.join(name))
 }
 
 /// Whether the app runs from split APKs, which sit next to `base`.
@@ -144,10 +148,10 @@ pub fn write_apk(apk: &patcher::Apk<'_>, path: &Path) -> Result<(), String> {
 /// Deletes an update Android's installer has had its chance at, since it is as
 /// big as the app.
 pub fn forget_update(files: &Path) {
-   let _ = fs::remove_file(files.join(UPDATE_APK));
-   if let Some(real) = crate::install::files_dir()
-      && real != files
-   {
-      let _ = fs::remove_file(real.join(UPDATE_APK));
+   let real = crate::install::files_dir().filter(|real| real != files);
+   for dir in [Some(files), real.as_deref()].into_iter().flatten() {
+      for name in [UPDATE_APK, DISCORD_UPDATE_APK] {
+         let _ = fs::remove_file(dir.join(name));
+      }
    }
 }

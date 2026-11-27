@@ -2,7 +2,9 @@
 # Downloads Discord $VERSION's splits from $TRACKER, checks them against the
 # checked-out release and writes discord.json, which phones download and
 # check each split against. Run by .github/workflows/discord.yml inside
-# `nix develop`, after `cargo build --release -p sigscan -p patcher`.
+# `nix develop`, from the release's checkout with `cargo build --release -p
+# sigscan`, and with $PATCHER (default target/release/patcher) the patcher
+# that has `--check-host`.
 set -euo pipefail
 
 : "${VERSION:?}" "${RELEASE:?}" "${TRACKER:?}" "${DISCORD_CERT:?}"
@@ -50,7 +52,7 @@ for abi in arm64_v8a armeabi_v7a; do
    target/release/sigscan "$abi.so" check
 done
 python3 scripts/extract-schema.py splits/base.apk --check
-target/release/patcher --check-host splits/base.apk
+"${PATCHER:-target/release/patcher}" --check-host splits/base.apk
 
 name=$("$tools/aapt2" dump badging splits/base.apk | sed -n "s/.*versionName='\([^']*\)'.*/\1/p" | head -1)
 for split in "${fetched[@]}"; do

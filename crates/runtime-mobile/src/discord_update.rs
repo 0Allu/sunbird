@@ -19,10 +19,6 @@ use std::{
       Mutex,
       MutexGuard,
       PoisonError,
-      atomic::{
-         AtomicBool,
-         Ordering,
-      },
    },
    thread,
    time::Instant,
@@ -190,7 +186,7 @@ static STATE: Mutex<State> = Mutex::new(State::Current);
 /// The installed version's name, from the check.
 static INSTALLED: Mutex<String> = Mutex::new(String::new());
 /// Set by the banner, so the update page opens once Settings shows.
-static OPEN_PAGE: AtomicBool = AtomicBool::new(false);
+static OPEN_PAGE: Mutex<Option<Instant>> = Mutex::new(None);
 
 fn state_mut() -> MutexGuard<'static, State> {
    STATE.lock().unwrap_or_else(PoisonError::into_inner)
@@ -225,14 +221,20 @@ pub fn download_size(build: &Build) -> usize {
 
 /// Whether Settings should open the update page, once.
 pub fn take_open_page() -> bool {
-   OPEN_PAGE.swap(false, Ordering::AcqRel)
+   /// Settings shows well within this after the banner's tap.
+   const FRESH: std::time::Duration = std::time::Duration::from_secs(15);
+   OPEN_PAGE
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .take()
+      .is_some_and(|tapped| tapped.elapsed() < FRESH)
 }
 
 /// Opens Settings, which then shows the update page.
 pub fn open_page() {
-   OPEN_PAGE.store(true, Ordering::Release);
+   *OPEN_PAGE.lock().unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
    if let Err(err) = crate::install::open_in_app("discord://app/settings") {
-      OPEN_PAGE.store(false, Ordering::Release);
+      *OPEN_PAGE.lock().unwrap_or_else(PoisonError::into_inner) = None;
       log::warn!("discord update: opening Settings: {err}");
    }
 }
@@ -266,11 +268,20 @@ pub fn check() {
 }
 
 fn newer() -> Result<Option<Build>, String> {
+   /// Discord's largest split is a few hundred MB.
+   const LARGEST: usize = 1 << 30;
+   // The site ships no x86_64 loader, so such a phone could not finish.
+   if cfg!(target_arch = "x86_64") {
+      return Ok(None);
+   }
    let body = fetch::get(BUILDS).map_err(|err| err.to_string())?;
    let build =
       serde_json::from_slice::<Build>(&body).map_err(|err| format!("discord.json: {err}"))?;
    if !build.url.starts_with("https://") {
       return Err(format!("discord.json: {} is not https", build.url));
+   }
+   if let Some((name, _)) = build.splits.iter().find(|(_, split)| split.size > LARGEST) {
+      return Err(format!("discord.json: {name} is too large"));
    }
    let installed = installed()?;
    *INSTALLED.lock().unwrap_or_else(PoisonError::into_inner) = installed.version_name;
@@ -291,7 +302,7 @@ pub fn start() {
       let mut state = state_mut();
       let build = match &*state {
          State::Handed(build) => {
-            if let Ok(path) = crate::loader::update_path()
+            if let Ok(path) = crate::loader::update_path(crate::loader::DISCORD_UPDATE_APK)
                && path.exists()
             {
                let build = build.clone();
@@ -396,6 +407,7 @@ fn update(build: &Build) -> Result<(), String> {
    let mut apks = Vec::with_capacity(names.len());
    for (at, name) in names.iter().enumerate() {
       progress.at = at;
+      set(State::Running(build.clone(), progress.clone()));
       apks.push(download(build, name, &mut progress)?);
    }
 
@@ -434,7 +446,7 @@ fn update(build: &Build) -> Result<(), String> {
       &mut |line| log::info!("discord update: {line}"),
    )
    .map_err(|err| err.to_string())?;
-   let path = crate::loader::update_path()?;
+   let path = crate::loader::update_path(crate::loader::DISCORD_UPDATE_APK)?;
    crate::loader::write_apk(&apk, &path)?;
    drop(apk);
    drop(apks);
@@ -449,8 +461,13 @@ fn update(build: &Build) -> Result<(), String> {
 /// The loader and the plugin bundle are made anew.
 fn carried(abi: &[u8]) -> Result<Vec<Library>, String> {
    let base = crate::host::base_apk().map_err(|err| err.to_string())?;
-   let map = crate::host::Map::open(&base).map_err(|err| format!("{base}: {err}"))?;
-   let installed = map.bytes();
+   // An install from separate splits keeps its libraries in the ABI split
+   // beside the base.
+   let split = std::path::Path::new(&base)
+      .with_file_name(format!("split_{}.apk", ABI.0))
+      .to_str()
+      .map(str::to_owned)
+      .filter(|split| std::path::Path::new(split).exists());
    let dir = format!("lib/{}/", ABI.1);
    let shipped = zip::read(abi)
       .map_err(|err| err.to_string())?
@@ -458,19 +475,23 @@ fn carried(abi: &[u8]) -> Result<Vec<Library>, String> {
       .map(|record| record.name)
       .collect::<HashSet<String>>();
    let mut libraries = Vec::new();
-   for record in zip::read(installed).map_err(|err| err.to_string())? {
-      let Some(name) = record.name.strip_prefix(&dir) else {
-         continue;
-      };
-      if name == LOADER || name == PLUGIN_BUNDLE || shipped.contains(&record.name) {
-         continue;
+   for path in std::iter::once(base).chain(split) {
+      let map = crate::host::Map::open(&path).map_err(|err| format!("{path}: {err}"))?;
+      let installed = map.bytes();
+      for record in zip::read(installed).map_err(|err| err.to_string())? {
+         let Some(name) = record.name.strip_prefix(&dir) else {
+            continue;
+         };
+         if name == LOADER || name == PLUGIN_BUNDLE || shipped.contains(&record.name) {
+            continue;
+         }
+         let data = record
+            .entry(installed)
+            .data()
+            .map_err(|err| err.to_string())?
+            .into_owned();
+         libraries.push(Library::new(name, data).map_err(|err| format!("{name}: {err}"))?);
       }
-      let data = record
-         .entry(installed)
-         .data()
-         .map_err(|err| err.to_string())?
-         .into_owned();
-      libraries.push(Library::new(name, data).map_err(|err| format!("{name}: {err}"))?);
    }
    Ok(libraries)
 }
@@ -503,7 +524,14 @@ fn wanted(build: &Build) -> Result<Vec<String>, String> {
       .as_deref()
       .and_then(|locale| locale.split(['-', '_']).next())
       .unwrap_or("en");
-   for language in [language, "en"] {
+   // Android names some language splits by their legacy codes.
+   let legacy = match language {
+      "he" => "iw",
+      "id" => "in",
+      "yi" => "ji",
+      other => other,
+   };
+   for language in [language, legacy, "en"] {
       let name = format!("config.{language}");
       if build.splits.contains_key(&name) && !names.contains(&name) {
          names.push(name);

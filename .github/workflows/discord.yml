@@ -42,23 +42,28 @@ jobs:
           if [ "$alpha" -gt "$ready" ]; then
             echo "version=$alpha" >> "$GITHUB_OUTPUT"
           fi
-      # Users run the release's loader, so its locators and tables decide. The
-      # script comes from this commit, which the release may predate.
+      - if: steps.latest.outputs.version != ''
+        uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+      # Users run the release's loader, so its locators and props.in decide.
+      # The checkers come from this commit, which the release may predate: the
+      # scripts, and the patcher whose host name list is this commit's (a
+      # superset of what the release needs).
       - if: steps.latest.outputs.version != ''
         env:
           RELEASE: ${{ steps.latest.outputs.release }}
         run: |
-          cp scripts/verify-discord.sh "$RUNNER_TEMP/"
+          nix develop --command cargo build --locked --release -p patcher
+          cp target/release/patcher scripts/verify-discord.sh scripts/extract-schema.py "$RUNNER_TEMP/"
           git checkout --quiet "$RELEASE"
+          cp "$RUNNER_TEMP/extract-schema.py" scripts/extract-schema.py
       - if: steps.latest.outputs.version != ''
-        uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
-      - if: steps.latest.outputs.version != ''
-        run: nix develop --command cargo build --locked --release -p sigscan -p patcher
+        run: nix develop --command cargo build --locked --release -p sigscan
       - if: steps.latest.outputs.version != ''
         name: download and verify
         env:
           VERSION: ${{ steps.latest.outputs.version }}
           RELEASE: ${{ steps.latest.outputs.release }}
+          PATCHER: ${{ runner.temp }}/patcher
         run: nix develop --command bash "$RUNNER_TEMP/verify-discord.sh"
       - if: steps.latest.outputs.version != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

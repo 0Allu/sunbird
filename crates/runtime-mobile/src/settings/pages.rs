@@ -12,7 +12,6 @@ use phoenix_wire::Value;
 
 use crate::settings::{
    Field,
-   ICON_CHECK,
    ICON_CONSOLE,
    ICON_FILE,
    ICON_PLUGIN,
@@ -125,13 +124,18 @@ fn sunbird_item() -> Option<Tree> {
    let status = phoenix_runtime::update::status();
    let busy = phoenix_runtime::update::busy();
    let Some(update) = found else {
+      // The line can be a success or a failure, so it gets the old warning
+      // color under a neutral heading.
       let status = status?;
-      return Some(heading(
-         badge(GREEN, 44.0, ICON_CHECK),
-         "Sunbird",
-         &status,
-         None,
-      ));
+      return Some(column(12.0, vec![
+         heading(
+            badge(Color::Muted.argb(), 44.0, ICON_RELOAD),
+            "Sunbird",
+            phoenix_runtime::update::VERSION,
+            None,
+         ),
+         line(&status, Color::Warn.argb()),
+      ]));
    };
    let title = update.loader.as_ref().map_or_else(
       || "Plugin updates".to_owned(),
