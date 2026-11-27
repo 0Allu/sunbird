@@ -596,6 +596,7 @@ dependencies = [
  "misstep",
  "object",
  "phoenix-sigs",
+ "phoenix-wire",
  "rsa",
  "serde_json",
  "sha2",
