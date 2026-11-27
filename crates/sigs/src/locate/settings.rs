@@ -1,5 +1,5 @@
-//! Desktop settings page 24, which the runtime turns into Sunbird's page, and
-//! the client's optimistic message delete.
+//! Desktop User Settings: page 24, the sidebar and page changes the runtime
+//! adds Sunbird's entry with, and the client's optimistic message delete.
 
 use std::collections::HashMap;
 
@@ -13,6 +13,7 @@ use crate::{
       Op,
       Reg,
       Step,
+      Value,
    },
    one,
    registry::GatewayRegistry,
@@ -187,6 +188,285 @@ pub fn settings_section(ix: &Index<'_>) -> Found<Section> {
       func: func.start,
       page_offset,
    })
+}
+
+/// The User Settings sidebar's entry list, which Sunbird's row joins.
+///
+/// The sidebar render (the one loader of Log Out's `us-logout` id) moves each
+/// entry into a `Vec` through one push. Log Out's row comes from its own
+/// constructor right before its push, the last one.
+#[derive(Clone, Copy, Debug)]
+pub struct SidebarRows {
+   /// The render, with [`settings_section`]'s arguments.
+   pub sidebar:      usize,
+   /// `fn(page: u8) -> u8`, the page whose row is selected for the active one
+   /// (a subpage's parent). The render only compares its result with its rows'
+   /// pages.
+   pub selected:     usize,
+   /// The pointer the render calls `selected` through, on Linux, where
+   /// `selected` is too short for an entry hook.
+   pub selected_via: Option<usize>,
+   /// `fn(&mut Vec<Entry>, &mut Entry)`, moving the entry in.
+   pub push:         usize,
+   pub entry_size:   usize,
+   /// `fn(out, id_ptr, id_len, &SharedString, icon: u16, selected: bool,
+   /// danger: bool, &closure)`, boxing the closure with Log Out's click.
+   pub row:          usize,
+   /// Log Out's click vtable, stored at `click_offset` after the box.
+   pub click_vtable: usize,
+   pub click_offset: usize,
+   /// Mana's gear icon, Sunbird's.
+   pub gear:         u16,
+}
+
+pub fn settings_sidebar_rows(ix: &Index<'_>, page_offset: usize) -> Found<SidebarRows> {
+   const ID: &[u8] = b"us-logout";
+   // Pages, headers, separators and Log Out all go through the push.
+   const PUSHES: usize = 3;
+
+   let sidebar = ix.literal(ID).one("us-logout load")?;
+   let ids = ix.text(ID);
+   let steps = sidebar.steps();
+   let load = steps
+      .iter()
+      .position(|step| matches!(step.op, Op::Addr { target, .. } if ids.contains(&target)))
+      .ok_or("the sidebar never takes us-logout's address")?;
+   let mut calls = steps[load..].iter().filter_map(|step| {
+      match step.op {
+         Op::Call(target) => Some(target),
+         _ => None,
+      }
+   });
+   let (Some(row), Some(push)) = (calls.next(), calls.next()) else {
+      return Err("Log Out's row is never built and pushed".into());
+   };
+   let pushes = sidebar
+      .calls()
+      .iter()
+      .filter(|&&callee| callee == push)
+      .count();
+   if pushes < PUSHES {
+      return Err(format!("sidebar entry push {push:#x} runs {pushes} times"));
+   }
+   let entry_size = ix
+      .func(push)?
+      .steps()
+      .iter()
+      .find_map(|step| {
+         match step.op {
+            Op::Imm { value, .. } => usize::try_from(value).ok(),
+            _ => None,
+         }
+      })
+      .ok_or("sidebar entry push copies no fixed size")?;
+   let (click_vtable, click_offset) = ix
+      .func(row)?
+      .steps()
+      .windows(2)
+      .filter_map(|pair| {
+         match (pair[0].op, pair[1].op) {
+            (
+               Op::Addr { reg, target },
+               Op::Store {
+                  value: Value::Reg(value),
+                  offset,
+                  size: 8,
+                  ..
+               },
+            ) if value == reg => Some((target, usize::try_from(offset).ok()?)),
+            _ => None,
+         }
+      })
+      .next_back()
+      .ok_or("Log Out's row stores no click vtable")?;
+   if click_offset < 8 || click_offset + 8 > entry_size {
+      return Err(format!(
+         "Log Out's click at {click_offset:#x} is outside its row"
+      ));
+   }
+   let page = isize::try_from(page_offset).map_err(|err| err.to_string())?;
+   // Windows stores a drop flag between the load and the call, Linux doesn't.
+   let selected = steps
+      .iter()
+      .enumerate()
+      .filter(|(_, step)| matches!(step.op, Op::Load { offset, size: 1, .. } if offset == page))
+      .filter_map(|(at, _)| {
+         steps.get(at + 1..at + 3)?.iter().find_map(|step| {
+            match step.op {
+               Op::Call(target) => Some((target, call_slot(ix, step))),
+               _ => None,
+            }
+         })
+      })
+      .collect::<Vec<_>>();
+   let (selected, selected_via) = one("sidebar selected-page map", &selected)?;
+   Ok(SidebarRows {
+      sidebar: sidebar.start,
+      selected,
+      selected_via,
+      push,
+      entry_size,
+      row,
+      click_vtable,
+      click_offset,
+      gear: mana_icon(ix, "Settings")?,
+   })
+}
+
+/// A Mana icon's number, by its name in a table of every icon's name, in
+/// order. Windows has the enum's `Debug` tables (each name's length, then a
+/// pointer to each); Linux has an array of records that start with the name's
+/// pointer and length. Names may share bytes with other strings, so Log Out's
+/// `DoorExit` finds the table by a pointer to it that sits in one.
+fn mana_icon(ix: &Index<'_>, name: &str) -> Found<u16> {
+   const ANCHOR: &[u8] = b"DoorExit";
+   const LONGEST: usize = 64;
+   const RECORD: usize = 0x100;
+
+   let image = ix.image;
+   let width = size_of::<usize>();
+   let points = |slot: usize| {
+      image
+         .read_usize(slot)
+         .is_some_and(|at| image.read(at, 1).is_some())
+   };
+   let text = |at: Option<usize>, len: Option<usize>| image.read(at?, len?);
+   for slot in ix
+      .text(ANCHOR)
+      .into_iter()
+      .flat_map(|at| image.pointers_to(at))
+   {
+      // Windows: a run of pointers right after a run of as many lengths.
+      let mut start = slot;
+      while start.checked_sub(width).is_some_and(points) {
+         start -= width;
+      }
+      let mut end = slot;
+      while points(end) {
+         end += width;
+      }
+      let count = (end - start) / width;
+      if let Some(lengths) = start.checked_sub(count * width) {
+         let name_of = |index: usize| {
+            text(
+               image.read_usize(start + index * width),
+               image.read_usize(lengths + index * width),
+            )
+         };
+         if let Some(index) = named(count, (slot - start) / width, name, name_of) {
+            return u16::try_from(index).map_err(|err| err.to_string());
+         }
+      }
+      // Linux: `(ptr, len, ..)` records a fixed stride apart.
+      let record = |at: usize| {
+         points(at)
+            && image
+               .read_usize(at + width)
+               .is_some_and(|len| (1..=LONGEST).contains(&len))
+      };
+      for stride in (2 * width..=RECORD).step_by(width) {
+         if !record(slot + stride) || !slot.checked_sub(stride).is_some_and(record) {
+            continue;
+         }
+         let mut start = slot;
+         while start.checked_sub(stride).is_some_and(record) {
+            start -= stride;
+         }
+         let mut end = slot;
+         while record(end) {
+            end += stride;
+         }
+         let name_of = |index: usize| {
+            let at = start + index * stride;
+            text(image.read_usize(at), image.read_usize(at + width))
+         };
+         if let Some(index) = named(
+            (end - start) / stride,
+            (slot - start) / stride,
+            name,
+            name_of,
+         ) {
+            return u16::try_from(index).map_err(|err| err.to_string());
+         }
+      }
+   }
+   Err(format!("no Mana icon named {name}"))
+}
+
+/// The pointer an x86 `call [rip + slot]` goes through.
+fn call_slot(ix: &Index<'_>, step: &Step) -> Option<usize> {
+   match step.native {
+      #[cfg(any(target_arch = "x86_64", target_os = "macos"))]
+      Native::X86(iced_x86::Mnemonic::Call) => {
+         let code = ix.image.read(step.at, usize::from(step.len))?;
+         let insn = iced_x86::Decoder::with_ip(64, code, step.at as u64, 0).decode();
+         insn
+            .is_ip_rel_memory_operand()
+            .then(|| usize::try_from(insn.ip_rel_memory_address()).ok())
+            .flatten()
+      },
+      _ => None,
+   }
+}
+
+/// The index of `name` among `count` names, if the one at `found` is the
+/// `DoorExit` that found them and there are enough to be every icon.
+fn named<'a>(
+   count: usize,
+   found: usize,
+   name: &str,
+   name_of: impl Fn(usize) -> Option<&'a [u8]>,
+) -> Option<usize> {
+   const ICONS: usize = 100;
+   if count < ICONS {
+      return None;
+   }
+   if name_of(found)? != b"DoorExit" {
+      return None;
+   }
+   (0..count).find(|&index| name_of(index) == Some(name.as_bytes()))
+}
+
+/// Settings' page-changed handler, `fn(state, cx)`: it reads the page byte
+/// early, and at least three page setters call it right after storing it.
+///
+/// The setters a sidebar row runs store and call unconditionally, so clicking
+/// the page already shown calls it too.
+pub fn settings_page_changed(ix: &Index<'_>, page_offset: usize) -> Found<usize> {
+   // The read is instruction 20 on Win64, after the frame and two field loads.
+   const HEAD: usize = 40;
+   // Setters run one or two calls between the store and the handler's call.
+   const REACH: usize = 16;
+   const SETTERS: usize = 3;
+
+   let offset = isize::try_from(page_offset).map_err(|err| err.to_string())?;
+   let reads = |steps: &[Step]| {
+      steps
+         .iter()
+         .any(|step| matches!(step.op, Op::Load { offset: at, size: 1, .. } if at == offset))
+   };
+   let stores =
+      |step: &Step| matches!(step.op, Op::Store { offset: at, size: 1, .. } if at == offset);
+   let found = ix
+      .heads(HEAD, reads)
+      .into_iter()
+      .filter(|handler| {
+         let setters = handler.callers().into_iter().filter(|setter| {
+            let steps = setter.steps();
+            setter
+               .calls_at()
+               .into_iter()
+               .filter(|&(_, callee)| callee == handler.start)
+               .any(|(site, _)| {
+                  let call = steps.partition_point(|step| step.at < site);
+                  steps[call.saturating_sub(REACH)..call].iter().any(stores)
+               })
+         });
+         setters.count() >= SETTERS
+      })
+      .map(|handler| handler.start)
+      .collect::<Vec<_>>();
+   one("settings page-changed handler", &found)
 }
 
 /// The client's own message deletes, found from the `MESSAGE_DELETE` handler.

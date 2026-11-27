@@ -155,7 +155,7 @@ pub(crate) const X86_CODE: bool = cfg!(all(target_arch = "x86_64", not(target_os
 /// is its function pointer type.
 pub(crate) unsafe fn hook<F: Copy>(
    image: &Image<'static>,
-   pick: fn(Prologues) -> Prologue,
+   pick: impl FnOnce(Prologues) -> Prologue,
    target: usize,
    detour: usize,
    what: &str,
@@ -184,7 +184,7 @@ pub(crate) unsafe fn hook<F: Copy>(
 /// sret ABI, and `F` is its function pointer type.
 pub(crate) unsafe fn hook_sret<F: Copy>(
    image: &Image<'static>,
-   pick: fn(Prologues) -> Prologue,
+   pick: impl FnOnce(Prologues) -> Prologue,
    target: usize,
    detour: usize,
    what: &str,

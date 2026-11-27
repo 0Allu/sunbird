@@ -124,6 +124,36 @@ pub const LOCATORS: &[Locator] = &[
    },
    #[cfg(any(target_arch = "x86_64", target_os = "macos"))]
    Locator {
+      name:     "settings sidebar rows",
+      families: DESKTOP,
+      run:      |ix| {
+         let section = settings::settings_section(ix)?;
+         let rows = settings::settings_sidebar_rows(ix, section.page_offset)?;
+         Ok(format!(
+            "{rows:x?}, hooks {}, {}, {}",
+            hookable(ix, rows.sidebar)?,
+            hookable(ix, rows.selected).or_else(|err| {
+               rows
+                  .selected_via
+                  .map(|slot| format!("through {slot:#x}"))
+                  .ok_or(err)
+            })?,
+            hookable(ix, rows.push)?
+         ))
+      },
+   },
+   #[cfg(any(target_arch = "x86_64", target_os = "macos"))]
+   Locator {
+      name:     "settings page changed",
+      families: DESKTOP,
+      run:      |ix| {
+         settings::settings_section(ix)
+            .and_then(|section| settings::settings_page_changed(ix, section.page_offset))
+            .and_then(|func| hookable(ix, func))
+      },
+   },
+   #[cfg(any(target_arch = "x86_64", target_os = "macos"))]
+   Locator {
       name:     "optimistic delete",
       families: DESKTOP,
       run:      |ix| {
@@ -205,4 +235,17 @@ pub fn emoji_check(ix: &Index<'_>) -> Found<EmojiCheck> {
       intention: usize::try_from(offset)
          .map_err(|_| format!("emoji check at {func:?} reads a negative offset"))?,
    })
+}
+
+/// `func` with the whole instructions an x86-64 entry hook displaces there.
+/// arm64 hooks always displace four.
+#[cfg(any(target_arch = "x86_64", target_os = "macos"))]
+fn hookable(ix: &Index<'_>, func: usize) -> Found<String> {
+   match ix.isa {
+      crate::index::Isa::X86_64 { .. } => {
+         crate::desktop::entry_prologue(ix.image, func)
+            .map(|prologue| format!("{func:#x} (prologue {})", prologue.len))
+      },
+      _ => Ok(format!("{func:#x}")),
+   }
 }

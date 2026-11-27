@@ -180,6 +180,8 @@ pub struct RcFnVtbl {
 
 // SAFETY: vtables contain only function pointers and plain integers.
 unsafe impl Sync for RcFnVtbl {}
+// SAFETY: as above, nothing in it is tied to a thread.
+unsafe impl Send for RcFnVtbl {}
 
 static SWITCH_FN_VTBL: RcFnVtbl = RcFnVtbl {
    drop_in_place: ptr::null(),
