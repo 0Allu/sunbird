@@ -1,3 +1,8 @@
+#[cfg(any(
+   all(target_arch = "x86_64", any(target_os = "linux", windows)),
+   all(target_os = "macos", target_arch = "aarch64"),
+))]
+use std::ptr::NonNull;
 use std::{
    borrow::Cow,
    fmt,
@@ -41,7 +46,7 @@ static PROTECT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// `jmp [rip]` followed by its 8-byte target.
 #[cfg(all(target_arch = "x86_64", any(windows, target_os = "linux")))]
-pub(crate) const ABSOLUTE_JUMP_LEN: usize = 14;
+pub(crate) const ABSOLUTE_JUMP_LEN: usize = crate::x86::ENTRY_JUMP_LEN;
 
 #[cfg(all(target_arch = "x86_64", any(windows, target_os = "linux")))]
 pub(crate) fn absolute_jump(to: usize) -> [u8; ABSOLUTE_JUMP_LEN] {
@@ -1046,58 +1051,6 @@ impl Image<'static> {
       unsafe { self.swap_words(&writes) }.map(drop)
    }
 
-   /// Sends calls to the function at `addr` to `detour` with an absolute jump
-   /// over its first `prologue_len` bytes, and returns a trampoline that runs
-   /// those bytes and jumps back past them: the detour calls the trampoline to
-   /// reach the original. The detour can run as soon as the jump is written,
-   /// before this returns, so hook from `DllMain` or make it cope with a
-   /// trampoline not stored yet.
-   ///
-   /// `prologue` must match at `addr`, cover whole instructions with no
-   /// RIP-relative operands, and span at least the jump's 14 bytes, so the
-   /// displaced instructions run unchanged from the trampoline.
-   ///
-   /// # Safety
-   ///
-   /// `detour` has the function's exact ABI, and no thread runs the
-   /// function's first bytes while they are written.
-   #[cfg(all(target_arch = "x86_64", any(windows, target_os = "linux")))]
-   pub unsafe fn hook_entry(
-      &self,
-      addr: usize,
-      prologue: Pattern,
-      prologue_len: usize,
-      detour: usize,
-   ) -> Result<usize, crate::Error> {
-      let refuse = |message: &str| {
-         crate::Error::Attach {
-            backend: "inline",
-            target:  addr,
-            message: message.to_owned(),
-         }
-      };
-      let displaced = self
-         .read(addr, prologue_len)
-         .ok_or(crate::Error::Unmapped { addr })?;
-      if prologue_len < ABSOLUTE_JUMP_LEN || prologue.find_in(displaced).first() != Some(&0) {
-         return Err(refuse("the prologue does not match"));
-      }
-      if !crate::x86::relocatable(displaced, addr) {
-         return Err(refuse(
-            "the prologue does not end on an instruction, or moves badly",
-         ));
-      }
-      let mut code = displaced.to_vec();
-      code.extend(absolute_jump(addr + prologue_len));
-      let trampoline =
-         alloc_exec(0, code.len()).ok_or_else(|| refuse("no memory for the trampoline"))?;
-      // SAFETY: `trampoline` holds `code.len()` writable bytes.
-      unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), trampoline as *mut u8, code.len()) };
-      // SAFETY: forwarded from the caller.
-      unsafe { self.write_code(addr, &absolute_jump(detour)) }?;
-      Ok(trampoline)
-   }
-
    /// Refuses, since the call-site hook only rewrites x86 calls. The macOS
    /// runtime never reaches it.
    ///
@@ -1201,71 +1154,76 @@ impl Image<'static> {
    }
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(any(
+   all(target_arch = "x86_64", any(target_os = "linux", windows)),
+   all(target_os = "macos", target_arch = "aarch64"),
+))]
 impl Image<'static> {
-   /// Sends calls to the function at `addr` to `detour` with an absolute jump
-   /// over its first four instructions, and returns a trampoline that runs
-   /// them, relocated, and jumps back past them: the detour calls the
-   /// trampoline to reach the original.
-   ///
-   /// `prologue` and `prologue_len` describe x86-64 code and are ignored: the
-   /// displaced instructions are decoded instead. A hook is refused when one
-   /// of them is a literal load, or when the function branches back into
-   /// them.
+   /// Sends calls to the function at `addr` to `detour` through sunhook, and
+   /// returns the entry that runs the original: the detour calls it to reach
+   /// the function. The detour can run as soon as the jump is written, before
+   /// this returns.
    ///
    /// # Safety
    ///
-   /// `detour` has the function's exact ABI, and no thread runs the
-   /// function's first bytes while they are written.
-   pub unsafe fn hook_entry(
-      &self,
-      addr: usize,
-      _prologue: Pattern,
-      _prologue_len: usize,
-      detour: usize,
-   ) -> Result<usize, crate::Error> {
+   /// `detour` has the function's exact ABI, and `addr` starts a function.
+   pub unsafe fn hook_entry(&self, addr: usize, detour: usize) -> Result<usize, crate::Error> {
+      use crate::Hook as _;
+
+      let (target, detour) = self.hook_targets(addr, detour)?;
       // SAFETY: forwarded from the caller.
-      unsafe { self.hook_entry_with(addr, |_| Some(detour)) }
+      let hook = unsafe { crate::Inline::attach(target, detour) }?;
+      Ok(hook.original().addr().get())
    }
 
    /// Like [`Self::hook_entry`], but jumps through a tiny stub that passes the
-   /// trampoline address in `x3` before branching to `detour` (preserving
+   /// original's entry in `x3` before branching to `detour` (preserving
    /// `x0..=x2`), so a shared detour can forward to the specific hooked
    /// function's original entry.
    ///
    /// # Safety
    ///
    /// `detour` expects the function's arguments in `x0..=x2` plus the
-   /// trampoline address in `x3`, and no thread runs the function's first bytes
-   /// while they are written.
+   /// original's entry in `x3`, and `addr` starts a function.
+   #[cfg(target_os = "macos")]
    pub unsafe fn hook_entry_with_fallback(
       &self,
       addr: usize,
       detour: usize,
    ) -> Result<usize, crate::Error> {
-      // SAFETY: forwarded from the caller.
-      unsafe {
-         self.hook_entry_with(addr, |trampoline| {
-            jit_copy(&crate::arm64::pass_x3_stub(detour, trampoline))
-         })
-      }
+      use std::sync::atomic::AtomicPtr;
+
+      use crate::Hook as _;
+
+      let slot = Box::leak(Box::new(AtomicPtr::new(std::ptr::null_mut())));
+      let stub = jit_copy(&crate::arm64::pass_x3_stub(
+         detour,
+         std::ptr::from_ref(slot).addr(),
+      ))
+      .ok_or_else(|| {
+         crate::Error::Attach {
+            backend: "inline",
+            target:  addr,
+            message: "no memory for the detour stub".to_owned(),
+         }
+      })?;
+      let (target, stub) = self.hook_targets(addr, stub)?;
+      // SAFETY: forwarded from the caller, and sunhook fills `slot` before the
+      // jump to the stub is written.
+      let hook = unsafe { crate::Inline::attach_into(target, stub, slot) }?;
+      Ok(hook.original().addr().get())
    }
 
    /// Like [`Self::hook_entry`] for a function returning through `x8`:
    /// `detour` takes the return slot as its first argument, and so does the
-   /// returned original. Both thunks exist before the jump is written.
+   /// returned original.
    ///
    /// # Safety
    ///
    /// `detour` has the function's ABI with the return slot moved first, and
-   /// no thread runs the function's first bytes while they are written.
-   pub unsafe fn hook_sret_entry(
-      &self,
-      addr: usize,
-      _prologue: Pattern,
-      _prologue_len: usize,
-      detour: usize,
-   ) -> Result<usize, crate::Error> {
+   /// `addr` starts a function.
+   #[cfg(target_os = "macos")]
+   pub unsafe fn hook_sret_entry(&self, addr: usize, detour: usize) -> Result<usize, crate::Error> {
       let no_memory = || {
          crate::Error::Attach {
             backend: "inline",
@@ -1274,66 +1232,22 @@ impl Image<'static> {
          }
       };
       let entry = sret_callee(detour).ok_or_else(no_memory)?;
-      let mut original = None;
-      // SAFETY: forwarded from the caller.
-      unsafe {
-         self.hook_entry_with(addr, |trampoline| {
-            original = sret_caller(trampoline);
-            original.map(|_| entry)
-         })
-      }?;
-      original.ok_or_else(no_memory)
+      // SAFETY: forwarded from the caller, `entry` moves `x8` first.
+      let original = unsafe { self.hook_entry(addr, entry) }?;
+      sret_caller(original).ok_or_else(no_memory)
    }
 
-   unsafe fn hook_entry_with(
+   pub(crate) fn hook_targets(
       &self,
       addr: usize,
-      make_entry: impl FnOnce(usize) -> Option<usize>,
-   ) -> Result<usize, crate::Error> {
-      use crate::arm64::{
-         self,
-         Insn,
-         JUMP_LEN,
-      };
-
-      let refuse = |message: &str| {
-         crate::Error::Attach {
-            backend: "inline",
-            target:  addr,
-            message: message.to_owned(),
-         }
-      };
-      let displaced = self
-         .read(addr, JUMP_LEN)
+      detour: usize,
+   ) -> Result<(NonNull<c_void>, NonNull<c_void>), crate::Error> {
+      let target = NonNull::new(addr as *mut c_void)
+         .filter(|_| self.is_code(addr))
          .ok_or(crate::Error::Unmapped { addr })?;
-      let (start, body) = arm64::function(self, addr).ok_or_else(|| refuse("no function here"))?;
-      if start != addr {
-         return Err(refuse("not a function start"));
-      }
-      if body.len() * 4 < JUMP_LEN {
-         return Err(refuse("function shorter than the jump"));
-      }
-      let inside = addr..addr + JUMP_LEN;
-      if body.iter().any(|&(_, insn)| {
-         matches!(
-            insn,
-            Insn::B { target }
-               | Insn::BCond { target, .. }
-               | Insn::Cbz { target, .. }
-               | Insn::Tbz { target, .. }
-               if inside.contains(&target)
-         )
-      }) {
-         return Err(refuse("the function branches into its first instructions"));
-      }
-      let mut code = arm64::relocate(displaced, addr)
-         .ok_or_else(|| refuse("a displaced instruction can't be moved"))?;
-      code.extend(arm64::absolute_jump(addr + JUMP_LEN));
-      let trampoline = jit_copy(&code).ok_or_else(|| refuse("no memory for the trampoline"))?;
-      let entry = make_entry(trampoline).ok_or_else(|| refuse("no memory for the detour stub"))?;
-      // SAFETY: forwarded from the caller.
-      unsafe { self.write_code(addr, &arm64::absolute_jump(entry)) }?;
-      Ok(trampoline)
+      let detour =
+         NonNull::new(detour as *mut c_void).ok_or(crate::Error::Unmapped { addr: detour })?;
+      Ok((target, detour))
    }
 }
 
@@ -1959,9 +1873,10 @@ mod sret_thunk_tests {
       const extern "C" fn receive(a: u64, b: u64, c: u64, fallback: usize) -> u64 {
          a + b * 10 + c * 100 + (fallback as u64)
       }
+      static SLOT: usize = 0x1234_5678;
       let stub = super::jit_copy(&crate::arm64::pass_x3_stub(
          receive as *const () as usize,
-         0x1234_5678,
+         std::ptr::from_ref(&SLOT).addr(),
       ))
       .expect("jit");
       // SAFETY: the stub preserves `x0..=x2` and supplies `fallback` in `x3`.

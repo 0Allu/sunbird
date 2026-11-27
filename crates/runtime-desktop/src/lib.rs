@@ -58,10 +58,7 @@ use std::{
    time::Duration,
 };
 
-use phoenix_hook::{
-   image::Image,
-   x86::Abi,
-};
+use phoenix_hook::image::Image;
 use phoenix_runtime::{
    Error,
    Notice,
@@ -88,10 +85,6 @@ use phoenix_runtime::{
    },
 };
 use phoenix_sigs::{
-   desktop::{
-      Prologue,
-      Prologues,
-   },
    index::{
       Index,
       Isa,
@@ -147,8 +140,8 @@ struct HealthReply {
 /// what they locate stays off.
 pub(crate) const X86_CODE: bool = cfg!(all(target_arch = "x86_64", not(target_os = "macos")));
 
-/// Hooks `target` with `detour` past the prologue `pick` chooses, and returns
-/// the trampoline as `F`, or logs the error after `what`.
+/// Hooks `target` with `detour` and returns the trampoline as `F`, or logs the
+/// error after `what`.
 ///
 /// # Safety
 ///
@@ -156,15 +149,13 @@ pub(crate) const X86_CODE: bool = cfg!(all(target_arch = "x86_64", not(target_os
 /// is its function pointer type.
 pub(crate) unsafe fn hook<F: Copy>(
    image: &Image<'static>,
-   pick: impl FnOnce(Prologues) -> Prologue,
    target: usize,
    detour: usize,
    what: &str,
 ) -> Option<F> {
    const { assert!(size_of::<F>() == size_of::<usize>()) };
-   let prologue = pick(Prologues::of(Abi::of(image)));
    // SAFETY: forwarded from the caller.
-   match unsafe { image.hook_entry(target, prologue.pattern, prologue.len, detour) } {
+   match unsafe { image.hook_entry(target, detour) } {
       // SAFETY: the trampoline runs `target`'s displaced instructions, so it
       // has `F`'s ABI.
       Ok(trampoline) => Some(unsafe { std::mem::transmute_copy::<usize, F>(&trampoline) }),
@@ -185,19 +176,17 @@ pub(crate) unsafe fn hook<F: Copy>(
 /// sret ABI, and `F` is its function pointer type.
 pub(crate) unsafe fn hook_sret<F: Copy>(
    image: &Image<'static>,
-   pick: impl FnOnce(Prologues) -> Prologue,
    target: usize,
    detour: usize,
    what: &str,
 ) -> Option<F> {
    const { assert!(size_of::<F>() == size_of::<usize>()) };
-   let prologue = pick(Prologues::of(Abi::of(image)));
    // SAFETY: forwarded from the caller.
    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-   let hooked = unsafe { image.hook_sret_entry(target, prologue.pattern, prologue.len, detour) };
+   let hooked = unsafe { image.hook_sret_entry(target, detour) };
    // SAFETY: forwarded from the caller.
    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-   let hooked = unsafe { image.hook_entry(target, prologue.pattern, prologue.len, detour) };
+   let hooked = unsafe { image.hook_entry(target, detour) };
    let orig = match hooked {
       Ok(orig) => orig,
       Err(err) => {

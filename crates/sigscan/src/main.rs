@@ -272,16 +272,12 @@ fn check(
                desktop::windows_restart_script(image).map(at),
             );
          }
-         let prologues = desktop::Prologues::of(abi);
          let http = DesktopHttpTransport::locate(image);
          report(
             "http transport",
             http.as_ref().map_err(Clone::clone).and_then(|http| {
-               prologues
-                  .frame
-                  .at(image, http.send_fn)
-                  .then(|| format!("{} request {:x?}", at(http.send_fn), http.request))
-                  .ok_or_else(|| "send prologue changed".to_owned())
+               desktop::entry_moved(image, http.send_fn)
+                  .map(|_| format!("{} request {:x?}", at(http.send_fn), http.request))
             }),
          );
          report(
@@ -540,8 +536,8 @@ fn check(
          let moved = |func: usize| {
             desktop::hook_point(image, func).map(|point| {
                match point {
-                  desktop::HookPoint::Entry(prologue) => {
-                     format!("{} ({} bytes moved)", at(func), prologue.len)
+                  desktop::HookPoint::Entry(moved) => {
+                     format!("{} ({moved} bytes moved)", at(func))
                   },
                   desktop::HookPoint::Slots(slots) => {
                      format!("{} (through slots {slots:x?})", at(func))

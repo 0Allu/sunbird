@@ -279,7 +279,6 @@ fn hook_section(image: &Image<'static>, section: Found<locate::Section>) -> Opti
    let orig = unsafe {
       crate::hook_sret::<RenderFn>(
          image,
-         |pro| pro.frame,
          section.func,
          section_detour as *const () as usize,
          "desktop settings: section hook failed",
@@ -326,9 +325,9 @@ fn install_entry(image: &Image<'static>, ix: &Index<'_>, page_offset: usize) -> 
       log::warn!("desktop settings: Log Out's click captures {size:#x} bytes");
       return false;
    }
-   let (Some(push_entry), Some(changed_entry)) = (
-      found(phoenix_sigs::desktop::entry_prologue(image, rows.push)),
-      found(phoenix_sigs::desktop::entry_prologue(image, changed)),
+   let (Some(_), Some(_)) = (
+      found(phoenix_sigs::desktop::entry_moved(image, rows.push)),
+      found(phoenix_sigs::desktop::entry_moved(image, changed)),
    ) else {
       return false;
    };
@@ -353,7 +352,6 @@ fn install_entry(image: &Image<'static>, ix: &Index<'_>, page_offset: usize) -> 
    let Some(orig) = (unsafe {
       crate::hook::<PageChangedFn>(
          image,
-         |_| changed_entry,
          changed,
          page_changed_detour as *const () as usize,
          "desktop settings: page-changed hook failed",
@@ -366,7 +364,6 @@ fn install_entry(image: &Image<'static>, ix: &Index<'_>, page_offset: usize) -> 
    let Some(orig) = (unsafe {
       crate::hook::<PushFn>(
          image,
-         |_| push_entry,
          rows.push,
          push_detour as *const () as usize,
          "desktop settings: sidebar push hook failed",
@@ -388,8 +385,7 @@ fn install_entry(image: &Image<'static>, ix: &Index<'_>, page_offset: usize) -> 
 /// Hooks the selected-page map, then the sidebar render that has it select no
 /// page row while Sunbird is open. The map's hook alone changes nothing.
 fn hook_unselect(image: &Image<'static>, rows: &locate::SidebarRows) -> bool {
-   let Some(sidebar_entry) = found(phoenix_sigs::desktop::entry_prologue(image, rows.sidebar))
-   else {
+   let Some(_) = found(phoenix_sigs::desktop::entry_moved(image, rows.sidebar)) else {
       return false;
    };
    let Some(orig) = hook_selected(image, rows) else {
@@ -401,7 +397,6 @@ fn hook_unselect(image: &Image<'static>, rows: &locate::SidebarRows) -> bool {
    let Some(orig) = (unsafe {
       crate::hook_sret::<RenderFn>(
          image,
-         |_| sidebar_entry,
          rows.sidebar,
          sidebar_detour as *const () as usize,
          "desktop settings: sidebar hook failed",
@@ -418,16 +413,15 @@ fn hook_unselect(image: &Image<'static>, rows: &locate::SidebarRows) -> bool {
 fn hook_selected(image: &Image<'static>, rows: &locate::SidebarRows) -> Option<SelectedFn> {
    let detour = selected_detour as *const () as usize;
    match (
-      phoenix_sigs::desktop::entry_prologue(image, rows.selected),
+      phoenix_sigs::desktop::entry_moved(image, rows.selected),
       rows.selected_via,
    ) {
-      (Ok(entry), _) => {
+      (Ok(_), _) => {
          // SAFETY: runs from `prepare` before Discord's threads; the detour has
          // the map's `fn(u8) -> u8` ABI.
          unsafe {
             crate::hook::<SelectedFn>(
                image,
-               |_| entry,
                rows.selected,
                detour,
                "desktop settings: selected-page hook failed",

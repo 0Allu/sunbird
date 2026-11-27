@@ -28,9 +28,7 @@ android_logger          = { default-features = false, version = "0.15" }
 crc32fast               = "1"
 flub                    = "0.1"
 iced-x86                = { default-features = false, features = [
-  "block_encoder",
   "decoder",
-  "encoder",
   "instr_info",
   "intel",
   "std"

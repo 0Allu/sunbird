@@ -243,8 +243,8 @@ pub fn emoji_check(ix: &Index<'_>) -> Found<EmojiCheck> {
 fn hookable(ix: &Index<'_>, func: usize) -> Found<String> {
    match ix.isa {
       crate::index::Isa::X86_64 { .. } => {
-         crate::desktop::entry_prologue(ix.image, func)
-            .map(|prologue| format!("{func:#x} (prologue {})", prologue.len))
+         crate::desktop::entry_moved(ix.image, func)
+            .map(|moved| format!("{func:#x} ({moved} bytes moved)"))
       },
       _ => Ok(format!("{func:#x}")),
    }

@@ -125,9 +125,7 @@ unsafe fn hook(image: &Image<'static>, func: Found<usize>, detour: usize) -> Opt
    let hooked = func.and_then(|func| {
       let original = match desktop::hook_point(image, func)? {
          // SAFETY: forwarded from the caller.
-         HookPoint::Entry(prologue) => unsafe {
-            image.hook_entry(func, prologue.pattern, prologue.len, detour)
-         },
+         HookPoint::Entry(_) => unsafe { image.hook_entry(func, detour) },
          HookPoint::Slots(slots) => {
             let writes = slots
                .iter()

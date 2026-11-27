@@ -1819,7 +1819,6 @@ pub fn install(image: &Image<'static>) {
    let Some(orig) = (unsafe {
       crate::hook_sret::<OverlayRenderFn>(
          image,
-         |pro| pro.frame,
          found.overlay_render,
          overlay_render_detour as *const () as usize,
          "desktop modal: overlay render hook failed",
@@ -1860,7 +1859,6 @@ fn install_settings_layer(image: &Image<'static>) {
    if let Some(orig) = unsafe {
       crate::hook_sret::<SettingsLayerFn>(
          image,
-         |pro| pro.frame,
          func,
          settings_layer_detour as *const () as usize,
          "desktop modal: Settings layer hook failed",

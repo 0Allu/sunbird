@@ -99,7 +99,7 @@ impl Prologue {
    }
 }
 
-/// The prologues of the functions the runtime hooks.
+/// The prologues locators tell functions apart by.
 #[derive(Clone, Copy)]
 pub struct Prologues {
    /// `MessageRow::render`, `build_message_body` and `MessageContextMenu`.
@@ -107,12 +107,8 @@ pub struct Prologues {
    /// `host::section`, `Workspace::render_overlays`, `Store::delete_message`
    /// and `ReqwestTransport::send`.
    pub frame:       Prologue,
-   pub media_fetch: Prologue,
    /// The asset loader, [`asset_load`].
    pub asset_load:  Prologue,
-   /// `getEmojiUnavailableReason`, a leaf: its first four instructions on
-   /// Win64, five on System V, up to the `jne`.
-   pub emoji_check: Prologue,
    /// READY's parse, [`ready_parse`]. Only seen on Win64 so far.
    pub ready_parse: Option<Prologue>,
    /// [`ready_text`], Win64 only.
@@ -139,17 +135,9 @@ impl Prologues {
                   pattern: FRAME_PROLOGUE,
                   len:     FRAME_PROLOGUE_LEN,
                },
-               media_fetch: Prologue {
-                  pattern: MEDIA_FETCH_PROLOGUE,
-                  len:     MEDIA_FETCH_PROLOGUE_LEN,
-               },
                asset_load:  Prologue {
                   pattern: MEDIA_FETCH_PROLOGUE,
                   len:     MEDIA_FETCH_PROLOGUE_LEN,
-               },
-               emoji_check: Prologue {
-                  pattern: Pattern::new("44 0F B6 ?? ?? B0 03 45 89 ?? 41 83 ?? 02"),
-                  len:     14,
                },
                // `push rbp; push rsi; sub rsp, imm32; lea rbp, [rsp + imm32]`.
                ready_parse: Some(Prologue {
@@ -166,14 +154,9 @@ impl Prologues {
             Self {
                row:         SYSV_FRAME,
                frame:       SYSV_FRAME,
-               media_fetch: SYSV_FRAME,
                // Four pushes and `sub rsp, imm32`.
                asset_load:  Prologue {
                   pattern: Pattern::new("41 57 41 56 41 54 53 48 81 EC ?? ?? ?? ??"),
-                  len:     14,
-               },
-               emoji_check: Prologue {
-                  pattern: Pattern::new("0F B6 ?? ?? B0 03 89 ?? 83 ?? 02 83 ?? 0E"),
                   len:     14,
                },
                ready_parse: None,
@@ -1022,49 +1005,28 @@ fn reg32_name(register: Register) -> String {
    }
 }
 
-/// The `jmp [rip]` and 8-byte target [`Image::hook_entry`] writes.
-const ENTRY_JUMP_LEN: usize = 14;
-
-/// The whole instructions opening `func` that an absolute jump covers, for a
-/// hook on a function no fixed prologue describes.
-pub fn entry_prologue(image: &Image<'_>, func: usize) -> Found<Prologue> {
-   let head = image
-      .read(func, 32)
-      .ok_or_else(|| format!("{func:#x} is unmapped"))?;
-   let mut len = 0;
-   for line in phoenix_hook::x86::disasm(head, func, head.len()) {
-      len += line.len;
-      if len < ENTRY_JUMP_LEN {
-         continue;
-      }
-      if !phoenix_hook::x86::relocatable(&head[..len], func) {
-         return Err(format!("{func:#x} opens with code that cannot move"));
-      }
-      let hex = head[..len]
-         .iter()
-         .map(|byte| format!("{byte:02X}"))
-         .collect::<Vec<_>>()
-         .join(" ");
-      let pattern = Pattern::leak(hex).ok_or("prologue bytes make no pattern")?;
-      return Ok(Prologue { pattern, len });
-   }
-   Err(format!("{func:#x} opens with less than a jump's bytes"))
+/// How many bytes of `func`'s opening `Image::hook_entry` moves to a
+/// trampoline, or why it cannot.
+pub fn entry_moved(image: &Image<'_>, func: usize) -> Found<usize> {
+   phoenix_hook::x86::displaced(image, func)
+      .map(|displaced| displaced.iter().map(iced_x86::Instruction::len).sum())
+      .map_err(|err| format!("{func:#x}: {err}"))
 }
 
 /// How the runtime sends a function's calls to a detour.
 #[derive(Clone, Debug)]
 pub enum HookPoint {
-   /// Its opening instructions move to a trampoline.
-   Entry(Prologue),
+   /// Its opening's this many bytes move to a trampoline.
+   Entry(usize),
    /// Its opening cannot move, and code only reaches it through these slots.
    /// The function itself stays callable as the original.
    Slots(Vec<usize>),
 }
 
-/// [`entry_prologue`], or else the slots every call to `func` reads.
+/// [`entry_moved`], or else the slots every call to `func` reads.
 pub fn hook_point(image: &Image<'_>, func: usize) -> Found<HookPoint> {
-   let entry = match entry_prologue(image, func) {
-      Ok(prologue) => return Ok(HookPoint::Entry(prologue)),
+   let entry = match entry_moved(image, func) {
+      Ok(moved) => return Ok(HookPoint::Entry(moved)),
       Err(err) => err,
    };
    if !image.rip_refs(func..func + 1).is_empty() {
@@ -3665,11 +3627,6 @@ pub struct LinuxPrimaryDisplay {
    pub primary_display: usize,
    pub displays:        usize,
 }
-
-pub const LINUX_PRIMARY_DISPLAY_PROLOGUE: Prologue = Prologue {
-   pattern: Pattern::new("41 57 41 56 53 48 83 EC ?? 48 B8 FF FF FF FF FF FF FF 7F"),
-   len:     19,
-};
 
 pub fn linux_primary_display(image: &Image<'_>) -> Found<LinuxPrimaryDisplay> {
    const PRIMARY: Pattern = Pattern::new(

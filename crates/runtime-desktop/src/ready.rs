@@ -9,10 +9,7 @@ use std::sync::{
    PoisonError,
 };
 
-use phoenix_hook::{
-   image::Image,
-   x86::Abi,
-};
+use phoenix_hook::image::Image;
 use phoenix_runtime::gateway;
 use phoenix_sigs::desktop::{
    self,
@@ -54,19 +51,9 @@ fn install_text(image: &Image<'static>, parse: usize) {
          return;
       },
    };
-   let Some(prologue) = desktop::Prologues::of(Abi::of(image)).ready_text else {
-      return;
-   };
    // SAFETY: runs before Discord's threads, and the detour has the parse's
    // ABI.
-   let trampoline = match unsafe {
-      image.hook_entry(
-         func,
-         prologue.pattern,
-         prologue.len,
-         text_ready as *const () as usize,
-      )
-   } {
+   let trampoline = match unsafe { image.hook_entry(func, text_ready as *const () as usize) } {
       Ok(trampoline) => trampoline,
       Err(err) => {
          log::warn!("ready: {err}");
@@ -87,23 +74,16 @@ fn install_session(image: &Image<'static>, parse: usize) {
          return;
       },
    };
-   let prologue = desktop::Prologues::of(Abi::of(image)).row;
    // SAFETY: runs before Discord's threads, and the detour has the handler's
    // ABI.
-   let trampoline = match unsafe {
-      image.hook_entry(
-         session.func,
-         prologue.pattern,
-         prologue.len,
-         session_ready as *const () as usize,
-      )
-   } {
-      Ok(trampoline) => trampoline,
-      Err(err) => {
-         log::warn!("ready: {err}");
-         return;
-      },
-   };
+   let trampoline =
+      match unsafe { image.hook_entry(session.func, session_ready as *const () as usize) } {
+         Ok(trampoline) => trampoline,
+         Err(err) => {
+            log::warn!("ready: {err}");
+            return;
+         },
+      };
    // SAFETY: the trampoline replays the displaced prologue and continues in
    // the handler.
    let original = unsafe { std::mem::transmute::<usize, SessionFn>(trampoline) };
