@@ -7,7 +7,10 @@ use phoenix_ui_mobile::{
    Prop,
    Props,
    ViewKind,
-   motion::Worklet,
+   motion::{
+      Spring,
+      Worklet,
+   },
    set_prop,
 };
 use phoenix_wire::Value;
@@ -36,6 +39,7 @@ pub struct Animate {
    pub other:   Props,
    /// Set when the node starts at `other` and springs to its own props.
    pub flipped: bool,
+   pub spring:  Spring,
 }
 
 impl Tree {

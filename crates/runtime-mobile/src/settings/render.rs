@@ -6,10 +6,7 @@ use phoenix_ui_mobile::{
    Op,
    Prop,
    Props,
-   motion::{
-      self,
-      Spring,
-   },
+   motion,
    prop,
    templates,
 };
@@ -82,10 +79,10 @@ impl Settings {
          };
          let mut commands = bound.rest(start);
          if reused {
-            commands.extend(bound.pin(start, Spring::SWITCH));
+            commands.extend(bound.pin(start, animate.spring));
          }
          if animate.flipped {
-            commands.extend(bound.spring(start, &tree.props, Spring::SWITCH));
+            commands.extend(bound.spring(start, &tree.props, animate.spring));
          }
          commands
       });
@@ -243,7 +240,8 @@ impl Settings {
             ops.extend(self.clear_ops(Field::Eval));
             ops
          },
-         Job::Submit(Field::Code(_)) | Job::Press(Press::PickFile | Press::OpenSite) => Vec::new(),
+         Job::Submit(Field::Code(_))
+         | Job::Press(Press::PickFile | Press::OpenSite | Press::Measure) => Vec::new(),
          Job::Refresh
          | Job::Press(
             Press::SaveCode(_)
@@ -416,7 +414,7 @@ impl Settings {
                animate
                   .worklet
                   .bind(first)
-                  .spring(&old.props, &new.props, Spring::SWITCH);
+                  .spring(&old.props, &new.props, animate.spring);
             self.motion.extend(motion::words(&commands));
          }
       } else {

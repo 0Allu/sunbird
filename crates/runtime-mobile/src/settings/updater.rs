@@ -1,5 +1,6 @@
 //! The Discord update page: what the update brings and what Sunbird checked,
-//! then a progress bar over each step with its size, and the failure or the
+//! then the overall progress over a list of steps that grows as each starts,
+//! each with its own bar as on the site's patcher, and the failure or the
 //! hand-off to Android's installer.
 
 use phoenix_ui_mobile::{
@@ -14,7 +15,6 @@ use crate::{
       self,
       Build,
       Progress,
-      Stage,
       State,
    },
    settings::{
@@ -57,8 +57,12 @@ pub fn sections() -> Vec<Tree> {
       },
       State::Available(build) => offer(&build, &installed),
       State::Running(build, progress) => running(&build, &progress, &installed),
-      State::Failed { build, error } => {
-         card(vec![
+      State::Failed {
+         build,
+         error,
+         progress,
+      } => {
+         let mut kids = vec![
             heading(
                badge(Color::Error.argb(), 52.0, "!"),
                "Update failed",
@@ -66,8 +70,10 @@ pub fn sections() -> Vec<Tree> {
                None,
             ),
             line(&error, Color::Muted.argb()),
-            button("Try again", Press::StartDiscordUpdate),
-         ])
+         ];
+         kids.extend(progress.map(|progress| steps(&progress, true)));
+         kids.push(button("Try again", Press::StartDiscordUpdate));
+         card(kids)
       },
       State::Handed(build) => {
          card(vec![
@@ -122,9 +128,6 @@ fn offer(build: &Build, installed: &str) -> Tree {
 }
 
 fn running(build: &Build, progress: &Progress, installed: &str) -> Tree {
-   let step = progress.steps.get(progress.at);
-   let stage = step.map_or(Stage::Download, |step| step.stage);
-   let action = step.map_or("Getting ready", |step| step.action.as_str());
    let versions = if installed.is_empty() {
       build.version_name.clone()
    } else {
@@ -138,20 +141,20 @@ fn running(build: &Build, progress: &Progress, installed: &str) -> Tree {
       };
       format!("{:.1} MB/s \u{00B7} {left}", speed / f64::from(1 << 20))
    });
-   centered(vec![
-      badge(BLURPLE, 64.0, ICON_RELOAD),
-      column(4.0, vec![
-         center(label("Updating Discord", 20.0, 700, Color::Text.argb())),
-         center(label(&versions, 14.0, 400, Color::Muted.argb())),
-      ]),
-      center(label(
-         &format!("{}%", progress.percent()),
-         44.0,
-         700,
-         BLURPLE,
-      )),
+   card(vec![
+      heading(
+         badge(BLURPLE, 52.0, ICON_RELOAD),
+         "Updating Discord",
+         &versions,
+         Some(label(
+            &format!("{}%", progress.percent()),
+            22.0,
+            700,
+            BLURPLE,
+         )),
+      ),
       column(8.0, vec![
-         bar(progress.fraction(), 12.0),
+         bar(progress.fraction(), 8.0, BLURPLE),
          row(8.0, vec![
             grow(label(
                &format!(
@@ -166,55 +169,85 @@ fn running(build: &Build, progress: &Progress, installed: &str) -> Tree {
             label(&pace, 13.0, 400, Color::Muted.argb()),
          ]),
       ]),
-      center(label(action, 15.0, 600, Color::Text.argb())),
-      row(8.0, vec![
-         stage_chip("Download", Stage::Download, stage),
-         stage_chip("Build", Stage::Build, stage),
-         stage_chip("Install", Stage::Install, stage),
-      ]),
-      center(label(
+      steps(progress, false),
+      line(
          "Keep Discord open, the installer opens when it is ready.",
-         13.0,
-         400,
          Color::Muted.argb(),
-      )),
+      ),
    ])
 }
 
-/// One of the update's three stages, marked done, under way or waiting.
-fn stage_chip(name: &str, this: Stage, at: Stage) -> Tree {
-   let (glyph, text_color, background) = match this.cmp(&at) {
-      std::cmp::Ordering::Less => ("\u{2713} ", GREEN, GREEN & 0x33FF_FFFF),
-      std::cmp::Ordering::Equal => ("", BLURPLE, BLURPLE & 0x33FF_FFFF),
-      std::cmp::Ordering::Greater => ("", Color::Muted.argb(), template_color(0x1F97_979F)),
-   };
-   grow(node(
-      ViewKind::View,
-      vec![
-         (Prop::HEIGHT, Value::F64(36.0)),
-         (Prop::RADIUS, Value::F64(10.0)),
-         (prop!("background"), Value::I64(background)),
-         (prop!("align"), Value::Str("center".to_owned())),
-         (prop!("justify"), Value::Str("center".to_owned())),
-      ],
-      vec![label(&format!("{glyph}{name}"), 14.0, 700, text_color)],
-   ))
+/// The steps begun so far, each with its own bar and state: done in green,
+/// the current one with its bytes or at work, or failed in red.
+fn steps(progress: &Progress, failed: bool) -> Tree {
+   let rows = progress
+      .steps
+      .iter()
+      .enumerate()
+      .take(progress.at + 1)
+      .map(|(index, step)| {
+         let (fraction, state, color) = if index < progress.at {
+            let state = step.size.map_or_else(|| "done".to_owned(), tenths);
+            (1.0, state, GREEN)
+         } else if failed {
+            (
+               fraction_of(progress, index),
+               "failed".to_owned(),
+               Color::Error.argb(),
+            )
+         } else if let Some(size) = step.size {
+            let fetched = progress.fetched(index);
+            (
+               fraction_of(progress, index),
+               format!("{} / {}", tenths(fetched), tenths(size)),
+               BLURPLE,
+            )
+         } else {
+            (0.5, "working\u{2026}".to_owned(), BLURPLE)
+         };
+         let state_color = if color == BLURPLE {
+            Color::Muted.argb()
+         } else {
+            color
+         };
+         column(6.0, vec![
+            row(12.0, vec![
+               grow(label(&step.label, 15.0, 600, Color::Text.argb())),
+               label(&state, 13.0, 400, state_color),
+            ]),
+            bar(fraction, 4.0, color),
+         ])
+      })
+      .collect();
+   column(14.0, rows)
 }
 
-/// A card whose items sit centered.
-fn centered(kids: Vec<Tree>) -> Tree {
-   let mut card = card(kids);
-   card.set(prop!("align"), Some(Value::Str("center".to_owned())));
-   card.set(Prop::PADDING, Some(Value::Rect([20.0, 28.0, 20.0, 24.0])));
-   card.set(Prop::GAP, Some(Value::F64(18.0)));
-   card
+/// How much of download step `index` has arrived, from 0 to 1.
+fn fraction_of(progress: &Progress, index: usize) -> f64 {
+   let size = progress
+      .steps
+      .get(index)
+      .and_then(|step| step.size)
+      .unwrap_or(0);
+   if size == 0 {
+      return 0.0;
+   }
+   #[expect(
+      clippy::cast_precision_loss,
+      reason = "a bar's width needs no byte precision"
+   )]
+   let fraction = progress.fetched(index) as f64 / size as f64;
+   fraction.clamp(0.0, 1.0)
 }
 
-/// A text centered across its parent.
-fn center(mut tree: Tree) -> Tree {
-   tree.set(prop!("width"), Some(Value::Str("fill".to_owned())));
-   tree.set(prop!("textAlign"), Some(Value::Str("center".to_owned())));
-   tree
+/// `bytes` in MB to a tenth, as the site shows them.
+fn tenths(bytes: usize) -> String {
+   #[expect(
+      clippy::cast_precision_loss,
+      reason = "megabytes to a tenth need no byte precision"
+   )]
+   let megabytes = bytes as f64 / f64::from(1 << 20);
+   format!("{megabytes:.1} MB")
 }
 
 /// `bytes` in MB, or KB under one.

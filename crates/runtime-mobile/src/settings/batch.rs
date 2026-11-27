@@ -15,6 +15,7 @@ use phoenix_ui_mobile::{
    ViewKind,
    decode,
    encode,
+   prop,
 };
 use phoenix_wire::{
    DispatchEvent,
@@ -114,8 +115,20 @@ pub fn filter_dispatch(frame: &[u8]) -> Action {
             } else {
                (*event == Prop::SUBMIT.key()).then_some(Job::Submit(field))
             }
-         } else if let Some(press) = state.handlers.get(node) {
-            (*event == Prop::PRESS.key()).then_some(Job::Press(*press))
+         } else if let Some(&press) = state.handlers.get(node) {
+            if press == Press::Measure {
+               let width = payload.field(prop!("width").key()).and_then(|width| {
+                  match width {
+                     Value::F64(width) => Some(*width),
+                     Value::I32(width) => Some(f64::from(*width)),
+                     _ => None,
+                  }
+               });
+               (*event == prop!("layout").key() && width.is_some_and(super::cards::measured))
+                  .then_some(Job::Refresh)
+            } else {
+               (*event == Prop::PRESS.key()).then_some(Job::Press(press))
+            }
          } else {
             continue;
          };

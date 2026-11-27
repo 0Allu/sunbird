@@ -186,6 +186,7 @@ fn press(pressed: Press) {
       | Press::OpenConsole
       | Press::OpenPlugin(_)
       | Press::OpenDiscordUpdate
+      | Press::Measure
       | Press::Back => {},
    }
 }

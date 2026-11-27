@@ -2,10 +2,16 @@
 //! has no captured layout for. Phoenix's own groups shrink children they do
 //! not know, so these stretch themselves.
 
+use std::sync::atomic::{
+   AtomicU64,
+   Ordering,
+};
+
 use phoenix_ui_mobile::{
    Prop,
    Props,
    ViewKind,
+   motion::Spring,
    prop,
    templates,
 };
@@ -18,6 +24,7 @@ use crate::settings::{
       template_color,
    },
    tree::{
+      Animate,
       Tree,
       text,
    },
@@ -30,6 +37,21 @@ pub const WHITE: i64 = 0xFFFF_FFFF;
 /// captured dark layouts have them; [`template_color`] maps them for light.
 const SURFACE: i64 = 0x1497_979F;
 const TRACK: i64 = 0x1F97_979F;
+/// Damped past critical (2 * sqrt(200) is about 28.3), so a bar eases into
+/// each new width without overshooting and never moves back.
+const EASE: Spring = Spring {
+   mass:      1.0,
+   stiffness: 200.0,
+   damping:   30.0,
+};
+/// A bar track's width in dp, as its `layout` event last gave it. Every bar
+/// spans its card, so one width serves them all.
+static BAR_WIDTH: AtomicU64 = AtomicU64::new(0);
+
+/// Records a bar track's width, and whether it changed.
+pub fn measured(width: f64) -> bool {
+   width > 0.0 && BAR_WIDTH.swap(width.to_bits(), Ordering::Relaxed) != width.to_bits()
+}
 
 pub fn card(kids: Vec<Tree>) -> Tree {
    node(
@@ -204,21 +226,44 @@ fn pressable(mut props: Props, content: Tree, name: &str, press: Press) -> Tree 
    tree
 }
 
-/// A bar filled `fraction` of the way, as two flex weights.
-pub fn bar(fraction: f64, height: f64) -> Tree {
-   let part = |weight: f64, color: i64| {
-      node(
-         ViewKind::View,
-         vec![
-            (prop!("flex"), Value::F64(weight)),
-            (Prop::HEIGHT, Value::F64(height)),
-            (prop!("background"), Value::I64(color)),
-            (Prop::RADIUS, Value::F64(height / 2.0)),
-         ],
-         Vec::new(),
-      )
+/// A bar filled `fraction` of the way in `color`. Once a track has reported
+/// its width, the fill has one in dp and springs to each new width on the
+/// host; until then it is two flex weights.
+pub fn bar(fraction: f64, height: f64, color: i64) -> Tree {
+   let fill_props = |width: (Prop, Value)| {
+      vec![
+         width,
+         (Prop::HEIGHT, Value::F64(height)),
+         (prop!("background"), Value::I64(color)),
+         (Prop::RADIUS, Value::F64(height / 2.0)),
+      ]
    };
-   node(
+   let track = f64::from_bits(BAR_WIDTH.load(Ordering::Relaxed));
+   let kids = if track > 0.0 {
+      let props = fill_props((prop!("width"), Value::F64(track * fraction)));
+      let mut fill = node(ViewKind::View, props.clone(), Vec::new());
+      fill.animate = Some(Animate {
+         worklet: &templates().knob_worklet,
+         other:   props,
+         flipped: false,
+         spring:  EASE,
+      });
+      vec![fill]
+   } else {
+      vec![
+         node(
+            ViewKind::View,
+            fill_props((prop!("flex"), Value::F64(fraction))),
+            Vec::new(),
+         ),
+         node(
+            ViewKind::View,
+            vec![(prop!("flex"), Value::F64(1.0 - fraction))],
+            Vec::new(),
+         ),
+      ]
+   };
+   let mut bar = node(
       ViewKind::View,
       vec![
          (prop!("direction"), Value::Str("row".to_owned())),
@@ -227,9 +272,12 @@ pub fn bar(fraction: f64, height: f64) -> Tree {
          (Prop::RADIUS, Value::F64(height / 2.0)),
          (prop!("clip"), Value::Bool(true)),
          (prop!("background"), Value::I64(template_color(TRACK))),
+         (Prop::ON, Value::Arr(vec![text("layout")])),
       ],
-      vec![part(fraction, BLURPLE), part(1.0 - fraction, 0)],
-   )
+      kids,
+   );
+   bar.press = Some(Press::Measure);
+   bar
 }
 
 pub fn grow(mut tree: Tree) -> Tree {

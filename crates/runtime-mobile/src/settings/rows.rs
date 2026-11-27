@@ -3,7 +3,10 @@
 use phoenix_ui_mobile::{
    Prop,
    Props,
-   motion::Worklet,
+   motion::{
+      Spring,
+      Worklet,
+   },
    templates,
 };
 use phoenix_wire::Value;
@@ -194,6 +197,7 @@ fn animate(node: &mut Tree, worklet: &'static Worklet, off: &Props, on: bool) {
       worklet,
       other,
       flipped: false,
+      spring: Spring::SWITCH,
    });
 }
 

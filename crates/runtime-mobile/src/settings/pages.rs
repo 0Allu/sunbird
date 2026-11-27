@@ -214,7 +214,7 @@ fn discord_item() -> Option<Tree> {
             let step = progress
                .steps
                .get(progress.at)
-               .map_or_default(|step| step.action.clone());
+               .map_or_default(|step| step.label.clone());
             (
                format!("Discord {}", build.version_name),
                format!("{step} \u{00B7} {}%", progress.percent()),
@@ -245,7 +245,7 @@ fn discord_item() -> Option<Tree> {
          &subtitle,
          Some(pill(pill_text, Press::OpenDiscordUpdate)),
       )];
-      kids.extend(progress.map(|fraction| bar(fraction, 6.0)));
+      kids.extend(progress.map(|fraction| bar(fraction, 6.0, BLURPLE)));
       Some(column(12.0, kids))
    }
    #[cfg(not(target_os = "android"))]

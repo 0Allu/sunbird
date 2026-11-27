@@ -109,6 +109,8 @@ enum Press {
    /// The page that updates Discord itself, and starting that update.
    OpenDiscordUpdate,
    StartDiscordUpdate,
+   /// A progress bar's track, which reports its width for its fill's spring.
+   Measure,
    ToggleStaff,
    ToggleRemoteShell,
    Back,

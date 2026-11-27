@@ -99,19 +99,28 @@ pub struct Progress {
 
 #[derive(Clone)]
 pub struct Step {
-   /// What it does, like "Downloading native libraries".
-   pub action: String,
-   pub stage:  Stage,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Stage {
-   Download,
-   Build,
-   Install,
+   /// What it does, like "Download native libraries".
+   pub label: String,
+   /// The bytes a download fetches.
+   pub size:  Option<usize>,
 }
 
 impl Progress {
+   /// The bytes step `index` has fetched.
+   #[must_use]
+   pub fn fetched(&self, index: usize) -> usize {
+      let before = self.steps[..index.min(self.steps.len())]
+         .iter()
+         .filter_map(|step| step.size)
+         .sum::<usize>();
+      let size = self
+         .steps
+         .get(index)
+         .and_then(|step| step.size)
+         .unwrap_or(0);
+      self.done.saturating_sub(before).min(size)
+   }
+
    /// How much of the download is done, from 0 to 1.
    #[must_use]
    pub fn fraction(&self) -> f64 {
@@ -168,8 +177,10 @@ pub enum State {
    Available(Build),
    Running(Build, Progress),
    Failed {
-      build: Build,
-      error: String,
+      build:    Build,
+      error:    String,
+      /// How far it got, which the page marks the failed step in.
+      progress: Option<Progress>,
    },
    /// Android's installer has it.
    Handed(Build),
@@ -286,7 +297,11 @@ pub fn start() {
                let build = build.clone();
                drop(state);
                if let Err(err) = crate::install::open(&path) {
-                  set(State::Failed { build, error: err });
+                  set(State::Failed {
+                     build,
+                     error: err,
+                     progress: None,
+                  });
                }
                return;
             }
@@ -297,8 +312,8 @@ pub fn start() {
       };
       *state = State::Running(build.clone(), Progress {
          steps:   vec![Step {
-            action: "Getting ready".to_owned(),
-            stage:  Stage::Download,
+            label: "Get ready".to_owned(),
+            size:  None,
          }],
          at:      0,
          done:    0,
@@ -315,7 +330,15 @@ pub fn start() {
          Ok(()) => set(State::Handed(build)),
          Err(error) => {
             log::error!("discord update: {error}");
-            set(State::Failed { build, error });
+            let progress = match state() {
+               State::Running(_, progress) => Some(progress),
+               _ => None,
+            };
+            set(State::Failed {
+               build,
+               error,
+               progress,
+            });
          },
       }
    });
@@ -335,17 +358,6 @@ fn label(name: &str) -> String {
    }
 }
 
-/// What downloading a split is called on the page.
-fn download_action(name: &str) -> String {
-   match name.strip_prefix("config.") {
-      None => "Downloading Discord".to_owned(),
-      Some(language) if label(name).starts_with("Language") => {
-         format!("Downloading the {language} language pack")
-      },
-      Some(_) => format!("Downloading {}", label(name).to_lowercase()),
-   }
-}
-
 fn update(build: &Build) -> Result<(), String> {
    let installed = installed()?;
    let names = wanted(build)?;
@@ -354,20 +366,24 @@ fn update(build: &Build) -> Result<(), String> {
          .iter()
          .map(|name| {
             Step {
-               action: download_action(name),
-               stage:  Stage::Download,
+               label: if name == "base" {
+                  "Download Discord".to_owned()
+               } else {
+                  format!("Download {}", label(name).to_lowercase())
+               },
+               size:  Some(build.splits[name].size),
             }
          })
          .chain(
             [
-               ("Downloading the Sunbird loader", Stage::Download),
-               ("Building and signing the update", Stage::Build),
-               ("Opening Android's installer", Stage::Install),
+               "Download the Sunbird loader",
+               "Patch and sign",
+               "Open the installer",
             ]
-            .map(|(action, stage)| {
+            .map(|label| {
                Step {
-                  action: action.to_owned(),
-                  stage,
+                  label: label.to_owned(),
+                  size:  None,
                }
             }),
          )
