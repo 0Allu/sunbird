@@ -72,6 +72,23 @@ impl Isa {
       }
    }
 
+   /// The registers a call may change, a bit per [`Reg`].
+   #[must_use]
+   pub const fn caller_saved(self) -> u32 {
+      match self {
+         // rax, rcx, rdx, rsi, rdi, r8 to r11.
+         #[cfg(any(target_arch = "x86_64", target_os = "macos"))]
+         Self::X86_64 { win64: false } => 0x0FC7,
+         // rax, rcx, rdx, r8 to r11.
+         #[cfg(any(target_arch = "x86_64", target_os = "macos"))]
+         Self::X86_64 { win64: true } => 0x0F07,
+         // x0 to x18 and the link register.
+         Self::Aarch64 => 0x4007_FFFF,
+         // r0 to r3, r12 and the link register.
+         Self::Thumb2 => 0x500F,
+      }
+   }
+
    /// The register a function returns an integer in.
    #[must_use]
    pub const fn ret(self) -> Reg {
@@ -204,6 +221,10 @@ pub struct Step {
    /// The base register a pre- or post-indexed access, `push` or `pop` moves
    /// after it, and by how much.
    pub writeback: Option<(Reg, isize)>,
+   /// Every general-purpose register the instruction writes, a bit per
+   /// [`Reg`], whatever `op` it lowered to. The stack pointer's moves are in
+   /// `writeback` or `op` instead, and Thumb-2 leaves this empty.
+   pub writes:    u32,
    pub native:    Native,
 }
 
@@ -249,10 +270,14 @@ fn x86(image: &Image<'_>, code: &[u8], ip: usize, limit: usize) -> Vec<Step> {
       DecoderOptions,
       FlowControl,
       Instruction,
+      InstructionInfoFactory,
       Mnemonic,
+      OpAccess,
       OpKind,
       Register,
    };
+
+   const SP: Reg = 4;
 
    let gpr = |register: Register| -> Option<Reg> {
       let full = register.full_register();
@@ -261,6 +286,7 @@ fn x86(image: &Image<'_>, code: &[u8], ip: usize, limit: usize) -> Vec<Step> {
    let addr = |value: u64| usize::try_from(value).ok();
    let mut decoder = Decoder::with_ip(64, code, ip as u64, DecoderOptions::NONE);
    let mut instruction = Instruction::default();
+   let mut info = InstructionInfoFactory::new();
    let mut steps = Vec::new();
    while steps.len() < limit && decoder.can_decode() {
       decoder.decode_out(&mut instruction);
@@ -440,11 +466,40 @@ fn x86(image: &Image<'_>, code: &[u8], ip: usize, limit: usize) -> Vec<Step> {
             })
          },
       };
+      let writes = info
+         .info(&instruction)
+         .used_registers()
+         .iter()
+         .filter(|used| {
+            matches!(
+               used.access(),
+               OpAccess::Write
+                  | OpAccess::CondWrite
+                  | OpAccess::ReadWrite
+                  | OpAccess::ReadCondWrite
+            )
+         })
+         .filter_map(|used| gpr(used.register()))
+         .filter(|&reg| reg != SP)
+         .fold(0, |writes, reg| writes | 1 << reg);
+      let moves_sp = instruction.op_count() == 2
+         && instruction.op0_register() == Register::RSP
+         && !matches!(instruction.op1_kind(), OpKind::Register | OpKind::Memory);
+      let writeback = match instruction.mnemonic() {
+         Mnemonic::Push => Some((SP, -8)),
+         Mnemonic::Pop => Some((SP, 8)),
+         Mnemonic::Sub if moves_sp => {
+            Some((SP, -(instruction.immediate(1).cast_signed() as isize)))
+         },
+         Mnemonic::Add if moves_sp => Some((SP, instruction.immediate(1).cast_signed() as isize)),
+         _ => None,
+      };
       steps.push(Step {
          at,
          len: instruction.len() as u8,
          op,
-         writeback: None,
+         writeback,
+         writes,
          native: Native::X86(instruction.mnemonic()),
       });
    }
@@ -462,6 +517,7 @@ fn aarch64(code: &[u8], pc: usize) -> Vec<Step> {
    // The last `adrp` each register got, by step index, and its page.
    let mut pages = [(usize::MAX, 0usize); 32];
    let mut steps = Vec::with_capacity(code.len() / 4);
+   let words = code.as_chunks::<4>().0;
    for (index, (at, insn)) in arm64::decode_all(code, pc).enumerate() {
       let page = |rn: Reg| {
          let (set, page) = pages[usize::from(rn)];
@@ -592,10 +648,60 @@ fn aarch64(code: &[u8], pc: usize) -> Vec<Step> {
          len: 4,
          op,
          writeback,
+         writes: words
+            .get(index)
+            .map_or(0, |&word| arm64_writes(u32::from_le_bytes(word))),
          native: Native::Arm64(insn),
       });
    }
    steps
+}
+
+/// The general-purpose registers an arm64 instruction writes, `x31` aside
+/// since it is `sp` or the zero register. Loads into SIMD registers and FP
+/// data processing write none, conversions to an integer register aside.
+const fn arm64_writes(word: u32) -> u32 {
+   const fn bit(reg: u32) -> u32 {
+      if reg == 31 { 0 } else { 1 << reg }
+   }
+   let rd = bit(word & 0x1F);
+   let rt2 = bit((word >> 10) & 0x1F);
+   let rs = bit((word >> 16) & 0x1F);
+   let load = word & 0x40_0000 != 0;
+   match (word >> 25) & 0xF {
+      // Data processing, immediate and register.
+      0b1000 | 0b1001 | 0b0101 | 0b1101 => rd,
+      // `mrs`, and `bl`/`blr`'s link register.
+      0b1010 | 0b1011 => {
+         if word & 0xFFF0_0000 == 0xD530_0000 {
+            rd
+         } else if word & 0xFC00_0000 == 0x9400_0000 || word & 0xFFFF_FC1F == 0xD63F_0000 {
+            bit(30)
+         } else {
+            0
+         }
+      },
+      // Loads and stores, the vector ones writing no general register.
+      class if class & 0b0101 == 0b0100 => {
+         if word & 0x0400_0000 != 0 {
+            0
+         } else if word & 0x3B00_0000 == 0x1800_0000 {
+            if word >> 30 == 3 { 0 } else { rd }
+         } else if word & 0x3A00_0000 == 0x2800_0000 {
+            if load { rd | rt2 } else { 0 }
+         } else if word & 0x3F00_0000 == 0x0800_0000 {
+            // Exclusives and compare-and-swaps write their status or old value.
+            rd | rs | if load { rt2 } else { 0 }
+         } else if word & 0xC0_0000 == 0 && word & 0x20_0C00 != 0x20_0000 {
+            0
+         } else {
+            rd
+         }
+      },
+      // Conversions from a floating-point register to an integer one.
+      _ if word & 0x5F20_FC00 == 0x1E20_0000 && matches!((word >> 16) & 7, 0 | 1 | 4 | 5 | 6) => rd,
+      _ => 0,
+   }
 }
 
 /// The forms [`arm64::decode`] leaves as [`Insn::Other`] that track stack and

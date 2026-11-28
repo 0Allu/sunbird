@@ -11,6 +11,7 @@
 //! reference tables, calls and address loads, so each query is a binary
 //! search.
 
+pub mod flow;
 pub mod op;
 mod thumb;
 

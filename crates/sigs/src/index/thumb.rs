@@ -103,6 +103,7 @@ pub fn decode(image: &Image<'_>, code: &[u8], start: usize) -> Vec<Step> {
          len: if wide { 4 } else { 2 },
          op,
          writeback,
+         writes: 0,
          native: Native::Thumb(native),
       });
       index += if wide { 2 } else { 1 };
