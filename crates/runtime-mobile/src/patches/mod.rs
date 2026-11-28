@@ -317,10 +317,18 @@ pub struct Draft {
 }
 
 impl Draft {
+   /// Drops `WPatch` props, which index the words table of the batch the
+   /// template came in, and the iOS host rejects the whole batch when one
+   /// points elsewhere.
    fn from_node(node: &Node) -> Self {
       Self {
          kind:  node.kind.clone(),
-         props: node.props.clone(),
+         props: node
+            .props
+            .iter()
+            .filter(|(_, value)| !matches!(value, Value::WPatch { .. }))
+            .cloned()
+            .collect(),
          kids:  node.kids.iter().map(Self::from_node).collect(),
          press: None,
          src:   node.src,
