@@ -109,5 +109,5 @@ jobs:
           git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$branch"
           if [ "$(gh pr view "$branch" --json state --jq .state 2>/dev/null)" != OPEN ]; then
             gh pr create --head "$branch" --base main --title "web: offer discord $VERSION" \
-              --body "Discord $VERSION passed the release's checks: Discord's certificate on every split, \`sigscan check\`, props.in and the host name table. Phones offer it as an update once this lands."
+              --body "Discord $VERSION is signed by Discord, passes \`sigscan check\`, keeps the props.in indices and has every host name the runtime uses."
           fi
