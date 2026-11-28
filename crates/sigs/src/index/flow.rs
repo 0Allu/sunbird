@@ -1,16 +1,18 @@
 //! Register values through a function's steps, walked forward once.
 //!
-//! - A call clobbers the ISA's caller-saved registers.
+//! - A call clobbers the ISA's caller-saved registers, through a register or a
+//!   slot too.
 //! - A register an instruction writes without its [`Op`] saying how becomes
 //!   [`Val::Unknown`].
 //! - A branch target starts from what every earlier branch to it agrees on, met
-//!   with the fall-through unless an unconditional jump or return ends it. Back
-//!   edges and jump tables are not followed.
+//!   with the fall-through unless a jump or return ends it. Back edges and jump
+//!   tables end the fall-through but are not followed.
 
 use std::collections::HashMap;
 
 use crate::index::{
    Isa,
+   Native,
    Op,
    Reg,
    Step,
@@ -64,6 +66,33 @@ impl Val {
 /// Each register's value, indexed by [`Reg`].
 pub type Regs = [Val; 32];
 
+/// A direct call, or one [`Op`] leaves as [`Op::Other`] since its target
+/// is only in a register or memory.
+const fn calls(step: &Step) -> bool {
+   match step.native {
+      _ if matches!(step.op, Op::Call(_)) => true,
+      #[cfg(any(target_arch = "x86_64", target_os = "macos"))]
+      Native::X86(iced_x86::Mnemonic::Call) => true,
+      Native::Arm64(phoenix_hook::arm64::Insn::Blr { .. }) => true,
+      // `blx rm`.
+      Native::Thumb(word) => word >> 16 == 0 && word & 0xFF87 == 0x4780,
+      _ => false,
+   }
+}
+
+/// An indirect jump, a jump table or a tail call through a register, which
+/// [`Op`] leaves as [`Op::Other`].
+const fn jumps_away(step: &Step) -> bool {
+   match step.native {
+      #[cfg(any(target_arch = "x86_64", target_os = "macos"))]
+      Native::X86(iced_x86::Mnemonic::Jmp) => matches!(step.op, Op::Other),
+      Native::Arm64(phoenix_hook::arm64::Insn::Br { .. }) => true,
+      // `bx rm`.
+      Native::Thumb(word) => word >> 16 == 0 && word & 0xFF87 == 0x4700,
+      _ => false,
+   }
+}
+
 fn meet(into: &mut Regs, other: &Regs) {
    for (mine, theirs) in into.iter_mut().zip(other) {
       if mine != theirs {
@@ -116,13 +145,6 @@ pub fn walk(isa: Isa, steps: &[Step], mut visit: impl FnMut(usize, &Step, &Regs)
             set(first, of(base).loaded(offset));
             set(second, of(base).loaded(offset + isize::from(size)));
          },
-         Op::Call(_) => {
-            for (reg, val) in regs.iter_mut().enumerate() {
-               if isa.caller_saved() & 1 << reg != 0 {
-                  *val = Val::Unknown;
-               }
-            }
-         },
          Op::Branch(target) => {
             incoming
                .entry(target)
@@ -137,7 +159,14 @@ pub fn walk(isa: Isa, steps: &[Step], mut visit: impl FnMut(usize, &Step, &Regs)
             ended = true;
          },
          Op::Ret => ended = true,
-         _ => {},
+         _ => ended = jumps_away(step),
+      }
+      if calls(step) {
+         for (reg, val) in regs.iter_mut().enumerate() {
+            if isa.caller_saved() & 1 << reg != 0 {
+               *val = Val::Unknown;
+            }
+         }
       }
       if let Some((reg, by)) = step.writeback {
          regs[usize::from(reg)] = before[usize::from(reg)].offset(by);
