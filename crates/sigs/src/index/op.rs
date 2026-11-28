@@ -164,6 +164,29 @@ pub enum Op {
    Other,
 }
 
+impl Op {
+   /// The register a store or pair store writes at `offset`, with the store's
+   /// size, `(reg, offset, size)`.
+   #[must_use]
+   pub const fn stored_reg(self) -> Option<(Reg, isize, u8)> {
+      match self {
+         Self::Store {
+            value: Value::Reg(reg),
+            offset,
+            size,
+            ..
+         }
+         | Self::StorePair {
+            values: [reg, _],
+            offset,
+            size,
+            ..
+         } => Some((reg, offset, size)),
+         _ => None,
+      }
+   }
+}
+
 /// What a store writes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Value {
